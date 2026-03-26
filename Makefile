@@ -14,6 +14,6 @@ PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-#old variant, remove then
+#old variant, Silersen
 #PG_CPPFLAGS  = -I$(libpq_srcdir)
 #SHLIB_LINK   = $(libpq)
