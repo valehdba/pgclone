@@ -82,6 +82,18 @@ SELECT pgx_clone_table(
 );
 ```
 
+### Clone a table with a different name on target
+
+```sql
+SELECT pgx_clone_table(
+    'host=source-server dbname=mydb user=postgres',
+    'public',
+    'customers',        -- source table name
+    true,               -- include data
+    'customers_backup'  -- target table name (will be created as customers_backup)
+);
+```
+
 ### Clone an entire schema (tables + views + functions + sequences)
 
 ```sql
