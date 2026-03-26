@@ -325,30 +325,50 @@ pgx_clone_table(PG_FUNCTION_ARGS)
                         schema_name, table_name)));
     }
 
-    /* Execute DDL locally */
-    SPI_connect();
-
-    /* Ensure target schema exists */
-    resetStringInfo(&buf);
-    appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
-                     quote_identifier(schema_name));
-    pgx_clone_exec_local(buf.data);
-
-    /* Create the table */
-    pgx_clone_exec_local(PQgetvalue(res, 0, 0));
-    PQclear(res);
-
-    /* ---- Step 2: Copy data using COPY protocol if requested ---- */
     if (include_data)
     {
-        PGconn *local_conn;
-        int64   row_count;
+        /*
+         * When copying data, we use a loopback libpq connection for
+         * EVERYTHING (DDL + COPY). This is because SPI runs inside
+         * the caller's transaction, and a separate libpq connection
+         * cannot see uncommitted SPI work. By using libpq for both
+         * the CREATE TABLE and the COPY, we ensure the table is
+         * visible when COPY FROM STDIN starts.
+         */
+        PGconn     *local_conn;
+        PGresult   *local_res;
+        int64       row_count;
+        char       *ddl;
 
-        /* SPI_finish before opening local libpq connection */
-        SPI_finish();
+        ddl = pstrdup(PQgetvalue(res, 0, 0));
+        PQclear(res);
 
-        /* Open a loopback libpq connection for COPY FROM STDIN */
+        /* Open loopback connection */
         local_conn = pgx_clone_connect_local();
+
+        /* Create schema via loopback */
+        resetStringInfo(&buf);
+        appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
+                         quote_identifier(schema_name));
+        local_res = PQexec(local_conn, buf.data);
+        PQclear(local_res);
+
+        /* Create table via loopback */
+        local_res = PQexec(local_conn, ddl);
+        if (PQresultStatus(local_res) != PGRES_COMMAND_OK)
+        {
+            char *ddl_errmsg = pstrdup(PQerrorMessage(local_conn));
+            PQclear(local_res);
+            PQfinish(local_conn);
+            PQfinish(source_conn);
+            pfree(ddl);
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgx_clone: failed to create table locally: %s",
+                            ddl_errmsg)));
+        }
+        PQclear(local_res);
+        pfree(ddl);
 
         /* Stream data: source COPY TO STDOUT -> local COPY FROM STDIN */
         row_count = pgx_clone_copy_data(source_conn, local_conn,
@@ -363,6 +383,19 @@ pgx_clone_table(PG_FUNCTION_ARGS)
 
         PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
     }
+
+    /* Structure only — use SPI (no COPY needed) */
+    SPI_connect();
+
+    /* Ensure target schema exists */
+    resetStringInfo(&buf);
+    appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
+                     quote_identifier(schema_name));
+    pgx_clone_exec_local(buf.data);
+
+    /* Create the table */
+    pgx_clone_exec_local(PQgetvalue(res, 0, 0));
+    PQclear(res);
 
     SPI_finish();
     PQfinish(source_conn);
