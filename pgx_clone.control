@@ -1,0 +1,6 @@
+# pgx_clone extension
+comment = 'Clone PostgreSQL databases, schemas, tables, and functions between hosts'
+default_version = '0.1.0'
+module_pathname = '$libdir/pgx_clone'
+relocatable = false
+superuser = true
