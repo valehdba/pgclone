@@ -17,40 +17,19 @@ A PostgreSQL extension written in C for cloning databases, schemas, tables, and 
 #### Debian / Ubuntu
 
 ```bash
-# PostgreSQL 18 (latest)
 sudo apt-get install postgresql-server-dev-18 libpq-dev build-essential
-
-# PostgreSQL 17
-sudo apt-get install postgresql-server-dev-17 libpq-dev build-essential
-
-# PostgreSQL 16
-sudo apt-get install postgresql-server-dev-16 libpq-dev build-essential
-
-# PostgreSQL 15
-sudo apt-get install postgresql-server-dev-15 libpq-dev build-essential
-
-# PostgreSQL 14
-sudo apt-get install postgresql-server-dev-14 libpq-dev build-essential
 ```
 
 #### RHEL / CentOS / Rocky / AlmaLinux
 
 ```bash
-# PostgreSQL 18 (latest)
 sudo dnf install postgresql18-devel libpq-devel gcc make
-
-# PostgreSQL 17
-sudo dnf install postgresql17-devel libpq-devel gcc make
-
-# PostgreSQL 16
-sudo dnf install postgresql16-devel libpq-devel gcc make
 ```
 
 #### macOS (Homebrew)
 
 ```bash
 brew install postgresql@18
-# or: brew install postgresql@17, postgresql@16, etc.
 ```
 
 ### Build and install
