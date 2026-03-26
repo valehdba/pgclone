@@ -17,8 +17,8 @@
 #include "pgstat.h"
 #include "catalog/pg_type.h"
 #include "utils/syscache.h"
-#include "catalog/pg_database.h"
 #include "utils/guc.h"
+#include "commands/dbcommands.h"
 
 PG_MODULE_MAGIC;
 
