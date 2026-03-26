@@ -19,8 +19,75 @@
 #include "utils/syscache.h"
 #include "utils/guc.h"
 #include "commands/dbcommands.h"
+#include "utils/jsonb.h"
 
 PG_MODULE_MAGIC;
+
+/* ---------------------------------------------------------------
+ * Clone options struct — controls what gets cloned beyond the
+ * table structure and data.
+ * --------------------------------------------------------------- */
+typedef struct CloneOptions
+{
+    bool include_indexes;
+    bool include_constraints;
+    bool include_triggers;
+} CloneOptions;
+
+/* Default: everything enabled */
+static CloneOptions
+pgx_clone_default_options(void)
+{
+    CloneOptions opts;
+    opts.include_indexes     = true;
+    opts.include_constraints = true;
+    opts.include_triggers    = true;
+    return opts;
+}
+
+/* ---------------------------------------------------------------
+ * Parse a JSON options string like:
+ *   {"indexes": false, "constraints": true, "triggers": false}
+ *
+ * Missing keys default to true. Simple parser — no external deps.
+ * --------------------------------------------------------------- */
+static CloneOptions
+pgx_clone_parse_options(const char *json_str)
+{
+    CloneOptions opts = pgx_clone_default_options();
+
+    if (json_str == NULL || json_str[0] == '\0')
+        return opts;
+
+    /* Look for "indexes": false */
+    if (strstr(json_str, "\"indexes\"") != NULL ||
+        strstr(json_str, "\"indexes\" ") != NULL)
+    {
+        if (strstr(json_str, "\"indexes\": false") != NULL ||
+            strstr(json_str, "\"indexes\":false") != NULL)
+            opts.include_indexes = false;
+    }
+
+    /* Look for "constraints": false */
+    if (strstr(json_str, "\"constraints\"") != NULL ||
+        strstr(json_str, "\"constraints\" ") != NULL)
+    {
+        if (strstr(json_str, "\"constraints\": false") != NULL ||
+            strstr(json_str, "\"constraints\":false") != NULL)
+            opts.include_constraints = false;
+    }
+
+    /* Look for "triggers": false */
+    if (strstr(json_str, "\"triggers\"") != NULL ||
+        strstr(json_str, "\"triggers\" ") != NULL)
+    {
+        if (strstr(json_str, "\"triggers\": false") != NULL ||
+            strstr(json_str, "\"triggers\":false") != NULL)
+            opts.include_triggers = false;
+    }
+
+    return opts;
+}
 
 /* ---------------------------------------------------------------
  * Internal helper: connect to a remote PostgreSQL host
@@ -116,8 +183,6 @@ pgx_clone_exec_conn(PGconn *conn, const char *query)
 
 /* ---------------------------------------------------------------
  * Internal helper: get a libpq connection to the LOCAL database.
- * This is needed because SPI cannot handle COPY FROM STDIN.
- * We connect via the unix socket to the current database.
  * --------------------------------------------------------------- */
 static PGconn *
 pgx_clone_connect_local(void)
@@ -153,10 +218,6 @@ pgx_clone_connect_local(void)
 
 /* ---------------------------------------------------------------
  * Internal helper: stream data from source to target using COPY.
- *
- * Uses COPY TO STDOUT on source and COPY FROM STDIN on target,
- * streaming data chunk by chunk without loading it all into memory.
- * This is dramatically faster than row-by-row INSERT.
  * --------------------------------------------------------------- */
 static int64
 pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
@@ -170,7 +231,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
     int64           bytes_transferred = 0;
     int64           row_count = 0;
 
-    /* ---- Start COPY OUT on source ---- */
+    /* Start COPY OUT on source */
     initStringInfo(&cmd);
     appendStringInfo(&cmd,
         "COPY %s.%s TO STDOUT WITH (FORMAT text)",
@@ -190,7 +251,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
     }
     PQclear(res);
 
-    /* ---- Start COPY IN on local ---- */
+    /* Start COPY IN on local */
     resetStringInfo(&cmd);
     appendStringInfo(&cmd,
         "COPY %s.%s FROM STDIN WITH (FORMAT text)",
@@ -205,7 +266,6 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
         char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
         PQclear(res);
 
-        /* Cancel the source COPY */
         PQgetCopyData(source_conn, &buf, 0);
         if (buf) PQfreemem(buf);
 
@@ -215,7 +275,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
     }
     PQclear(res);
 
-    /* ---- Stream data from source -> local ---- */
+    /* Stream data from source -> local */
     while ((ret = PQgetCopyData(source_conn, &buf, 0)) > 0)
     {
         if (PQputCopyData(local_conn, buf, ret) != 1)
@@ -231,11 +291,8 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
         bytes_transferred += ret;
         PQfreemem(buf);
-
-        /* Count rows (each line in text format = 1 row) */
         row_count++;
 
-        /* Allow interrupt check periodically */
         if (row_count % 50000 == 0)
         {
             CHECK_FOR_INTERRUPTS();
@@ -255,7 +312,6 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
                         copy_errmsg)));
     }
 
-    /* End COPY on local (NULL = success) */
     if (PQputCopyEnd(local_conn, NULL) != 1)
     {
         char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
@@ -265,7 +321,6 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
                         copy_errmsg)));
     }
 
-    /* Get the final result from COPY */
     res = PQgetResult(local_conn);
     if (PQresultStatus(res) != PGRES_COMMAND_OK)
     {
@@ -277,7 +332,6 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
                         copy_errmsg)));
     }
 
-    /* Extract actual row count from COPY result */
     row_count = atol(PQcmdTuples(res));
     PQclear(res);
 
@@ -286,11 +340,6 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
 /* ---------------------------------------------------------------
  * Internal helper: clone indexes for a table from source.
- *
- * Fetches all index definitions using pg_get_indexdef() and
- * replaces the source table name with the target table name
- * if they differ. Skips indexes that back PRIMARY KEY or UNIQUE
- * constraints (those are created by pgx_clone_constraints).
  * --------------------------------------------------------------- */
 static int
 pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
@@ -368,13 +417,6 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
 
 /* ---------------------------------------------------------------
  * Internal helper: clone constraints for a table from source.
- *
- * Handles: PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY constraints.
- * Uses pg_get_constraintdef() to get portable definitions.
- * Creates them in dependency order: PK -> UNIQUE -> CHECK -> FK.
- *
- * FK constraints that fail (e.g. referenced table not yet cloned)
- * are logged as WARNINGs and skipped — they can be retried later.
  * --------------------------------------------------------------- */
 static int
 pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
@@ -432,10 +474,6 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
 
 /* ---------------------------------------------------------------
  * Internal helper: clone triggers for a table from source.
- *
- * Fetches trigger definitions using pg_get_triggerdef() and
- * replaces the source table name if target differs.
- * Skips internal triggers (created by constraints).
  * --------------------------------------------------------------- */
 static int
 pgx_clone_triggers(PGconn *source_conn, PGconn *target_conn,
@@ -509,12 +547,17 @@ pgx_clone_triggers(PGconn *source_conn, PGconn *target_conn,
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_table(source_conninfo, schema, tablename, include_data, target_tablename)
+ * FUNCTION: pgx_clone_table
  *
- * Clones a single table (structure + optionally data) from a remote
- * host to the local database. If target_tablename is provided, the
- * table will be created with that name instead of the source name.
- * Also clones indexes, constraints, and triggers.
+ * Overloads:
+ *   pgx_clone_table(conninfo, schema, table, include_data)
+ *   pgx_clone_table(conninfo, schema, table, include_data, target_name)
+ *   pgx_clone_table(conninfo, schema, table, include_data, target_name, options_json)
+ *   pgx_clone_table_ex(conninfo, schema, table, include_data, target_name,
+ *                      include_indexes, include_constraints, include_triggers)
+ *
+ * All variants go through the same C function. Arguments are
+ * detected by PG_NARGS() and PG_ARGISNULL().
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_table);
 
@@ -530,18 +573,37 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     char       *schema_name       = text_to_cstring(schema_t);
     char       *table_name        = text_to_cstring(tablename_t);
     char       *target_name;
+    CloneOptions opts             = pgx_clone_default_options();
 
     PGconn     *source_conn;
     PGconn     *local_conn;
     PGresult   *res;
     StringInfoData buf;
-    int         idx_count, con_count, trig_count;
 
-    /* Use target_tablename if provided (5th arg), otherwise use source name */
+    /* Arg 4: target table name (optional) */
     if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
         target_name = text_to_cstring(PG_GETARG_TEXT_PP(4));
     else
         target_name = table_name;
+
+    /* Arg 5: options — could be JSON text (6 args) */
+    if (PG_NARGS() == 6 && !PG_ARGISNULL(5))
+    {
+        char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(5));
+        opts = pgx_clone_parse_options(options_json);
+        pfree(options_json);
+    }
+
+    /* Args 5,6,7: boolean overload (8 args via pgx_clone_table_ex) */
+    if (PG_NARGS() == 8)
+    {
+        if (!PG_ARGISNULL(5))
+            opts.include_indexes = PG_GETARG_BOOL(5);
+        if (!PG_ARGISNULL(6))
+            opts.include_constraints = PG_GETARG_BOOL(6);
+        if (!PG_ARGISNULL(7))
+            opts.include_triggers = PG_GETARG_BOOL(7);
+    }
 
     /* Connect to source */
     source_conn = pgx_clone_connect(source_conninfo);
@@ -579,14 +641,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
                         schema_name, table_name)));
     }
 
-    /*
-     * Use loopback libpq connection for ALL local operations.
-     * This avoids the SPI transaction visibility problem: SPI runs
-     * inside the caller's transaction, so a separate connection
-     * cannot see uncommitted SPI work. By using libpq for everything
-     * (schema creation, table creation, data copy, indexes,
-     * constraints, triggers), everything is in one consistent session.
-     */
+    /* Use loopback libpq connection for ALL local operations */
     local_conn = pgx_clone_connect_local();
 
     /* ---- Step 2: Create schema + table via loopback ---- */
@@ -597,13 +652,11 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         ddl = pstrdup(PQgetvalue(res, 0, 0));
         PQclear(res);
 
-        /* Create schema */
         resetStringInfo(&buf);
         appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                          quote_identifier(schema_name));
         pgx_clone_exec_conn(local_conn, buf.data);
 
-        /* Create table */
         local_res = PQexec(local_conn, ddl);
         if (PQresultStatus(local_res) != PGRES_COMMAND_OK)
         {
@@ -634,29 +687,38 @@ pgx_clone_table(PG_FUNCTION_ARGS)
                         (long) row_count, schema_name, target_name)));
     }
 
-    /* ---- Step 4: Clone constraints (PK -> UNIQUE -> CHECK -> FK) ---- */
-    con_count = pgx_clone_constraints(source_conn, local_conn,
-                                      schema_name, table_name, target_name);
-    if (con_count > 0)
-        ereport(NOTICE,
-                (errmsg("pgx_clone: cloned %d constraints for %s.%s",
-                        con_count, schema_name, target_name)));
+    /* ---- Step 4: Clone constraints if enabled ---- */
+    if (opts.include_constraints)
+    {
+        int con_count = pgx_clone_constraints(source_conn, local_conn,
+                                              schema_name, table_name, target_name);
+        if (con_count > 0)
+            ereport(NOTICE,
+                    (errmsg("pgx_clone: cloned %d constraints for %s.%s",
+                            con_count, schema_name, target_name)));
+    }
 
-    /* ---- Step 5: Clone indexes (non-constraint indexes only) ---- */
-    idx_count = pgx_clone_indexes(source_conn, local_conn,
-                                  schema_name, table_name, target_name);
-    if (idx_count > 0)
-        ereport(NOTICE,
-                (errmsg("pgx_clone: cloned %d indexes for %s.%s",
-                        idx_count, schema_name, target_name)));
+    /* ---- Step 5: Clone indexes if enabled ---- */
+    if (opts.include_indexes)
+    {
+        int idx_count = pgx_clone_indexes(source_conn, local_conn,
+                                          schema_name, table_name, target_name);
+        if (idx_count > 0)
+            ereport(NOTICE,
+                    (errmsg("pgx_clone: cloned %d indexes for %s.%s",
+                            idx_count, schema_name, target_name)));
+    }
 
-    /* ---- Step 6: Clone triggers ---- */
-    trig_count = pgx_clone_triggers(source_conn, local_conn,
-                                    schema_name, table_name, target_name);
-    if (trig_count > 0)
-        ereport(NOTICE,
-                (errmsg("pgx_clone: cloned %d triggers for %s.%s",
-                        trig_count, schema_name, target_name)));
+    /* ---- Step 6: Clone triggers if enabled ---- */
+    if (opts.include_triggers)
+    {
+        int trig_count = pgx_clone_triggers(source_conn, local_conn,
+                                            schema_name, table_name, target_name);
+        if (trig_count > 0)
+            ereport(NOTICE,
+                    (errmsg("pgx_clone: cloned %d triggers for %s.%s",
+                            trig_count, schema_name, target_name)));
+    }
 
     PQfinish(local_conn);
     PQfinish(source_conn);
@@ -665,16 +727,21 @@ pgx_clone_table(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_schema(source_conninfo, schema, include_data)
+ * FUNCTION: pgx_clone_table_ex
  *
- * Clones an entire schema: tables, sequences, views, functions.
- * Indexes, constraints, and triggers are handled per-table by
- * pgx_clone_table.
- *
- * FK constraints between tables in the same schema may fail during
- * table cloning if the referenced table hasn't been created yet.
- * After all tables are cloned, we do a second pass for any
- * deferred FK constraints.
+ * Boolean overload: separate params for indexes, constraints, triggers
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgx_clone_table_ex);
+
+Datum
+pgx_clone_table_ex(PG_FUNCTION_ARGS)
+{
+    /* Just forward to pgx_clone_table — same C function handles both */
+    return pgx_clone_table(fcinfo);
+}
+
+/* ===============================================================
+ * FUNCTION: pgx_clone_schema(source_conninfo, schema, include_data [, options])
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_schema);
 
@@ -684,6 +751,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     text       *schema_t          = PG_GETARG_TEXT_PP(1);
     bool        include_data      = PG_GETARG_BOOL(2);
+    CloneOptions opts             = pgx_clone_default_options();
 
     char       *source_conninfo   = text_to_cstring(source_conninfo_t);
     char       *schema_name       = text_to_cstring(schema_t);
@@ -694,6 +762,25 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     StringInfoData buf;
     int         i, ntables;
     char      **table_names = NULL;
+
+    /* Arg 3: JSON options (optional) */
+    if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
+    {
+        char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(3));
+        opts = pgx_clone_parse_options(options_json);
+        pfree(options_json);
+    }
+
+    /* Arg 3,4,5: boolean overload (6 args via pgx_clone_schema_ex) */
+    if (PG_NARGS() == 6)
+    {
+        if (!PG_ARGISNULL(3))
+            opts.include_indexes = PG_GETARG_BOOL(3);
+        if (!PG_ARGISNULL(4))
+            opts.include_constraints = PG_GETARG_BOOL(4);
+        if (!PG_ARGISNULL(5))
+            opts.include_triggers = PG_GETARG_BOOL(5);
+    }
 
     source_conn = pgx_clone_connect(source_conninfo);
     local_conn = pgx_clone_connect_local();
@@ -757,10 +844,9 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                     PQntuples(res), schema_name)));
     PQclear(res);
 
-    PQfinish(local_conn);  /* close local conn, pgx_clone_table opens its own */
+    PQfinish(local_conn);
 
-    /* ---- Step 4: Clone tables (each handles its own
-     *              indexes, constraints, and triggers) ---- */
+    /* ---- Step 4: Clone tables ---- */
     resetStringInfo(&buf);
     appendStringInfo(&buf,
         "SELECT tablename FROM pg_catalog.pg_tables "
@@ -771,7 +857,6 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
 
     ntables = PQntuples(res);
 
-    /* Save table names before PQclear */
     if (ntables > 0)
     {
         table_names = palloc(sizeof(char *) * ntables);
@@ -779,30 +864,42 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
             table_names[i] = pstrdup(PQgetvalue(res, i, 0));
     }
     PQclear(res);
+    PQfinish(source_conn);
 
-    PQfinish(source_conn);  /* close source, pgx_clone_table opens its own */
-
-    for (i = 0; i < ntables; i++)
+    /* Build options JSON to pass through to pgx_clone_table */
     {
-        Datum result;
+        StringInfoData opts_json;
+        initStringInfo(&opts_json);
+        appendStringInfo(&opts_json,
+            "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s}",
+            opts.include_indexes ? "true" : "false",
+            opts.include_constraints ? "true" : "false",
+            opts.include_triggers ? "true" : "false");
 
-        result = DirectFunctionCall4(pgx_clone_table,
-                    CStringGetTextDatum(source_conninfo),
-                    CStringGetTextDatum(schema_name),
-                    CStringGetTextDatum(table_names[i]),
-                    BoolGetDatum(include_data));
-        (void) result;
+        for (i = 0; i < ntables; i++)
+        {
+            Datum result;
+
+            /* Call 6-arg version: conninfo, schema, table, include_data, target_name, options */
+            result = DirectFunctionCall6(pgx_clone_table,
+                        CStringGetTextDatum(source_conninfo),
+                        CStringGetTextDatum(schema_name),
+                        CStringGetTextDatum(table_names[i]),
+                        BoolGetDatum(include_data),
+                        CStringGetTextDatum(table_names[i]),  /* target = source name */
+                        CStringGetTextDatum(opts_json.data));
+            (void) result;
+        }
+
+        pfree(opts_json.data);
     }
 
     ereport(NOTICE,
-            (errmsg("pgx_clone: cloned %d tables (with indexes, constraints, triggers) from schema %s",
+            (errmsg("pgx_clone: cloned %d tables from schema %s",
                     ntables, schema_name)));
 
-    /* ---- Step 5: Retry failed FK constraints ----
-     * Some FK constraints may have failed if the referenced table
-     * was cloned after the referencing table. Now all tables exist,
-     * so we retry any missing FK constraints.
-     */
+    /* ---- Step 5: Retry FK constraints if constraints enabled ---- */
+    if (opts.include_constraints)
     {
         PGconn *src_retry  = pgx_clone_connect(source_conninfo);
         PGconn *lcl_retry  = pgx_clone_connect_local();
@@ -830,7 +927,6 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                     const char *conname = PQgetvalue(res, j, 0);
                     const char *condef  = PQgetvalue(res, j, 1);
 
-                    /* Try to add, ignore if already exists */
                     resetStringInfo(&buf);
                     appendStringInfo(&buf,
                         "DO $$ BEGIN "
@@ -892,7 +988,6 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
         PQfinish(src_views);
     }
 
-    /* Cleanup table_names */
     if (table_names)
     {
         for (i = 0; i < ntables; i++)
@@ -903,10 +998,17 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
 
+/* pgx_clone_schema_ex — boolean overload for schema */
+PG_FUNCTION_INFO_V1(pgx_clone_schema_ex);
+
+Datum
+pgx_clone_schema_ex(PG_FUNCTION_ARGS)
+{
+    return pgx_clone_schema(fcinfo);
+}
+
 /* ===============================================================
  * FUNCTION: pgx_clone_functions(source_conninfo, schema)
- *
- * Clones all functions/procedures from a schema.
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_functions);
 
@@ -928,13 +1030,11 @@ pgx_clone_functions(PG_FUNCTION_ARGS)
     source_conn = pgx_clone_connect(source_conninfo);
     local_conn  = pgx_clone_connect_local();
 
-    /* Ensure schema exists */
     initStringInfo(&buf);
     appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                      quote_identifier(schema_name));
     pgx_clone_exec_conn(local_conn, buf.data);
 
-    /* Get all function definitions */
     resetStringInfo(&buf);
     appendStringInfo(&buf,
         "SELECT pg_get_functiondef(p.oid) AS funcdef "
@@ -963,9 +1063,7 @@ pgx_clone_functions(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_database(source_conninfo, include_data)
- *
- * Clones all user schemas from the source database.
+ * FUNCTION: pgx_clone_database(source_conninfo, include_data [, options])
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_database);
 
@@ -974,6 +1072,7 @@ pgx_clone_database(PG_FUNCTION_ARGS)
 {
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     bool        include_data      = PG_GETARG_BOOL(1);
+    CloneOptions opts             = pgx_clone_default_options();
 
     char       *source_conninfo   = text_to_cstring(source_conninfo_t);
 
@@ -982,9 +1081,16 @@ pgx_clone_database(PG_FUNCTION_ARGS)
     int         i, nschemas;
     char      **schema_names;
 
+    /* Arg 2: JSON options (optional) */
+    if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
+    {
+        char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(2));
+        opts = pgx_clone_parse_options(options_json);
+        pfree(options_json);
+    }
+
     source_conn = pgx_clone_connect(source_conninfo);
 
-    /* Get all user schemas (exclude system schemas) */
     res = pgx_clone_exec(source_conn,
         "SELECT nspname FROM pg_catalog.pg_namespace "
         "WHERE nspname NOT LIKE 'pg_%' "
@@ -993,7 +1099,6 @@ pgx_clone_database(PG_FUNCTION_ARGS)
 
     nschemas = PQntuples(res);
 
-    /* Save schema names before closing connection */
     schema_names = palloc(sizeof(char *) * nschemas);
     for (i = 0; i < nschemas; i++)
         schema_names[i] = pstrdup(PQgetvalue(res, i, 0));
@@ -1001,19 +1106,32 @@ pgx_clone_database(PG_FUNCTION_ARGS)
     PQclear(res);
     PQfinish(source_conn);
 
-    for (i = 0; i < nschemas; i++)
     {
-        Datum result;
+        StringInfoData opts_json;
+        initStringInfo(&opts_json);
+        appendStringInfo(&opts_json,
+            "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s}",
+            opts.include_indexes ? "true" : "false",
+            opts.include_constraints ? "true" : "false",
+            opts.include_triggers ? "true" : "false");
 
-        ereport(NOTICE,
-                (errmsg("pgx_clone: cloning schema %s (%d/%d)",
-                        schema_names[i], i + 1, nschemas)));
+        for (i = 0; i < nschemas; i++)
+        {
+            Datum result;
 
-        result = DirectFunctionCall3(pgx_clone_schema,
-                    CStringGetTextDatum(source_conninfo),
-                    CStringGetTextDatum(schema_names[i]),
-                    BoolGetDatum(include_data));
-        (void) result;
+            ereport(NOTICE,
+                    (errmsg("pgx_clone: cloning schema %s (%d/%d)",
+                            schema_names[i], i + 1, nschemas)));
+
+            result = DirectFunctionCall4(pgx_clone_schema,
+                        CStringGetTextDatum(source_conninfo),
+                        CStringGetTextDatum(schema_names[i]),
+                        BoolGetDatum(include_data),
+                        CStringGetTextDatum(opts_json.data));
+            (void) result;
+        }
+
+        pfree(opts_json.data);
     }
 
     ereport(NOTICE,
@@ -1029,8 +1147,6 @@ pgx_clone_database(PG_FUNCTION_ARGS)
 
 /* ===============================================================
  * FUNCTION: pgx_clone_version()
- *
- * Returns the extension version string.
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_version);
 

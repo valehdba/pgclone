@@ -122,11 +122,64 @@ SELECT pgx_clone_database(
 );
 ```
 
+### Controlling indexes, constraints, and triggers
+
+By default, all indexes, constraints (PK, UNIQUE, CHECK, FK), and triggers are cloned. You can disable them using JSON options or separate boolean parameters.
+
+#### JSON options format
+
+```sql
+-- Clone table without indexes and triggers
+SELECT pgx_clone_table(
+    'host=source-server dbname=mydb user=postgres',
+    'public', 'orders', true, 'orders',
+    '{"indexes": false, "triggers": false}'
+);
+
+-- Clone schema without any constraints
+SELECT pgx_clone_schema(
+    'host=source-server dbname=mydb user=postgres',
+    'sales', true,
+    '{"constraints": false}'
+);
+
+-- Clone database without triggers
+SELECT pgx_clone_database(
+    'host=source-server dbname=mydb user=postgres',
+    true,
+    '{"triggers": false}'
+);
+```
+
+#### Boolean parameters format
+
+```sql
+-- pgx_clone_table_ex(conninfo, schema, table, include_data, target_name,
+--                     include_indexes, include_constraints, include_triggers)
+SELECT pgx_clone_table_ex(
+    'host=source-server dbname=mydb user=postgres',
+    'public', 'orders', true, 'orders_copy',
+    false,   -- skip indexes
+    true,    -- include constraints
+    false    -- skip triggers
+);
+
+-- pgx_clone_schema_ex(conninfo, schema, include_data,
+--                      include_indexes, include_constraints, include_triggers)
+SELECT pgx_clone_schema_ex(
+    'host=source-server dbname=mydb user=postgres',
+    'sales', true,
+    true,    -- include indexes
+    false,   -- skip constraints
+    true     -- include triggers
+);
+```
+
 ### Check version
 
 ```sql
 SELECT pgx_clone_version();
--- Returns: pgx_clone 0.1.0
+-- Returns: pgx_clone 0.2.0
 ```
 
 ## Connection String Format
