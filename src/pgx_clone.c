@@ -16,6 +16,9 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "catalog/pg_type.h"
+#include "utils/syscache.h"
+#include "catalog/pg_database.h"
+#include "utils/guc.h"
 
 PG_MODULE_MAGIC;
 
@@ -82,6 +85,176 @@ pgx_clone_exec_local(const char *query)
                 (errmsg("pgx_clone: local execution returned code %d for: %.128s",
                         ret, query)));
     }
+}
+
+/* ---------------------------------------------------------------
+ * Internal helper: get a libpq connection to the LOCAL database.
+ * This is needed because SPI cannot handle COPY FROM STDIN.
+ * We connect via the unix socket to the current database.
+ * --------------------------------------------------------------- */
+static PGconn *
+pgx_clone_connect_local(void)
+{
+    PGconn         *conn;
+    StringInfoData  conninfo;
+    const char     *dbname;
+    const char     *port;
+
+    dbname = get_database_name(MyDatabaseId);
+    port = GetConfigOption("port", false, false);
+
+    initStringInfo(&conninfo);
+    appendStringInfo(&conninfo, "dbname=%s port=%s",
+                     quote_literal_cstr(dbname),
+                     port ? port : "5432");
+
+    conn = PQconnectdb(conninfo.data);
+    pfree(conninfo.data);
+
+    if (PQstatus(conn) != CONNECTION_OK)
+    {
+        char *local_errmsg = pstrdup(PQerrorMessage(conn));
+        PQfinish(conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_CONNECTION_FAILURE),
+                 errmsg("pgx_clone: could not connect to local database: %s",
+                        local_errmsg)));
+    }
+
+    return conn;
+}
+
+/* ---------------------------------------------------------------
+ * Internal helper: stream data from source to target using COPY.
+ *
+ * Uses COPY TO STDOUT on source and COPY FROM STDIN on target,
+ * streaming data chunk by chunk without loading it all into memory.
+ * This is dramatically faster than row-by-row INSERT.
+ * --------------------------------------------------------------- */
+static int64
+pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
+                    const char *schema_name, const char *source_table,
+                    const char *target_table)
+{
+    PGresult       *res;
+    StringInfoData  cmd;
+    char           *buf;
+    int             ret;
+    int64           bytes_transferred = 0;
+    int64           row_count = 0;
+
+    /* ---- Start COPY OUT on source ---- */
+    initStringInfo(&cmd);
+    appendStringInfo(&cmd,
+        "COPY %s.%s TO STDOUT WITH (FORMAT text)",
+        quote_identifier(schema_name),
+        quote_identifier(source_table));
+
+    res = PQexec(source_conn, cmd.data);
+
+    if (PQresultStatus(res) != PGRES_COPY_OUT)
+    {
+        char *copy_errmsg = pstrdup(PQerrorMessage(source_conn));
+        PQclear(res);
+        pfree(cmd.data);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgx_clone: COPY OUT failed on source: %s", copy_errmsg)));
+    }
+    PQclear(res);
+
+    /* ---- Start COPY IN on local ---- */
+    resetStringInfo(&cmd);
+    appendStringInfo(&cmd,
+        "COPY %s.%s FROM STDIN WITH (FORMAT text)",
+        quote_identifier(schema_name),
+        quote_identifier(target_table));
+
+    res = PQexec(local_conn, cmd.data);
+    pfree(cmd.data);
+
+    if (PQresultStatus(res) != PGRES_COPY_IN)
+    {
+        char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
+        PQclear(res);
+
+        /* Cancel the source COPY */
+        PQgetCopyData(source_conn, &buf, 0);
+        if (buf) PQfreemem(buf);
+
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgx_clone: COPY IN failed on local: %s", copy_errmsg)));
+    }
+    PQclear(res);
+
+    /* ---- Stream data from source -> local ---- */
+    while ((ret = PQgetCopyData(source_conn, &buf, 0)) > 0)
+    {
+        if (PQputCopyData(local_conn, buf, ret) != 1)
+        {
+            char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
+            PQfreemem(buf);
+            PQputCopyEnd(local_conn, "aborted");
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgx_clone: error writing COPY data to local: %s",
+                            copy_errmsg)));
+        }
+
+        bytes_transferred += ret;
+        PQfreemem(buf);
+
+        /* Count rows (each line in text format = 1 row) */
+        row_count++;
+
+        /* Allow interrupt check periodically */
+        if (row_count % 50000 == 0)
+        {
+            CHECK_FOR_INTERRUPTS();
+            ereport(NOTICE,
+                    (errmsg("pgx_clone: ... %ld rows transferred so far",
+                            (long) row_count)));
+        }
+    }
+
+    if (ret == -2)
+    {
+        char *copy_errmsg = pstrdup(PQerrorMessage(source_conn));
+        PQputCopyEnd(local_conn, "source error");
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgx_clone: COPY stream error from source: %s",
+                        copy_errmsg)));
+    }
+
+    /* End COPY on local (NULL = success) */
+    if (PQputCopyEnd(local_conn, NULL) != 1)
+    {
+        char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgx_clone: error finalizing COPY on local: %s",
+                        copy_errmsg)));
+    }
+
+    /* Get the final result from COPY */
+    res = PQgetResult(local_conn);
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
+        PQclear(res);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgx_clone: COPY completed with error: %s",
+                        copy_errmsg)));
+    }
+
+    /* Extract actual row count from COPY result */
+    row_count = atol(PQcmdTuples(res));
+    PQclear(res);
+
+    return row_count;
 }
 
 /* ===============================================================
@@ -165,55 +338,30 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     pgx_clone_exec_local(PQgetvalue(res, 0, 0));
     PQclear(res);
 
-    /* ---- Step 2: Copy data if requested ---- */
+    /* ---- Step 2: Copy data using COPY protocol if requested ---- */
     if (include_data)
     {
-        int nfields, ntuples, i, j;
+        PGconn *local_conn;
+        int64   row_count;
 
-        resetStringInfo(&buf);
-        appendStringInfo(&buf, "SELECT * FROM %s.%s",
-                         quote_identifier(schema_name),
-                         quote_identifier(table_name));
+        /* SPI_finish before opening local libpq connection */
+        SPI_finish();
 
-        res = pgx_clone_exec(source_conn, buf.data);
+        /* Open a loopback libpq connection for COPY FROM STDIN */
+        local_conn = pgx_clone_connect_local();
 
-        ntuples = PQntuples(res);
-        nfields = PQnfields(res);
+        /* Stream data: source COPY TO STDOUT -> local COPY FROM STDIN */
+        row_count = pgx_clone_copy_data(source_conn, local_conn,
+                                        schema_name, table_name, target_name);
 
-        for (i = 0; i < ntuples; i++)
-        {
-            StringInfoData insert;
-            initStringInfo(&insert);
+        PQfinish(local_conn);
+        PQfinish(source_conn);
 
-            appendStringInfo(&insert, "INSERT INTO %s.%s VALUES (",
-                             quote_identifier(schema_name),
-                             quote_identifier(target_name));
-
-            for (j = 0; j < nfields; j++)
-            {
-                if (j > 0)
-                    appendStringInfoChar(&insert, ',');
-
-                if (PQgetisnull(res, i, j))
-                    appendStringInfoString(&insert, "NULL");
-                else
-                    appendStringInfo(&insert, "%s",
-                                     quote_literal_cstr(PQgetvalue(res, i, j)));
-            }
-
-            appendStringInfoChar(&insert, ')');
-            pgx_clone_exec_local(insert.data);
-            pfree(insert.data);
-
-            /* Allow interrupt check for large tables */
-            if (i % 1000 == 0)
-                CHECK_FOR_INTERRUPTS();
-        }
-
-        PQclear(res);
         ereport(NOTICE,
-                (errmsg("pgx_clone: copied %d rows into %s.%s",
-                        ntuples, schema_name, target_name)));
+                (errmsg("pgx_clone: copied %ld rows into %s.%s using COPY protocol",
+                        (long) row_count, schema_name, target_name)));
+
+        PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
     }
 
     SPI_finish();

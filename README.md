@@ -154,16 +154,15 @@ postgresql://username:password@hostname:5432/database
 ## Current Limitations (v0.1.0)
 
 - No support for indexes, constraints (foreign keys, checks), or triggers yet
-- Data transfer uses row-by-row INSERT (not COPY) — slower for large tables
 - No progress tracking for long operations
 - No parallel cloning support yet
 
 ## Roadmap
 
 - [ ] v0.2.0: Clone indexes, constraints, and triggers
-- [ ] v0.3.0: Use COPY protocol for fast data transfer
-- [ ] v0.4.0: Background worker for async operations with progress tracking
-- [ ] v0.5.0: Selective column cloning and data filtering
+- [x] ~~v0.3.0: Use COPY protocol for fast data transfer~~ (done)
+- [ ] v0.3.0: Background worker for async operations with progress tracking
+- [ ] v0.4.0: Selective column cloning and data filtering
 - [ ] v1.0.0: Parallel cloning, resume support, and conflict resolution
 
 ## License
