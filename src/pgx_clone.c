@@ -85,10 +85,11 @@ pgx_clone_exec_local(const char *query)
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_table(source_conninfo, schema, tablename, include_data)
+ * FUNCTION: pgx_clone_table(source_conninfo, schema, tablename, include_data, target_tablename)
  *
  * Clones a single table (structure + optionally data) from a remote
- * host to the local database.
+ * host to the local database. If target_tablename is provided, the
+ * table will be created with that name instead of the source name.
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_table);
 
@@ -103,10 +104,17 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     char       *source_conninfo   = text_to_cstring(source_conninfo_t);
     char       *schema_name       = text_to_cstring(schema_t);
     char       *table_name        = text_to_cstring(tablename_t);
+    char       *target_name;
 
     PGconn     *source_conn;
     PGresult   *res;
     StringInfoData buf;
+
+    /* Use target_tablename if provided (5th arg), otherwise use source name */
+    if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
+        target_name = text_to_cstring(PG_GETARG_TEXT_PP(4));
+    else
+        target_name = table_name;
 
     /* Connect to source */
     source_conn = pgx_clone_connect(source_conninfo);
@@ -114,7 +122,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     /* ---- Step 1: Get CREATE TABLE DDL ---- */
     initStringInfo(&buf);
     appendStringInfo(&buf,
-        "SELECT 'CREATE TABLE IF NOT EXISTS %s.' || quote_ident(c.relname) || ' (' || "
+        "SELECT 'CREATE TABLE IF NOT EXISTS %s.%s (' || "
         "string_agg(quote_ident(a.attname) || ' ' || "
         "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
         "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
@@ -128,6 +136,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         "AND a.attnum > 0 AND NOT a.attisdropped "
         "GROUP BY c.relname",
         quote_identifier(schema_name),
+        quote_identifier(target_name),
         quote_literal_cstr(schema_name),
         quote_literal_cstr(table_name));
 
@@ -178,7 +187,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
 
             appendStringInfo(&insert, "INSERT INTO %s.%s VALUES (",
                              quote_identifier(schema_name),
-                             quote_identifier(table_name));
+                             quote_identifier(target_name));
 
             for (j = 0; j < nfields; j++)
             {
@@ -204,7 +213,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         PQclear(res);
         ereport(NOTICE,
                 (errmsg("pgx_clone: copied %d rows into %s.%s",
-                        ntuples, schema_name, table_name)));
+                        ntuples, schema_name, target_name)));
     }
 
     SPI_finish();

@@ -23,6 +23,23 @@ COMMENT ON FUNCTION pgx_clone_table(TEXT, TEXT, TEXT, BOOLEAN) IS
 'Clone a table from a remote PostgreSQL host. Set include_data=false for structure only.';
 
 -- ============================================================
+-- Clone a single table with a different name on target
+-- ============================================================
+CREATE FUNCTION pgx_clone_table(
+    source_conninfo   TEXT,
+    schema_name       TEXT,
+    table_name        TEXT,
+    include_data      BOOLEAN,
+    target_table_name TEXT
+)
+RETURNS TEXT
+AS 'MODULE_PATHNAME', 'pgx_clone_table'
+LANGUAGE C VOLATILE;
+
+COMMENT ON FUNCTION pgx_clone_table(TEXT, TEXT, TEXT, BOOLEAN, TEXT) IS
+'Clone a table from a remote host with a different name on target. Set include_data=false for structure only.';
+
+-- ============================================================
 -- Clone an entire schema (tables, views, functions, sequences)
 -- ============================================================
 CREATE FUNCTION pgx_clone_schema(
