@@ -31,11 +31,11 @@ pgx_clone_connect(const char *conninfo)
 
     if (PQstatus(conn) != CONNECTION_OK)
     {
-        char *errmsg = pstrdup(PQerrorMessage(conn));
+        char *conn_errmsg = pstrdup(PQerrorMessage(conn));
         PQfinish(conn);
         ereport(ERROR,
                 (errcode(ERRCODE_CONNECTION_FAILURE),
-                 errmsg("pgx_clone: could not connect to remote host: %s", errmsg)));
+                 errmsg("pgx_clone: could not connect to remote host: %s", conn_errmsg)));
     }
 
     return conn;
@@ -55,11 +55,11 @@ pgx_clone_exec(PGconn *conn, const char *query)
     if (PQresultStatus(res) != PGRES_TUPLES_OK &&
         PQresultStatus(res) != PGRES_COMMAND_OK)
     {
-        char *errmsg = pstrdup(PQerrorMessage(conn));
+        char *exec_errmsg = pstrdup(PQerrorMessage(conn));
         PQclear(res);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgx_clone: remote query failed: %s", errmsg)));
+                 errmsg("pgx_clone: remote query failed: %s", exec_errmsg)));
     }
 
     return res;
