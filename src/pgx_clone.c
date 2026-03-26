@@ -118,7 +118,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         "string_agg(quote_ident(a.attname) || ' ' || "
         "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
         "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
-        "CASE WHEN d.adsrc IS NOT NULL THEN ' DEFAULT ' || d.adsrc ELSE '' END, "
+        "CASE WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END, "
         "', ' ORDER BY a.attnum) || ')' AS ddl "
         "FROM pg_catalog.pg_class c "
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
