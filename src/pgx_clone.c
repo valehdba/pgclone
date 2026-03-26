@@ -88,6 +88,33 @@ pgx_clone_exec_local(const char *query)
 }
 
 /* ---------------------------------------------------------------
+ * Internal helper: execute DDL on a libpq connection.
+ * Used for loopback connection operations.
+ * Returns true on success, false on failure (with WARNING).
+ * --------------------------------------------------------------- */
+static bool
+pgx_clone_exec_conn(PGconn *conn, const char *query)
+{
+    PGresult *res;
+
+    res = PQexec(conn, query);
+
+    if (PQresultStatus(res) != PGRES_COMMAND_OK &&
+        PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        char *conn_errmsg = pstrdup(PQerrorMessage(conn));
+        PQclear(res);
+        ereport(WARNING,
+                (errmsg("pgx_clone: local exec failed: %s (query: %.128s)",
+                        conn_errmsg, query)));
+        return false;
+    }
+
+    PQclear(res);
+    return true;
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: get a libpq connection to the LOCAL database.
  * This is needed because SPI cannot handle COPY FROM STDIN.
  * We connect via the unix socket to the current database.
@@ -257,12 +284,237 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
     return row_count;
 }
 
+/* ---------------------------------------------------------------
+ * Internal helper: clone indexes for a table from source.
+ *
+ * Fetches all index definitions using pg_get_indexdef() and
+ * replaces the source table name with the target table name
+ * if they differ. Skips indexes that back PRIMARY KEY or UNIQUE
+ * constraints (those are created by pgx_clone_constraints).
+ * --------------------------------------------------------------- */
+static int
+pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
+                  const char *schema_name, const char *source_table,
+                  const char *target_table)
+{
+    PGresult       *res;
+    StringInfoData  buf;
+    int             i, count, created = 0;
+
+    initStringInfo(&buf);
+    appendStringInfo(&buf,
+        "SELECT pg_get_indexdef(i.indexrelid) AS indexdef "
+        "FROM pg_catalog.pg_index i "
+        "JOIN pg_catalog.pg_class c ON c.oid = i.indrelid "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s "
+        "AND NOT i.indisprimary "
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM pg_catalog.pg_constraint con "
+        "    WHERE con.conindid = i.indexrelid"
+        ")",
+        quote_literal_cstr(schema_name),
+        quote_literal_cstr(source_table));
+
+    res = pgx_clone_exec(source_conn, buf.data);
+
+    count = PQntuples(res);
+    for (i = 0; i < count; i++)
+    {
+        char *indexdef = PQgetvalue(res, i, 0);
+
+        if (strcmp(source_table, target_table) != 0)
+        {
+            StringInfoData  new_def;
+            char           *pos;
+            char            search_str[NAMEDATALEN * 2 + 8];
+
+            snprintf(search_str, sizeof(search_str), " ON %s.%s ",
+                     quote_identifier(schema_name),
+                     quote_identifier(source_table));
+
+            pos = strstr(indexdef, search_str);
+            if (pos != NULL)
+            {
+                initStringInfo(&new_def);
+                appendBinaryStringInfo(&new_def, indexdef, pos - indexdef);
+                appendStringInfo(&new_def, " ON %s.%s ",
+                                 quote_identifier(schema_name),
+                                 quote_identifier(target_table));
+                appendStringInfoString(&new_def, pos + strlen(search_str));
+
+                if (pgx_clone_exec_conn(target_conn, new_def.data))
+                    created++;
+                pfree(new_def.data);
+            }
+            else
+            {
+                if (pgx_clone_exec_conn(target_conn, indexdef))
+                    created++;
+            }
+        }
+        else
+        {
+            if (pgx_clone_exec_conn(target_conn, indexdef))
+                created++;
+        }
+    }
+
+    PQclear(res);
+    pfree(buf.data);
+
+    return created;
+}
+
+/* ---------------------------------------------------------------
+ * Internal helper: clone constraints for a table from source.
+ *
+ * Handles: PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY constraints.
+ * Uses pg_get_constraintdef() to get portable definitions.
+ * Creates them in dependency order: PK -> UNIQUE -> CHECK -> FK.
+ *
+ * FK constraints that fail (e.g. referenced table not yet cloned)
+ * are logged as WARNINGs and skipped — they can be retried later.
+ * --------------------------------------------------------------- */
+static int
+pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
+                      const char *schema_name, const char *source_table,
+                      const char *target_table)
+{
+    PGresult       *res;
+    StringInfoData  buf;
+    int             i, count, created = 0;
+
+    initStringInfo(&buf);
+    appendStringInfo(&buf,
+        "SELECT conname, contype, "
+        "pg_get_constraintdef(con.oid, true) AS condef "
+        "FROM pg_catalog.pg_constraint con "
+        "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s "
+        "ORDER BY "
+        "  CASE contype "
+        "    WHEN 'p' THEN 1 "
+        "    WHEN 'u' THEN 2 "
+        "    WHEN 'c' THEN 3 "
+        "    WHEN 'f' THEN 4 "
+        "    ELSE 5 "
+        "  END, conname",
+        quote_literal_cstr(schema_name),
+        quote_literal_cstr(source_table));
+
+    res = pgx_clone_exec(source_conn, buf.data);
+
+    count = PQntuples(res);
+    for (i = 0; i < count; i++)
+    {
+        const char *conname = PQgetvalue(res, i, 0);
+        const char *condef  = PQgetvalue(res, i, 2);
+
+        resetStringInfo(&buf);
+        appendStringInfo(&buf,
+            "ALTER TABLE %s.%s ADD CONSTRAINT %s %s",
+            quote_identifier(schema_name),
+            quote_identifier(target_table),
+            quote_identifier(conname),
+            condef);
+
+        if (pgx_clone_exec_conn(target_conn, buf.data))
+            created++;
+    }
+
+    PQclear(res);
+    pfree(buf.data);
+
+    return created;
+}
+
+/* ---------------------------------------------------------------
+ * Internal helper: clone triggers for a table from source.
+ *
+ * Fetches trigger definitions using pg_get_triggerdef() and
+ * replaces the source table name if target differs.
+ * Skips internal triggers (created by constraints).
+ * --------------------------------------------------------------- */
+static int
+pgx_clone_triggers(PGconn *source_conn, PGconn *target_conn,
+                   const char *schema_name, const char *source_table,
+                   const char *target_table)
+{
+    PGresult       *res;
+    StringInfoData  buf;
+    int             i, count, created = 0;
+
+    initStringInfo(&buf);
+    appendStringInfo(&buf,
+        "SELECT pg_get_triggerdef(t.oid, true) AS trigdef "
+        "FROM pg_catalog.pg_trigger t "
+        "JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s "
+        "AND NOT t.tgisinternal "
+        "ORDER BY t.tgname",
+        quote_literal_cstr(schema_name),
+        quote_literal_cstr(source_table));
+
+    res = pgx_clone_exec(source_conn, buf.data);
+
+    count = PQntuples(res);
+    for (i = 0; i < count; i++)
+    {
+        char *trigdef = PQgetvalue(res, i, 0);
+
+        if (strcmp(source_table, target_table) != 0)
+        {
+            StringInfoData  new_def;
+            char           *pos;
+            char            search_str[NAMEDATALEN * 2 + 8];
+
+            snprintf(search_str, sizeof(search_str), " ON %s.%s ",
+                     quote_identifier(schema_name),
+                     quote_identifier(source_table));
+
+            pos = strstr(trigdef, search_str);
+            if (pos != NULL)
+            {
+                initStringInfo(&new_def);
+                appendBinaryStringInfo(&new_def, trigdef, pos - trigdef);
+                appendStringInfo(&new_def, " ON %s.%s ",
+                                 quote_identifier(schema_name),
+                                 quote_identifier(target_table));
+                appendStringInfoString(&new_def, pos + strlen(search_str));
+
+                if (pgx_clone_exec_conn(target_conn, new_def.data))
+                    created++;
+                pfree(new_def.data);
+            }
+            else
+            {
+                if (pgx_clone_exec_conn(target_conn, trigdef))
+                    created++;
+            }
+        }
+        else
+        {
+            if (pgx_clone_exec_conn(target_conn, trigdef))
+                created++;
+        }
+    }
+
+    PQclear(res);
+    pfree(buf.data);
+
+    return created;
+}
+
 /* ===============================================================
  * FUNCTION: pgx_clone_table(source_conninfo, schema, tablename, include_data, target_tablename)
  *
  * Clones a single table (structure + optionally data) from a remote
  * host to the local database. If target_tablename is provided, the
  * table will be created with that name instead of the source name.
+ * Also clones indexes, constraints, and triggers.
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_table);
 
@@ -280,8 +532,10 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     char       *target_name;
 
     PGconn     *source_conn;
+    PGconn     *local_conn;
     PGresult   *res;
     StringInfoData buf;
+    int         idx_count, con_count, trig_count;
 
     /* Use target_tablename if provided (5th arg), otherwise use source name */
     if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
@@ -292,7 +546,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     /* Connect to source */
     source_conn = pgx_clone_connect(source_conninfo);
 
-    /* ---- Step 1: Get CREATE TABLE DDL ---- */
+    /* ---- Step 1: Get CREATE TABLE DDL from source ---- */
     initStringInfo(&buf);
     appendStringInfo(&buf,
         "SELECT 'CREATE TABLE IF NOT EXISTS %s.%s (' || "
@@ -325,35 +579,31 @@ pgx_clone_table(PG_FUNCTION_ARGS)
                         schema_name, table_name)));
     }
 
-    if (include_data)
+    /*
+     * Use loopback libpq connection for ALL local operations.
+     * This avoids the SPI transaction visibility problem: SPI runs
+     * inside the caller's transaction, so a separate connection
+     * cannot see uncommitted SPI work. By using libpq for everything
+     * (schema creation, table creation, data copy, indexes,
+     * constraints, triggers), everything is in one consistent session.
+     */
+    local_conn = pgx_clone_connect_local();
+
+    /* ---- Step 2: Create schema + table via loopback ---- */
     {
-        /*
-         * When copying data, we use a loopback libpq connection for
-         * EVERYTHING (DDL + COPY). This is because SPI runs inside
-         * the caller's transaction, and a separate libpq connection
-         * cannot see uncommitted SPI work. By using libpq for both
-         * the CREATE TABLE and the COPY, we ensure the table is
-         * visible when COPY FROM STDIN starts.
-         */
-        PGconn     *local_conn;
-        PGresult   *local_res;
-        int64       row_count;
-        char       *ddl;
+        PGresult *local_res;
+        char     *ddl;
 
         ddl = pstrdup(PQgetvalue(res, 0, 0));
         PQclear(res);
 
-        /* Open loopback connection */
-        local_conn = pgx_clone_connect_local();
-
-        /* Create schema via loopback */
+        /* Create schema */
         resetStringInfo(&buf);
         appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                          quote_identifier(schema_name));
-        local_res = PQexec(local_conn, buf.data);
-        PQclear(local_res);
+        pgx_clone_exec_conn(local_conn, buf.data);
 
-        /* Create table via loopback */
+        /* Create table */
         local_res = PQexec(local_conn, ddl);
         if (PQresultStatus(local_res) != PGRES_COMMAND_OK)
         {
@@ -369,35 +619,46 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         }
         PQclear(local_res);
         pfree(ddl);
+    }
 
-        /* Stream data: source COPY TO STDOUT -> local COPY FROM STDIN */
+    /* ---- Step 3: Copy data if requested ---- */
+    if (include_data)
+    {
+        int64 row_count;
+
         row_count = pgx_clone_copy_data(source_conn, local_conn,
                                         schema_name, table_name, target_name);
-
-        PQfinish(local_conn);
-        PQfinish(source_conn);
 
         ereport(NOTICE,
                 (errmsg("pgx_clone: copied %ld rows into %s.%s using COPY protocol",
                         (long) row_count, schema_name, target_name)));
-
-        PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
     }
 
-    /* Structure only — use SPI (no COPY needed) */
-    SPI_connect();
+    /* ---- Step 4: Clone constraints (PK -> UNIQUE -> CHECK -> FK) ---- */
+    con_count = pgx_clone_constraints(source_conn, local_conn,
+                                      schema_name, table_name, target_name);
+    if (con_count > 0)
+        ereport(NOTICE,
+                (errmsg("pgx_clone: cloned %d constraints for %s.%s",
+                        con_count, schema_name, target_name)));
 
-    /* Ensure target schema exists */
-    resetStringInfo(&buf);
-    appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
-                     quote_identifier(schema_name));
-    pgx_clone_exec_local(buf.data);
+    /* ---- Step 5: Clone indexes (non-constraint indexes only) ---- */
+    idx_count = pgx_clone_indexes(source_conn, local_conn,
+                                  schema_name, table_name, target_name);
+    if (idx_count > 0)
+        ereport(NOTICE,
+                (errmsg("pgx_clone: cloned %d indexes for %s.%s",
+                        idx_count, schema_name, target_name)));
 
-    /* Create the table */
-    pgx_clone_exec_local(PQgetvalue(res, 0, 0));
-    PQclear(res);
+    /* ---- Step 6: Clone triggers ---- */
+    trig_count = pgx_clone_triggers(source_conn, local_conn,
+                                    schema_name, table_name, target_name);
+    if (trig_count > 0)
+        ereport(NOTICE,
+                (errmsg("pgx_clone: cloned %d triggers for %s.%s",
+                        trig_count, schema_name, target_name)));
 
-    SPI_finish();
+    PQfinish(local_conn);
     PQfinish(source_conn);
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
@@ -407,6 +668,13 @@ pgx_clone_table(PG_FUNCTION_ARGS)
  * FUNCTION: pgx_clone_schema(source_conninfo, schema, include_data)
  *
  * Clones an entire schema: tables, sequences, views, functions.
+ * Indexes, constraints, and triggers are handled per-table by
+ * pgx_clone_table.
+ *
+ * FK constraints between tables in the same schema may fail during
+ * table cloning if the referenced table hasn't been created yet.
+ * After all tables are cloned, we do a second pass for any
+ * deferred FK constraints.
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_schema);
 
@@ -421,19 +689,20 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     char       *schema_name       = text_to_cstring(schema_t);
 
     PGconn     *source_conn;
+    PGconn     *local_conn;
     PGresult   *res;
     StringInfoData buf;
-    int         i;
+    int         i, ntables;
+    char      **table_names = NULL;
 
     source_conn = pgx_clone_connect(source_conninfo);
-
-    SPI_connect();
+    local_conn = pgx_clone_connect_local();
 
     /* ---- Step 1: Create schema ---- */
     initStringInfo(&buf);
     appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                      quote_identifier(schema_name));
-    pgx_clone_exec_local(buf.data);
+    pgx_clone_exec_conn(local_conn, buf.data);
 
     /* ---- Step 2: Clone all functions/procedures ---- */
     resetStringInfo(&buf);
@@ -448,7 +717,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
 
     for (i = 0; i < PQntuples(res); i++)
     {
-        pgx_clone_exec_local(PQgetvalue(res, i, 0));
+        pgx_clone_exec_conn(local_conn, PQgetvalue(res, i, 0));
     }
     ereport(NOTICE,
             (errmsg("pgx_clone: cloned %d functions from schema %s",
@@ -481,14 +750,17 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
             PQgetvalue(res, i, 4),
             PQgetvalue(res, i, 5),
             strcmp(PQgetvalue(res, i, 6), "YES") == 0 ? "" : "NO");
-        pgx_clone_exec_local(buf.data);
+        pgx_clone_exec_conn(local_conn, buf.data);
     }
     ereport(NOTICE,
             (errmsg("pgx_clone: cloned %d sequences from schema %s",
                     PQntuples(res), schema_name)));
     PQclear(res);
 
-    /* ---- Step 4: Clone tables ---- */
+    PQfinish(local_conn);  /* close local conn, pgx_clone_table opens its own */
+
+    /* ---- Step 4: Clone tables (each handles its own
+     *              indexes, constraints, and triggers) ---- */
     resetStringInfo(&buf);
     appendStringInfo(&buf,
         "SELECT tablename FROM pg_catalog.pg_tables "
@@ -497,50 +769,136 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
 
     res = pgx_clone_exec(source_conn, buf.data);
 
-    for (i = 0; i < PQntuples(res); i++)
-    {
-        Datum   result;
+    ntables = PQntuples(res);
 
-        /* Reuse pgx_clone_table for each table */
+    /* Save table names before PQclear */
+    if (ntables > 0)
+    {
+        table_names = palloc(sizeof(char *) * ntables);
+        for (i = 0; i < ntables; i++)
+            table_names[i] = pstrdup(PQgetvalue(res, i, 0));
+    }
+    PQclear(res);
+
+    PQfinish(source_conn);  /* close source, pgx_clone_table opens its own */
+
+    for (i = 0; i < ntables; i++)
+    {
+        Datum result;
+
         result = DirectFunctionCall4(pgx_clone_table,
                     CStringGetTextDatum(source_conninfo),
                     CStringGetTextDatum(schema_name),
-                    CStringGetTextDatum(PQgetvalue(res, i, 0)),
+                    CStringGetTextDatum(table_names[i]),
                     BoolGetDatum(include_data));
-        (void) result;  /* suppress unused warning */
+        (void) result;
     }
+
     ereport(NOTICE,
-            (errmsg("pgx_clone: cloned %d tables from schema %s",
-                    PQntuples(res), schema_name)));
-    PQclear(res);
+            (errmsg("pgx_clone: cloned %d tables (with indexes, constraints, triggers) from schema %s",
+                    ntables, schema_name)));
 
-    /* ---- Step 5: Clone views ---- */
-    resetStringInfo(&buf);
-    appendStringInfo(&buf,
-        "SELECT table_name, view_definition "
-        "FROM information_schema.views "
-        "WHERE table_schema = %s",
-        quote_literal_cstr(schema_name));
-
-    res = pgx_clone_exec(source_conn, buf.data);
-
-    for (i = 0; i < PQntuples(res); i++)
+    /* ---- Step 5: Retry failed FK constraints ----
+     * Some FK constraints may have failed if the referenced table
+     * was cloned after the referencing table. Now all tables exist,
+     * so we retry any missing FK constraints.
+     */
     {
+        PGconn *src_retry  = pgx_clone_connect(source_conninfo);
+        PGconn *lcl_retry  = pgx_clone_connect_local();
+        int     fk_created = 0;
+
+        for (i = 0; i < ntables; i++)
+        {
+            resetStringInfo(&buf);
+            appendStringInfo(&buf,
+                "SELECT conname, pg_get_constraintdef(con.oid, true) AS condef "
+                "FROM pg_catalog.pg_constraint con "
+                "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relname = %s "
+                "AND contype = 'f'",
+                quote_literal_cstr(schema_name),
+                quote_literal_cstr(table_names[i]));
+
+            res = pgx_clone_exec(src_retry, buf.data);
+
+            {
+                int j;
+                for (j = 0; j < PQntuples(res); j++)
+                {
+                    const char *conname = PQgetvalue(res, j, 0);
+                    const char *condef  = PQgetvalue(res, j, 1);
+
+                    /* Try to add, ignore if already exists */
+                    resetStringInfo(&buf);
+                    appendStringInfo(&buf,
+                        "DO $$ BEGIN "
+                        "ALTER TABLE %s.%s ADD CONSTRAINT %s %s; "
+                        "EXCEPTION WHEN duplicate_object THEN NULL; "
+                        "END $$",
+                        quote_identifier(schema_name),
+                        quote_identifier(table_names[i]),
+                        quote_identifier(conname),
+                        condef);
+
+                    if (pgx_clone_exec_conn(lcl_retry, buf.data))
+                        fk_created++;
+                }
+            }
+
+            PQclear(res);
+        }
+
+        if (fk_created > 0)
+            ereport(NOTICE,
+                    (errmsg("pgx_clone: FK retry pass: ensured %d foreign key constraints in schema %s",
+                            fk_created, schema_name)));
+
+        PQfinish(lcl_retry);
+        PQfinish(src_retry);
+    }
+
+    /* ---- Step 6: Clone views ---- */
+    {
+        PGconn *src_views = pgx_clone_connect(source_conninfo);
+        PGconn *lcl_views = pgx_clone_connect_local();
+
         resetStringInfo(&buf);
         appendStringInfo(&buf,
-            "CREATE OR REPLACE VIEW %s.%s AS %s",
-            quote_identifier(schema_name),
-            quote_identifier(PQgetvalue(res, i, 0)),
-            PQgetvalue(res, i, 1));
-        pgx_clone_exec_local(buf.data);
-    }
-    ereport(NOTICE,
-            (errmsg("pgx_clone: cloned %d views from schema %s",
-                    PQntuples(res), schema_name)));
-    PQclear(res);
+            "SELECT table_name, view_definition "
+            "FROM information_schema.views "
+            "WHERE table_schema = %s",
+            quote_literal_cstr(schema_name));
 
-    SPI_finish();
-    PQfinish(source_conn);
+        res = pgx_clone_exec(src_views, buf.data);
+
+        for (i = 0; i < PQntuples(res); i++)
+        {
+            resetStringInfo(&buf);
+            appendStringInfo(&buf,
+                "CREATE OR REPLACE VIEW %s.%s AS %s",
+                quote_identifier(schema_name),
+                quote_identifier(PQgetvalue(res, i, 0)),
+                PQgetvalue(res, i, 1));
+            pgx_clone_exec_conn(lcl_views, buf.data);
+        }
+        ereport(NOTICE,
+                (errmsg("pgx_clone: cloned %d views from schema %s",
+                        PQntuples(res), schema_name)));
+        PQclear(res);
+
+        PQfinish(lcl_views);
+        PQfinish(src_views);
+    }
+
+    /* Cleanup table_names */
+    if (table_names)
+    {
+        for (i = 0; i < ntables; i++)
+            pfree(table_names[i]);
+        pfree(table_names);
+    }
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
@@ -562,19 +920,19 @@ pgx_clone_functions(PG_FUNCTION_ARGS)
     char       *schema_name       = text_to_cstring(schema_t);
 
     PGconn     *source_conn;
+    PGconn     *local_conn;
     PGresult   *res;
     StringInfoData buf;
     int         i, count;
 
     source_conn = pgx_clone_connect(source_conninfo);
-
-    SPI_connect();
+    local_conn  = pgx_clone_connect_local();
 
     /* Ensure schema exists */
     initStringInfo(&buf);
     appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                      quote_identifier(schema_name));
-    pgx_clone_exec_local(buf.data);
+    pgx_clone_exec_conn(local_conn, buf.data);
 
     /* Get all function definitions */
     resetStringInfo(&buf);
@@ -590,11 +948,11 @@ pgx_clone_functions(PG_FUNCTION_ARGS)
     count = PQntuples(res);
     for (i = 0; i < count; i++)
     {
-        pgx_clone_exec_local(PQgetvalue(res, i, 0));
+        pgx_clone_exec_conn(local_conn, PQgetvalue(res, i, 0));
     }
 
     PQclear(res);
-    SPI_finish();
+    PQfinish(local_conn);
     PQfinish(source_conn);
 
     ereport(NOTICE,
@@ -621,7 +979,8 @@ pgx_clone_database(PG_FUNCTION_ARGS)
 
     PGconn     *source_conn;
     PGresult   *res;
-    int         i;
+    int         i, nschemas;
+    char      **schema_names;
 
     source_conn = pgx_clone_connect(source_conninfo);
 
@@ -632,28 +991,38 @@ pgx_clone_database(PG_FUNCTION_ARGS)
         "AND nspname <> 'information_schema' "
         "ORDER BY nspname");
 
+    nschemas = PQntuples(res);
+
+    /* Save schema names before closing connection */
+    schema_names = palloc(sizeof(char *) * nschemas);
+    for (i = 0; i < nschemas; i++)
+        schema_names[i] = pstrdup(PQgetvalue(res, i, 0));
+
+    PQclear(res);
     PQfinish(source_conn);
 
-    for (i = 0; i < PQntuples(res); i++)
+    for (i = 0; i < nschemas; i++)
     {
         Datum result;
 
         ereport(NOTICE,
                 (errmsg("pgx_clone: cloning schema %s (%d/%d)",
-                        PQgetvalue(res, i, 0), i + 1, PQntuples(res))));
+                        schema_names[i], i + 1, nschemas)));
 
         result = DirectFunctionCall3(pgx_clone_schema,
                     CStringGetTextDatum(source_conninfo),
-                    CStringGetTextDatum(PQgetvalue(res, i, 0)),
+                    CStringGetTextDatum(schema_names[i]),
                     BoolGetDatum(include_data));
         (void) result;
     }
 
     ereport(NOTICE,
             (errmsg("pgx_clone: database clone complete — %d schemas cloned",
-                    PQntuples(res))));
+                    nschemas)));
 
-    PQclear(res);
+    for (i = 0; i < nschemas; i++)
+        pfree(schema_names[i]);
+    pfree(schema_names);
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
@@ -668,5 +1037,5 @@ PG_FUNCTION_INFO_V1(pgx_clone_version);
 Datum
 pgx_clone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 0.1.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 0.2.0"));
 }

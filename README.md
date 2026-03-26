@@ -151,18 +151,21 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v0.1.0)
+## Current Limitations (v0.2.0)
 
-- No support for indexes, constraints (foreign keys, checks), or triggers yet
 - No progress tracking for long operations
 - No parallel cloning support yet
+- Exclusion constraints not yet supported
+- Materialized views not yet cloned
 
 ## Roadmap
 
-- [ ] v0.2.0: Clone indexes, constraints, and triggers
-- [x] ~~v0.3.0: Use COPY protocol for fast data transfer~~ (done)
+- [x] ~~v0.1.0: Clone tables, schemas, functions, databases~~ (done)
+- [x] ~~v0.1.0: Use COPY protocol for fast data transfer~~ (done)
+- [x] ~~v0.2.0: Clone indexes, constraints (PK, UNIQUE, CHECK, FK), and triggers~~ (done)
 - [ ] v0.3.0: Background worker for async operations with progress tracking
 - [ ] v0.4.0: Selective column cloning and data filtering
+- [ ] v0.5.0: Clone materialized views and exclusion constraints
 - [ ] v1.0.0: Parallel cloning, resume support, and conflict resolution
 
 ## License
