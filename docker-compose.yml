@@ -1,0 +1,84 @@
+services:
+  # Source database (data to clone FROM)
+  source-db:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: source_db
+    volumes:
+      - ./test/fixtures/seed.sql:/docker-entrypoint-initdb.d/01-seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  # Test on PostgreSQL 14
+  test-pg14:
+    build:
+      context: .
+      args:
+        PG_VERSION: "14"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+      SOURCE_CONNINFO: "host=source-db dbname=source_db user=postgres password=testpass"
+    depends_on:
+      source-db:
+        condition: service_healthy
+
+  # Test on PostgreSQL 15
+  test-pg15:
+    build:
+      context: .
+      args:
+        PG_VERSION: "15"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+      SOURCE_CONNINFO: "host=source-db dbname=source_db user=postgres password=testpass"
+    depends_on:
+      source-db:
+        condition: service_healthy
+
+  # Test on PostgreSQL 16
+  test-pg16:
+    build:
+      context: .
+      args:
+        PG_VERSION: "16"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+      SOURCE_CONNINFO: "host=source-db dbname=source_db user=postgres password=testpass"
+    depends_on:
+      source-db:
+        condition: service_healthy
+
+  # Test on PostgreSQL 17
+  test-pg17:
+    build:
+      context: .
+      args:
+        PG_VERSION: "17"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+      SOURCE_CONNINFO: "host=source-db dbname=source_db user=postgres password=testpass"
+    depends_on:
+      source-db:
+        condition: service_healthy
+
+  # Test on PostgreSQL 18
+  test-pg18:
+    build:
+      context: .
+      args:
+        PG_VERSION: "18"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+      SOURCE_CONNINFO: "host=source-db dbname=source_db user=postgres password=testpass"
+    depends_on:
+      source-db:
+        condition: service_healthy

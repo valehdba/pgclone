@@ -1,0 +1,22 @@
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.bc
+
+# PGXS generated
+results/
+regression.diffs
+regression.out
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
