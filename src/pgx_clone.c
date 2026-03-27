@@ -530,7 +530,8 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
 static int
 pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
                   const char *schema_name, const char *source_table,
-                  const char *target_table)
+                  const char *target_table,
+                  const CloneOptions *opts)
 {
     PGresult       *res;
     StringInfoData  buf;
@@ -538,7 +539,11 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
 
     initStringInfo(&buf);
     appendStringInfo(&buf,
-        "SELECT pg_get_indexdef(i.indexrelid) AS indexdef "
+        "SELECT pg_get_indexdef(i.indexrelid) AS indexdef, "
+        "ARRAY(SELECT a.attname FROM pg_catalog.pg_attribute a "
+        "      WHERE a.attrelid = c.oid "
+        "      AND a.attnum = ANY(i.indkey) "
+        "      AND a.attnum > 0) AS index_cols "
         "FROM pg_catalog.pg_index i "
         "JOIN pg_catalog.pg_class c ON c.oid = i.indrelid "
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
@@ -556,8 +561,54 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
     count = PQntuples(res);
     for (i = 0; i < count; i++)
     {
-        char           *indexdef = pstrdup(PQgetvalue(res, i, 0));
+        char           *indexdef  = pstrdup(PQgetvalue(res, i, 0));
+        char           *idx_cols  = PQgetvalue(res, i, 1);
         StringInfoData  final_def;
+
+        /* If selective column clone, skip indexes on columns not in target */
+        if (opts != NULL && opts->num_columns > 0)
+        {
+            /* idx_cols is a postgres array like {col1,col2} */
+            char *p = idx_cols;
+            bool  skip = false;
+
+            /* Strip leading { and trailing } */
+            if (*p == '{') p++;
+            {
+                char col_copy[NAMEDATALEN * 8];
+                char *tok;
+                strncpy(col_copy, p, sizeof(col_copy) - 1);
+                col_copy[sizeof(col_copy) - 1] = '\0';
+                /* Remove trailing } */
+                {
+                    size_t clen = strlen(col_copy);
+                    if (clen > 0 && col_copy[clen - 1] == '}')
+                        col_copy[clen - 1] = '\0';
+                }
+                tok = strtok(col_copy, ",");
+                while (tok != NULL && !skip)
+                {
+                    int cj;
+                    bool found = false;
+                    for (cj = 0; cj < opts->num_columns; cj++)
+                    {
+                        if (strcmp(tok, opts->columns[cj]) == 0)
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                        skip = true;
+                    tok = strtok(NULL, ",");
+                }
+            }
+            if (skip)
+            {
+                pfree(indexdef);
+                continue;
+            }
+        }
 
         initStringInfo(&final_def);
 
@@ -1120,7 +1171,8 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     if (opts.include_indexes)
     {
         int idx_count = pgx_clone_indexes(source_conn, local_conn,
-                                          schema_name, table_name, target_name);
+                                          schema_name, table_name, target_name,
+                                          &opts);
         if (idx_count > 0)
             ereport(NOTICE,
                     (errmsg("pgx_clone: cloned %d indexes for %s.%s",
