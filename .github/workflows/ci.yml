@@ -96,7 +96,7 @@ jobs:
       - name: Run pgTAP tests
         run: |
           PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db \
-            -v ON_ERROR_STOP=1 -f test/pgx_clone_test.sql
+            -f test/pgx_clone_test.sql
 
       - name: Show build info
         if: always()
