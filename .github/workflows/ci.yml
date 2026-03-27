@@ -42,28 +42,14 @@ jobs:
       - name: Install PostgreSQL ${{ matrix.pg_version }}
         run: |
           PG_VER=${{ matrix.pg_version }}
-
-          # ── 1. Stop everything and nuke ALL existing clusters ──
-          sudo systemctl stop postgresql 2>/dev/null || true
-          if command -v pg_lsclusters &>/dev/null; then
-            pg_lsclusters -h 2>/dev/null | while read ver name port status owner datadir logfile; do
-              sudo pg_dropcluster --stop "$ver" "$name" 2>/dev/null || true
-            done
-          fi
-
-          # ── 2. Install our target version from PGDG ──
+          # Install target version from PGDG
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
           sudo apt-get update -qq
           sudo apt-get install -y postgresql-$PG_VER postgresql-server-dev-$PG_VER libpq-dev build-essential
 
-          # ── 3. Verify install and stop auto-started cluster ──
+          # Verify install
           /usr/lib/postgresql/$PG_VER/bin/pg_config --version
-          sudo systemctl stop postgresql 2>/dev/null || true
-          sudo pg_dropcluster --stop $PG_VER main 2>/dev/null || true
-
-          echo "=== Clusters after cleanup ==="
-          pg_lsclusters || true
 
       - name: Build pgx_clone
         run: |
@@ -80,20 +66,22 @@ jobs:
       - name: Start target PostgreSQL on the host
         run: |
           PG_VER=${{ matrix.pg_version }}
+          PGBIN=/usr/lib/postgresql/$PG_VER/bin
+          PGDATA="$RUNNER_TEMP/pg_target_$PG_VER"
+          PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
 
-          # Create a clean cluster on port 5434
-          sudo pg_createcluster $PG_VER target -p 5434 -- --auth-local=trust --auth-host=trust
+          rm -rf "$PGDATA"
+          "$PGBIN/initdb" -D "$PGDATA" --username=postgres --auth=trust
 
-          # Append shared_preload_libraries (pgx_clone needs it for shmem/bgworkers)
-          echo "shared_preload_libraries = 'pgx_clone'" \
-            | sudo tee -a /etc/postgresql/$PG_VER/target/postgresql.conf
+          {
+            echo "port = 5434"
+            echo "listen_addresses = 'localhost'"
+            echo "shared_preload_libraries = 'pgx_clone'"
+            echo "unix_socket_directories = '$PGDATA'"
+          } >> "$PGDATA/postgresql.conf"
 
-          # Start the cluster
-          sudo pg_ctlcluster $PG_VER target start
-          pg_lsclusters
-
-          # Create test database
-          sudo -u postgres createdb -p 5434 target_db
+          "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" start
+          "$PGBIN/createdb" -h localhost -p 5434 -U postgres target_db
 
       - name: Seed source database
         run: |
@@ -130,10 +118,13 @@ jobs:
         if: failure()
         run: |
           PG_VER=${{ matrix.pg_version }}
-          echo "=== pg_lsclusters ==="
-          pg_lsclusters 2>/dev/null || true
+          PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
           echo "=== PostgreSQL log ==="
-          sudo cat /var/log/postgresql/postgresql-$PG_VER-target.log 2>/dev/null | tail -80 || echo "No log found"
+          if [ -f "$PGLOG" ]; then
+            tail -120 "$PGLOG"
+          else
+            echo "No target PostgreSQL log found at $PGLOG"
+          fi
           echo "=== Port usage ==="
           sudo ss -tlnp | grep -E '5432|5433|5434' || true
 
@@ -141,4 +132,4 @@ jobs:
         if: always()
         run: |
           echo "PostgreSQL version: ${{ matrix.pg_version }}"
-          pg_lsclusters 2>/dev/null || true
+          ls -la "$RUNNER_TEMP" | rg "pg_target_" || true
