@@ -629,7 +629,8 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
 static int
 pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
                       const char *schema_name, const char *source_table,
-                      const char *target_table)
+                      const char *target_table,
+                      const CloneOptions *opts)
 {
     PGresult       *res;
     StringInfoData  buf;
@@ -644,6 +645,7 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = %s AND c.relname = %s "
         "AND con.contype != 'n' "  /* NOT NULL is handled by table DDL already */
+        "AND con.contype != 'f' "  /* FK constraints handled separately after all tables created */
         "ORDER BY "
         "  CASE contype "
         "    WHEN 'p' THEN 1 "
@@ -685,6 +687,57 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
             PQclear(chk);
             pfree(chk_buf.data);
             if (already_exists)
+                continue;
+        }
+
+        /*
+         * If selective column cloning, skip constraints that reference
+         * columns not present in the target table.
+         */
+        if (opts != NULL && opts->num_columns > 0)
+        {
+            PGresult       *col_chk;
+            StringInfoData  col_buf;
+            bool            cols_missing = false;
+
+            initStringInfo(&col_buf);
+            appendStringInfo(&col_buf,
+                "SELECT a.attname "
+                "FROM pg_catalog.pg_constraint con "
+                "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
+                "  AND a.attnum = ANY(con.conkey) "
+                "WHERE n.nspname = %s AND c.relname = %s AND con.conname = %s",
+                quote_literal_cstr(schema_name),
+                quote_literal_cstr(source_table),
+                quote_literal_cstr(conname));
+
+            col_chk = pgx_clone_exec(source_conn, col_buf.data);
+            pfree(col_buf.data);
+
+            if (PQresultStatus(col_chk) == PGRES_TUPLES_OK)
+            {
+                int ci, cj;
+                for (ci = 0; ci < PQntuples(col_chk) && !cols_missing; ci++)
+                {
+                    const char *col = PQgetvalue(col_chk, ci, 0);
+                    bool found = false;
+                    for (cj = 0; cj < opts->num_columns; cj++)
+                    {
+                        if (strcmp(col, opts->columns[cj]) == 0)
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                        cols_missing = true;
+                }
+            }
+            PQclear(col_chk);
+
+            if (cols_missing)
                 continue;
         }
 
@@ -1055,7 +1108,8 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     if (opts.include_constraints)
     {
         int con_count = pgx_clone_constraints(source_conn, local_conn,
-                                              schema_name, table_name, target_name);
+                                              schema_name, table_name, target_name,
+                                              &opts);
         if (con_count > 0)
             ereport(NOTICE,
                     (errmsg("pgx_clone: cloned %d constraints for %s.%s",
@@ -1368,14 +1422,25 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                 const char *mv_name = PQgetvalue(res, i, 0);
                 const char *mv_def  = PQgetvalue(res, i, 1);
 
-                /* Create the materialized view */
-                resetStringInfo(&buf);
-                appendStringInfo(&buf,
-                    "CREATE MATERIALIZED VIEW IF NOT EXISTS %s.%s AS %s WITH DATA",
-                    quote_identifier(schema_name),
-                    quote_identifier(mv_name),
-                    mv_def);
-                pgx_clone_exec_conn(lcl_views, buf.data);
+                /* Create the materialized view — strip trailing semicolon if present */
+                {
+                    char *mv_def_clean = pstrdup(mv_def);
+                    size_t mv_len = strlen(mv_def_clean);
+                    while (mv_len > 0 &&
+                           (mv_def_clean[mv_len - 1] == ';' ||
+                            mv_def_clean[mv_len - 1] == ' ' ||
+                            mv_def_clean[mv_len - 1] == '\n'))
+                        mv_def_clean[--mv_len] = '\0';
+
+                    resetStringInfo(&buf);
+                    appendStringInfo(&buf,
+                        "CREATE MATERIALIZED VIEW IF NOT EXISTS %s.%s AS %s WITH DATA",
+                        quote_identifier(schema_name),
+                        quote_identifier(mv_name),
+                        mv_def_clean);
+                    pgx_clone_exec_conn(lcl_views, buf.data);
+                    pfree(mv_def_clean);
+                }
 
                 /* Clone indexes on materialized view */
                 if (opts.include_indexes)
