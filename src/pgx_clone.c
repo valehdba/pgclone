@@ -2,7 +2,7 @@
  * pgx_clone - PostgreSQL extension for cloning databases, schemas, tables,
  *            and functions between PostgreSQL hosts.
  *
- * Copyright (c) 2026, pgx_clone contributors
+ * Copyright (c) 2026,Valeh Agayev and pgx_clone contributors
  * Licensed under PostgreSQL License
  */
 
@@ -875,18 +875,95 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     /* Use loopback libpq connection for ALL local operations */
     local_conn = pgx_clone_connect_local();
 
-    /* ---- Step 2: Create schema + table via loopback ---- */
+    /* ---- Step 1b: Create schema locally (needed before sequences) ---- */
+    {
+        resetStringInfo(&buf);
+        appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
+                         quote_identifier(schema_name));
+        pgx_clone_exec_conn(local_conn, buf.data);
+    }
+
+    /* ---- Step 1c: Create sequences that this table depends on ---- */
+    {
+        PGresult *seq_res;
+        int       si, nseqs;
+
+        resetStringInfo(&buf);
+        appendStringInfo(&buf,
+            "SELECT s.relname AS seqname, "
+            "       n.nspname AS seqschema, "
+            "       pg_sequence.seqstart, "
+            "       pg_sequence.seqincrement, "
+            "       pg_sequence.seqmax, "
+            "       pg_sequence.seqmin, "
+            "       pg_sequence.seqcache, "
+            "       pg_sequence.seqcycle, "
+            "       pg_sequence.seqtypid::regtype::text AS seqdatatype "
+            "FROM pg_catalog.pg_class t "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
+            "JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid "
+            "JOIN pg_catalog.pg_attrdef d ON d.adrelid = t.oid AND d.adnum = a.attnum "
+            "JOIN pg_catalog.pg_depend dep ON dep.refobjid = t.oid "
+            "                              AND dep.deptype = 'a' "
+            "                              AND dep.classid = 'pg_catalog.pg_class'::regclass "
+            "JOIN pg_catalog.pg_class s ON s.oid = dep.objid AND s.relkind = 'S' "
+            "JOIN pg_catalog.pg_sequence ON pg_sequence.seqrelid = s.oid "
+            "WHERE n.nspname = %s AND t.relname = %s "
+            "AND a.attnum > 0 AND NOT a.attisdropped",
+            quote_literal_cstr(schema_name),
+            quote_literal_cstr(table_name));
+
+        seq_res = pgx_clone_exec(source_conn, buf.data);
+        nseqs   = PQntuples(seq_res);
+
+        for (si = 0; si < nseqs; si++)
+        {
+            char *seqname    = PQgetvalue(seq_res, si, 0);
+            char *seqstart   = PQgetvalue(seq_res, si, 2);
+            char *seqinc     = PQgetvalue(seq_res, si, 3);
+            char *seqmax     = PQgetvalue(seq_res, si, 4);
+            char *seqmin     = PQgetvalue(seq_res, si, 5);
+            char *seqcache   = PQgetvalue(seq_res, si, 6);
+            char *seqcycle   = PQgetvalue(seq_res, si, 7);
+            char *seqdtype   = PQgetvalue(seq_res, si, 8);
+            PGresult *lcres;
+
+            resetStringInfo(&buf);
+            appendStringInfo(&buf,
+                "CREATE SEQUENCE IF NOT EXISTS %s.%s "
+                "AS %s "
+                "START WITH %s "
+                "INCREMENT BY %s "
+                "MINVALUE %s "
+                "MAXVALUE %s "
+                "CACHE %s %s",
+                quote_identifier(schema_name),
+                quote_identifier(seqname),
+                seqdtype,
+                seqstart, seqinc, seqmin, seqmax, seqcache,
+                (strcmp(seqcycle, "t") == 0) ? "CYCLE" : "NO CYCLE");
+
+            lcres = PQexec(local_conn, buf.data);
+            if (PQresultStatus(lcres) != PGRES_COMMAND_OK)
+            {
+                /* non-fatal: sequence may already exist */
+                ereport(WARNING,
+                        (errmsg("pgx_clone: could not create sequence %s.%s: %s",
+                                schema_name, seqname,
+                                PQerrorMessage(local_conn))));
+            }
+            PQclear(lcres);
+        }
+        PQclear(seq_res);
+    }
+
+    /* ---- Step 2: Create table via loopback ---- */
     {
         PGresult *local_res;
         char     *ddl;
 
         ddl = pstrdup(PQgetvalue(res, 0, 0));
         PQclear(res);
-
-        resetStringInfo(&buf);
-        appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
-                         quote_identifier(schema_name));
-        pgx_clone_exec_conn(local_conn, buf.data);
 
         local_res = PQexec(local_conn, ddl);
         if (PQresultStatus(local_res) != PGRES_COMMAND_OK)
