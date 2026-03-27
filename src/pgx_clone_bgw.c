@@ -26,8 +26,10 @@
 #include "commands/dbcommands.h"
 #include "utils/guc.h"
 #include "libpq-fe.h"
-#include "storage/ipc.h"
 
+#if PG_VERSION_NUM >= 170000
+#include "tcop/tcopprot.h" 
+#endif
 #include "pgx_clone_bgw.h"
 
 /* Shared memory state */
