@@ -2,7 +2,7 @@
  * pgx_clone - PostgreSQL extension for cloning databases, schemas, tables,
  *            and functions between PostgreSQL hosts.
  *
- * Copyright (c) 2026,Valeh Agayev and pgx_clone contributors
+ * Copyright (c) 2026, Valeh Agayev pgx_clone contributors
  * Licensed under PostgreSQL License
  */
 
@@ -556,43 +556,65 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
     count = PQntuples(res);
     for (i = 0; i < count; i++)
     {
-        char *indexdef = PQgetvalue(res, i, 0);
+        char           *indexdef = pstrdup(PQgetvalue(res, i, 0));
+        StringInfoData  final_def;
 
-        if (strcmp(source_table, target_table) != 0)
+        initStringInfo(&final_def);
+
+        /* Inject IF NOT EXISTS and replace table name if needed */
         {
-            StringInfoData  new_def;
-            char           *pos;
-            char            search_str[NAMEDATALEN * 2 + 8];
+            char *p = indexdef;
 
-            snprintf(search_str, sizeof(search_str), " ON %s.%s ",
-                     quote_identifier(schema_name),
-                     quote_identifier(source_table));
-
-            pos = strstr(indexdef, search_str);
-            if (pos != NULL)
+            if (strncmp(p, "CREATE UNIQUE INDEX ", 20) == 0)
             {
-                initStringInfo(&new_def);
-                appendBinaryStringInfo(&new_def, indexdef, pos - indexdef);
-                appendStringInfo(&new_def, " ON %s.%s ",
-                                 quote_identifier(schema_name),
-                                 quote_identifier(target_table));
-                appendStringInfoString(&new_def, pos + strlen(search_str));
-
-                if (pgx_clone_exec_conn(target_conn, new_def.data))
-                    created++;
-                pfree(new_def.data);
+                appendStringInfoString(&final_def, "CREATE UNIQUE INDEX IF NOT EXISTS ");
+                p += 20;
+            }
+            else if (strncmp(p, "CREATE INDEX ", 13) == 0)
+            {
+                appendStringInfoString(&final_def, "CREATE INDEX IF NOT EXISTS ");
+                p += 13;
             }
             else
             {
-                if (pgx_clone_exec_conn(target_conn, indexdef))
-                    created++;
+                appendStringInfoString(&final_def, p);
+                p += strlen(p);
+            }
+
+            if (strcmp(source_table, target_table) != 0)
+            {
+                char  search_str[NAMEDATALEN * 2 + 8];
+                char *pos;
+
+                snprintf(search_str, sizeof(search_str), " ON %s.%s ",
+                         quote_identifier(schema_name),
+                         quote_identifier(source_table));
+
+                pos = strstr(p, search_str);
+                if (pos != NULL)
+                {
+                    appendBinaryStringInfo(&final_def, p, pos - p);
+                    appendStringInfo(&final_def, " ON %s.%s ",
+                                     quote_identifier(schema_name),
+                                     quote_identifier(target_table));
+                    appendStringInfoString(&final_def, pos + strlen(search_str));
+                }
+                else
+                {
+                    appendStringInfoString(&final_def, p);
+                }
+            }
+            else
+            {
+                appendStringInfoString(&final_def, p);
             }
         }
-        else
-        {
-            if (pgx_clone_exec_conn(target_conn, indexdef))
-                created++;
-        }
+
+        if (pgx_clone_exec_conn(target_conn, final_def.data))
+            created++;
+
+        pfree(final_def.data);
+        pfree(indexdef);
     }
 
     PQclear(res);
@@ -621,6 +643,7 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
         "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = %s AND c.relname = %s "
+        "AND con.contype != 'n' "  /* NOT NULL is handled by table DDL already */
         "ORDER BY "
         "  CASE contype "
         "    WHEN 'p' THEN 1 "
@@ -641,13 +664,59 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
         const char *conname = PQgetvalue(res, i, 0);
         const char *condef  = PQgetvalue(res, i, 2);
 
-        resetStringInfo(&buf);
-        appendStringInfo(&buf,
-            "ALTER TABLE %s.%s ADD CONSTRAINT %s %s",
-            quote_identifier(schema_name),
-            quote_identifier(target_table),
-            quote_identifier(conname),
-            condef);
+        /* Skip if constraint already exists on target */
+        {
+            StringInfoData chk_buf;
+            PGresult      *chk;
+            bool           already_exists;
+
+            initStringInfo(&chk_buf);
+            appendStringInfo(&chk_buf,
+                "SELECT 1 FROM pg_catalog.pg_constraint con "
+                "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relname = %s AND con.conname = %s",
+                quote_literal_cstr(schema_name),
+                quote_literal_cstr(target_table),
+                quote_literal_cstr(conname));
+            chk = PQexec(target_conn, chk_buf.data);
+            already_exists = (PQresultStatus(chk) == PGRES_TUPLES_OK &&
+                              PQntuples(chk) > 0);
+            PQclear(chk);
+            pfree(chk_buf.data);
+            if (already_exists)
+                continue;
+        }
+
+        /*
+         * If cloning to a different table name, rename the constraint
+         * to avoid conflicts with constraints on other tables.
+         * e.g. "simple_test_pkey" -> "simple_test_copy_pkey"
+         */
+        {
+            char       new_conname[NAMEDATALEN * 2];
+            const char *effective_conname = conname;
+
+            if (strcmp(source_table, target_table) != 0)
+            {
+                /* Replace source_table prefix in constraint name */
+                size_t src_len = strlen(source_table);
+                if (strncmp(conname, source_table, src_len) == 0)
+                {
+                    snprintf(new_conname, sizeof(new_conname), "%s%s",
+                             target_table, conname + src_len);
+                    effective_conname = new_conname;
+                }
+            }
+
+            resetStringInfo(&buf);
+            appendStringInfo(&buf,
+                "ALTER TABLE %s.%s ADD CONSTRAINT %s %s",
+                quote_identifier(schema_name),
+                quote_identifier(target_table),
+                quote_identifier(effective_conname),
+                condef);
+        }
 
         if (pgx_clone_exec_conn(target_conn, buf.data))
             created++;
@@ -875,7 +944,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     /* Use loopback libpq connection for ALL local operations */
     local_conn = pgx_clone_connect_local();
 
-    /* ---- Step 1b: Create schema locally (needed before sequences) ---- */
+    /* ---- Step 1b: Create schema locally ---- */
     {
         resetStringInfo(&buf);
         appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
@@ -883,33 +952,29 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         pgx_clone_exec_conn(local_conn, buf.data);
     }
 
-    /* ---- Step 1c: Create sequences that this table depends on ---- */
+    /* ---- Step 1c: Pre-create sequences this table depends on ---- */
     {
         PGresult *seq_res;
         int       si, nseqs;
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
-            "SELECT s.relname AS seqname, "
-            "       n.nspname AS seqschema, "
+            "SELECT s.relname, "
             "       pg_sequence.seqstart, "
             "       pg_sequence.seqincrement, "
             "       pg_sequence.seqmax, "
             "       pg_sequence.seqmin, "
             "       pg_sequence.seqcache, "
             "       pg_sequence.seqcycle, "
-            "       pg_sequence.seqtypid::regtype::text AS seqdatatype "
+            "       pg_sequence.seqtypid::regtype::text "
             "FROM pg_catalog.pg_class t "
             "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
-            "JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid "
-            "JOIN pg_catalog.pg_attrdef d ON d.adrelid = t.oid AND d.adnum = a.attnum "
             "JOIN pg_catalog.pg_depend dep ON dep.refobjid = t.oid "
             "                              AND dep.deptype = 'a' "
             "                              AND dep.classid = 'pg_catalog.pg_class'::regclass "
             "JOIN pg_catalog.pg_class s ON s.oid = dep.objid AND s.relkind = 'S' "
             "JOIN pg_catalog.pg_sequence ON pg_sequence.seqrelid = s.oid "
-            "WHERE n.nspname = %s AND t.relname = %s "
-            "AND a.attnum > 0 AND NOT a.attisdropped",
+            "WHERE n.nspname = %s AND t.relname = %s",
             quote_literal_cstr(schema_name),
             quote_literal_cstr(table_name));
 
@@ -918,40 +983,30 @@ pgx_clone_table(PG_FUNCTION_ARGS)
 
         for (si = 0; si < nseqs; si++)
         {
-            char *seqname    = PQgetvalue(seq_res, si, 0);
-            char *seqstart   = PQgetvalue(seq_res, si, 2);
-            char *seqinc     = PQgetvalue(seq_res, si, 3);
-            char *seqmax     = PQgetvalue(seq_res, si, 4);
-            char *seqmin     = PQgetvalue(seq_res, si, 5);
-            char *seqcache   = PQgetvalue(seq_res, si, 6);
-            char *seqcycle   = PQgetvalue(seq_res, si, 7);
-            char *seqdtype   = PQgetvalue(seq_res, si, 8);
             PGresult *lcres;
 
             resetStringInfo(&buf);
             appendStringInfo(&buf,
                 "CREATE SEQUENCE IF NOT EXISTS %s.%s "
                 "AS %s "
-                "START WITH %s "
-                "INCREMENT BY %s "
-                "MINVALUE %s "
-                "MAXVALUE %s "
-                "CACHE %s %s",
+                "START WITH %s INCREMENT BY %s "
+                "MINVALUE %s MAXVALUE %s CACHE %s %s",
                 quote_identifier(schema_name),
-                quote_identifier(seqname),
-                seqdtype,
-                seqstart, seqinc, seqmin, seqmax, seqcache,
-                (strcmp(seqcycle, "t") == 0) ? "CYCLE" : "NO CYCLE");
+                quote_identifier(PQgetvalue(seq_res, si, 0)),
+                PQgetvalue(seq_res, si, 7),    /* data type */
+                PQgetvalue(seq_res, si, 1),    /* start */
+                PQgetvalue(seq_res, si, 2),    /* increment */
+                PQgetvalue(seq_res, si, 4),    /* min */
+                PQgetvalue(seq_res, si, 3),    /* max */
+                PQgetvalue(seq_res, si, 5),    /* cache */
+                strcmp(PQgetvalue(seq_res, si, 6), "t") == 0 ? "CYCLE" : "NO CYCLE");
 
             lcres = PQexec(local_conn, buf.data);
             if (PQresultStatus(lcres) != PGRES_COMMAND_OK)
-            {
-                /* non-fatal: sequence may already exist */
                 ereport(WARNING,
                         (errmsg("pgx_clone: could not create sequence %s.%s: %s",
-                                schema_name, seqname,
+                                schema_name, PQgetvalue(seq_res, si, 0),
                                 PQerrorMessage(local_conn))));
-            }
             PQclear(lcres);
         }
         PQclear(seq_res);
@@ -1137,7 +1192,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
         appendStringInfo(&buf,
             "CREATE SEQUENCE IF NOT EXISTS %s.%s "
             "AS %s START WITH %s INCREMENT BY %s "
-            "MINVALUE %s MAXVALUE %s %s CYCLE",
+            "MINVALUE %s MAXVALUE %s %s",
             quote_identifier(schema_name),
             quote_identifier(PQgetvalue(res, i, 0)),
             PQgetvalue(res, i, 1),
@@ -1145,7 +1200,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
             PQgetvalue(res, i, 3),
             PQgetvalue(res, i, 4),
             PQgetvalue(res, i, 5),
-            strcmp(PQgetvalue(res, i, 6), "YES") == 0 ? "" : "NO");
+            strcmp(PQgetvalue(res, i, 6), "YES") == 0 ? "CYCLE" : "NO CYCLE");
         pgx_clone_exec_conn(local_conn, buf.data);
     }
     ereport(NOTICE,
