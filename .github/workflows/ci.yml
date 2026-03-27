@@ -18,6 +18,10 @@ jobs:
       matrix:
         pg_version: [14, 15, 16, 17]
 
+    # Only source-db runs in Docker.
+    # Target PostgreSQL runs directly on the host so that
+    # `make install` places the .so where the server can load it
+    # via shared_preload_libraries.
     services:
       source-db:
         image: postgres:${{ matrix.pg_version }}
@@ -32,31 +36,21 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-      target-db:
-        image: postgres:${{ matrix.pg_version }}
-        env:
-          POSTGRES_PASSWORD: testpass
-          POSTGRES_DB: target_db
-        ports:
-          - 5434:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL dev headers
+      - name: Install PostgreSQL ${{ matrix.pg_version }} server and dev headers
         run: |
           sudo apt-get update -qq
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
           sudo apt-get update -qq
-          sudo apt-get install -y postgresql-server-dev-${{ matrix.pg_version }} libpq-dev build-essential
+          sudo apt-get install -y postgresql-${{ matrix.pg_version }} postgresql-server-dev-${{ matrix.pg_version }} libpq-dev build-essential
           /usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config --version
+
+          # Stop any auto-started PostgreSQL — we will start our own cluster later
+          sudo systemctl stop postgresql || true
 
       - name: Build pgx_clone
         run: |
@@ -67,9 +61,35 @@ jobs:
         run: |
           sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
 
+      - name: Start target PostgreSQL on the host
+        run: |
+          PG_VER=${{ matrix.pg_version }}
+
+          # Drop the default cluster created by the package, create a fresh one
+          sudo pg_dropcluster --stop $PG_VER main 2>/dev/null || true
+          sudo pg_createcluster $PG_VER target -p 5434
+
+          # Trust auth for CI (local socket + TCP loopback)
+          TARGET_HBA="/etc/postgresql/$PG_VER/target/pg_hba.conf"
+          sudo tee "$TARGET_HBA" > /dev/null <<EOF
+          local   all   all                 trust
+          host    all   all   127.0.0.1/32  trust
+          host    all   all   ::1/128       trust
+          EOF
+
+          # Load pgx_clone at server start (required for background workers / shmem)
+          echo "shared_preload_libraries = 'pgx_clone'" \
+            | sudo tee -a /etc/postgresql/$PG_VER/target/postgresql.conf > /dev/null
+
+          sudo pg_ctlcluster $PG_VER target start
+
+          # Create the target database
+          sudo -u postgres createdb -p 5434 target_db
+
       - name: Seed source database
         run: |
-          PGPASSWORD=testpass psql -h localhost -p 5433 -U postgres -d source_db -f test/fixtures/seed.sql
+          PGPASSWORD=testpass psql -h localhost -p 5433 -U postgres -d source_db \
+            -f test/fixtures/seed.sql
 
       - name: Install pgTAP
         run: |
@@ -77,25 +97,26 @@ jobs:
           cd /tmp/pgtap
           make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
-          PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db -c "CREATE EXTENSION IF NOT EXISTS pgtap;"
+          psql -h localhost -p 5434 -U postgres -d target_db \
+            -c "CREATE EXTENSION IF NOT EXISTS pgtap;"
 
-      - name: Create pgx_clone extension
+      - name: Create pgx_clone extension and verify
         run: |
-          PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db -c "CREATE EXTENSION IF NOT EXISTS pgx_clone;"
-          PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db -c "SELECT pgx_clone_version();"
+          psql -h localhost -p 5434 -U postgres -d target_db \
+            -c "CREATE EXTENSION IF NOT EXISTS pgx_clone;"
+          psql -h localhost -p 5434 -U postgres -d target_db \
+            -c "SELECT pgx_clone_version();"
 
       - name: Set source conninfo
         run: |
-          # Get the actual IP of source-db service container
-          SOURCE_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-            $(docker ps -q --filter "ancestor=postgres:${{ matrix.pg_version }}" | head -1) 2>/dev/null || echo "localhost")
-          
-          PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db \
-            -c "ALTER DATABASE target_db SET app.source_conninfo = 'host=${SOURCE_IP} port=5432 dbname=source_db user=postgres password=testpass';"
+          # Source DB is the Docker service container, reachable from the
+          # host (where target PG runs) via localhost:5433.
+          psql -h localhost -p 5434 -U postgres -d target_db \
+            -c "ALTER DATABASE target_db SET app.source_conninfo = 'host=localhost port=5433 dbname=source_db user=postgres password=testpass';"
 
       - name: Run pgTAP tests
         run: |
-          PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db \
+          psql -h localhost -p 5434 -U postgres -d target_db \
             -f test/pgx_clone_test.sql
 
       - name: Show build info
@@ -103,4 +124,4 @@ jobs:
         run: |
           echo "PostgreSQL version: ${{ matrix.pg_version }}"
           ls -la *.so 2>/dev/null || echo "No .so file found"
-
+          pg_lsclusters
