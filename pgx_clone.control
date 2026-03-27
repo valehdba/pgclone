@@ -1,6 +1,6 @@
 # pgx_clone extension
-comment = 'Clone PostgreSQL databases, schemas, tables with selective columns, data filtering, async, resume, and conflict resolution'
-default_version = '1.1.0'
+comment = 'Clone PostgreSQL databases, schemas, tables with selective columns, data filtering, async, parallel cloning, materialized views, resume, and conflict resolution'
+default_version = '2.0.0'
 module_pathname = '$libdir/pgx_clone'
 relocatable = false
 superuser = true

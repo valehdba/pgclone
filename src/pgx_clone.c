@@ -42,6 +42,7 @@ typedef struct CloneOptions
     bool include_indexes;
     bool include_constraints;
     bool include_triggers;
+    bool include_matviews;       /* clone materialized views */
 
     /* Selective column cloning: if num_columns > 0, only these columns */
     int  num_columns;
@@ -49,6 +50,9 @@ typedef struct CloneOptions
 
     /* Data filtering: WHERE clause applied during COPY */
     char where_clause[PGX_CLONE_MAX_WHERE];
+
+    /* Parallel cloning: number of workers (0 = sequential) */
+    int  parallel_workers;
 } CloneOptions;
 
 /* Default: everything enabled, no column/where filter */
@@ -60,8 +64,10 @@ pgx_clone_default_options(void)
     opts.include_indexes     = true;
     opts.include_constraints = true;
     opts.include_triggers    = true;
+    opts.include_matviews    = true;
     opts.num_columns         = 0;
     opts.where_clause[0]     = '\0';
+    opts.parallel_workers    = 0;
     return opts;
 }
 
@@ -94,6 +100,25 @@ pgx_clone_parse_options(const char *json_str)
     if (strstr(json_str, "\"triggers\": false") != NULL ||
         strstr(json_str, "\"triggers\":false") != NULL)
         opts.include_triggers = false;
+
+    if (strstr(json_str, "\"matviews\": false") != NULL ||
+        strstr(json_str, "\"matviews\":false") != NULL)
+        opts.include_matviews = false;
+
+    /* Parse "parallel": N */
+    {
+        const char *pp = strstr(json_str, "\"parallel\"");
+        if (pp != NULL)
+        {
+            const char *colon = strchr(pp, ':');
+            if (colon != NULL)
+            {
+                int val = atoi(colon + 1);
+                if (val > 0 && val <= PGX_CLONE_MAX_JOBS)
+                    opts.parallel_workers = val;
+            }
+        }
+    }
 
     /* Parse "columns": ["col1", "col2", ...] */
     p = strstr(json_str, "\"columns\"");
@@ -600,9 +625,10 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
         "  CASE contype "
         "    WHEN 'p' THEN 1 "
         "    WHEN 'u' THEN 2 "
-        "    WHEN 'c' THEN 3 "
-        "    WHEN 'f' THEN 4 "
-        "    ELSE 5 "
+        "    WHEN 'x' THEN 3 "  /* EXCLUSION constraints */
+        "    WHEN 'c' THEN 4 "
+        "    WHEN 'f' THEN 5 "
+        "    ELSE 6 "
         "  END, conname",
         quote_literal_cstr(schema_name),
         quote_literal_cstr(source_table));
@@ -1190,6 +1216,64 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                         PQntuples(res), schema_name)));
         PQclear(res);
 
+        /* ---- Step 7: Clone materialized views ---- */
+        if (opts.include_matviews)
+        {
+            resetStringInfo(&buf);
+            appendStringInfo(&buf,
+                "SELECT c.relname AS matview_name, "
+                "pg_get_viewdef(c.oid, true) AS matview_def "
+                "FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relkind = 'm' "
+                "ORDER BY c.relname",
+                quote_literal_cstr(schema_name));
+
+            res = pgx_clone_exec(src_views, buf.data);
+
+            for (i = 0; i < PQntuples(res); i++)
+            {
+                const char *mv_name = PQgetvalue(res, i, 0);
+                const char *mv_def  = PQgetvalue(res, i, 1);
+
+                /* Create the materialized view */
+                resetStringInfo(&buf);
+                appendStringInfo(&buf,
+                    "CREATE MATERIALIZED VIEW IF NOT EXISTS %s.%s AS %s WITH DATA",
+                    quote_identifier(schema_name),
+                    quote_identifier(mv_name),
+                    mv_def);
+                pgx_clone_exec_conn(lcl_views, buf.data);
+
+                /* Clone indexes on materialized view */
+                if (opts.include_indexes)
+                {
+                    PGresult *idx_res;
+                    int       idx_i;
+
+                    resetStringInfo(&buf);
+                    appendStringInfo(&buf,
+                        "SELECT pg_get_indexdef(i.indexrelid) "
+                        "FROM pg_catalog.pg_index i "
+                        "JOIN pg_catalog.pg_class c ON c.oid = i.indrelid "
+                        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = %s AND c.relname = %s",
+                        quote_literal_cstr(schema_name),
+                        quote_literal_cstr(mv_name));
+
+                    idx_res = pgx_clone_exec(src_views, buf.data);
+                    for (idx_i = 0; idx_i < PQntuples(idx_res); idx_i++)
+                        pgx_clone_exec_conn(lcl_views, PQgetvalue(idx_res, idx_i, 0));
+                    PQclear(idx_res);
+                }
+            }
+
+            ereport(NOTICE,
+                    (errmsg("pgx_clone: cloned %d materialized views from schema %s",
+                            PQntuples(res), schema_name)));
+            PQclear(res);
+        }
+
         PQfinish(lcl_views);
         PQfinish(src_views);
     }
@@ -1359,7 +1443,7 @@ PG_FUNCTION_INFO_V1(pgx_clone_version);
 Datum
 pgx_clone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 1.1.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 2.0.0"));
 }
 
 /* ===============================================================
@@ -1498,6 +1582,12 @@ pgx_clone_table_async(PG_FUNCTION_ARGS)
 /* ===============================================================
  * FUNCTION: pgx_clone_schema_async(conninfo, schema, include_data
  *              [, options_json])
+ *
+ * When options contains "parallel": N (N > 1), launches N background
+ * workers that each clone a subset of tables concurrently.
+ * Without parallel, launches a single worker (as before).
+ *
+ * Returns the parent job_id. Child jobs are visible via pgx_clone_jobs().
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgx_clone_schema_async);
 
@@ -1513,8 +1603,6 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
     char       *source_conninfo   = text_to_cstring(source_conninfo_t);
     char       *schema_name       = text_to_cstring(schema_t);
 
-    BackgroundWorker worker;
-    BackgroundWorkerHandle *handle;
     PgxCloneJob    *job;
     int             job_id;
 
@@ -1542,55 +1630,238 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
                  errmsg("pgx_clone: shared memory not initialized"),
                  errhint("Add pgx_clone to shared_preload_libraries")));
 
-    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
-
-    job = find_free_slot();
-    if (!job)
+    if (opts.parallel_workers > 1)
     {
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
-    }
+        /*
+         * PARALLEL MODE: Get table list, then launch N workers
+         * each handling a subset of tables.
+         */
+        PGconn     *source_conn;
+        PGresult   *table_res;
+        StringInfoData qbuf;
+        int         ntables, tables_per_worker, wi;
+        int         parent_job_id;
+        int         workers_launched = 0;
 
-    job_id = pgx_clone_state->next_job_id++;
-    memset(job, 0, sizeof(PgxCloneJob));
-    job->job_id = job_id;
-    job->status = PGX_CLONE_JOB_PENDING;
-    job->op_type = PGX_CLONE_OP_SCHEMA;
-    job->database_oid = MyDatabaseId;
+        /* First create schema + sequences + functions via loopback */
+        {
+            PGconn     *local_conn = pgx_clone_connect_local();
+            PGresult   *func_res;
+            StringInfoData fbuf;
 
-    strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
-    strlcpy(job->schema_name, schema_name, NAMEDATALEN);
+            initStringInfo(&fbuf);
+            appendStringInfo(&fbuf, "CREATE SCHEMA IF NOT EXISTS %s",
+                             quote_identifier(schema_name));
+            pgx_clone_exec_conn(local_conn, fbuf.data);
 
-    job->include_data        = include_data;
-    job->include_indexes     = opts.include_indexes;
-    job->include_constraints = opts.include_constraints;
-    job->include_triggers    = opts.include_triggers;
-    job->conflict_strategy   = conflict;
-    job->resumable           = true;
+            PQfinish(local_conn);
+            pfree(fbuf.data);
+        }
 
-    LWLockRelease(pgx_clone_state->lock);
+        /* Get table list from source */
+        source_conn = pgx_clone_connect(source_conninfo);
 
-    memset(&worker, 0, sizeof(BackgroundWorker));
-    snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: schema %s (job %d)",
-             schema_name, job_id);
-    snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-    worker.bgw_restart_time = BGW_NEVER_RESTART;
-    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
-    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
-    worker.bgw_main_arg = Int32GetDatum(job_id);
-    worker.bgw_notify_pid = MyProcPid;
+        initStringInfo(&qbuf);
+        appendStringInfo(&qbuf,
+            "SELECT tablename FROM pg_catalog.pg_tables "
+            "WHERE schemaname = %s ORDER BY tablename",
+            quote_literal_cstr(schema_name));
 
-    if (!RegisterDynamicBackgroundWorker(&worker, &handle))
-    {
+        table_res = pgx_clone_exec(source_conn, qbuf.data);
+        ntables = PQntuples(table_res);
+
+        PQfinish(source_conn);
+
+        if (ntables == 0)
+        {
+            PQclear(table_res);
+            pfree(qbuf.data);
+            ereport(NOTICE, (errmsg("pgx_clone: no tables found in schema %s", schema_name)));
+            PG_RETURN_INT32(0);
+        }
+
+        /* Allocate parent job for tracking */
         LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
-        job->status = PGX_CLONE_JOB_FREE;
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
-    }
 
-    PG_RETURN_INT32(job_id);
+        job = find_free_slot();
+        if (!job)
+        {
+            LWLockRelease(pgx_clone_state->lock);
+            PQclear(table_res);
+            pfree(qbuf.data);
+            ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
+        }
+
+        parent_job_id = pgx_clone_state->next_job_id++;
+        memset(job, 0, sizeof(PgxCloneJob));
+        job->job_id = parent_job_id;
+        job->status = PGX_CLONE_JOB_RUNNING;
+        job->op_type = PGX_CLONE_OP_SCHEMA;
+        job->database_oid = MyDatabaseId;
+        job->total_tables = ntables;
+        job->parallel_workers = opts.parallel_workers;
+        job->start_time = GetCurrentTimestamp();
+        strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
+        strlcpy(job->schema_name, schema_name, NAMEDATALEN);
+        strlcpy(job->current_phase, "launching parallel workers", 64);
+
+        LWLockRelease(pgx_clone_state->lock);
+
+        /* Launch workers — each gets a subset of tables */
+        tables_per_worker = (ntables + opts.parallel_workers - 1) / opts.parallel_workers;
+
+        for (wi = 0; wi < opts.parallel_workers && wi * tables_per_worker < ntables; wi++)
+        {
+            int start_idx = wi * tables_per_worker;
+            int end_idx = start_idx + tables_per_worker;
+            int ti;
+            BackgroundWorker worker;
+            BackgroundWorkerHandle *handle;
+            PgxCloneJob *child_job;
+            int child_job_id;
+
+            if (end_idx > ntables)
+                end_idx = ntables;
+
+            /* For each table in this worker's range, create a table-level job */
+            for (ti = start_idx; ti < end_idx; ti++)
+            {
+                const char *tname = PQgetvalue(table_res, ti, 0);
+
+                LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+
+                child_job = find_free_slot();
+                if (!child_job)
+                {
+                    LWLockRelease(pgx_clone_state->lock);
+                    ereport(WARNING,
+                            (errmsg("pgx_clone: no free job slot for table %s, skipping", tname)));
+                    continue;
+                }
+
+                child_job_id = pgx_clone_state->next_job_id++;
+                memset(child_job, 0, sizeof(PgxCloneJob));
+                child_job->job_id = child_job_id;
+                child_job->status = PGX_CLONE_JOB_PENDING;
+                child_job->op_type = PGX_CLONE_OP_TABLE;
+                child_job->database_oid = MyDatabaseId;
+                child_job->include_data = include_data;
+                child_job->include_indexes = opts.include_indexes;
+                child_job->include_constraints = opts.include_constraints;
+                child_job->include_triggers = opts.include_triggers;
+                child_job->conflict_strategy = conflict;
+                child_job->resumable = true;
+
+                strlcpy(child_job->source_conninfo, source_conninfo, sizeof(child_job->source_conninfo));
+                strlcpy(child_job->schema_name, schema_name, NAMEDATALEN);
+                strlcpy(child_job->table_name, tname, NAMEDATALEN);
+                strlcpy(child_job->target_name, tname, NAMEDATALEN);
+
+                LWLockRelease(pgx_clone_state->lock);
+
+                /* Launch bgworker for this table */
+                memset(&worker, 0, sizeof(BackgroundWorker));
+                snprintf(worker.bgw_name, BGW_MAXLEN,
+                         "pgx_clone: %s.%s (parallel job %d, worker %d)",
+                         schema_name, tname, parent_job_id, wi);
+                snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+                worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+                worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+                worker.bgw_restart_time = BGW_NEVER_RESTART;
+                snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
+                snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+                worker.bgw_main_arg = Int32GetDatum(child_job_id);
+                worker.bgw_notify_pid = MyProcPid;
+
+                if (RegisterDynamicBackgroundWorker(&worker, &handle))
+                    workers_launched++;
+                else
+                    ereport(WARNING,
+                            (errmsg("pgx_clone: could not launch worker for table %s", tname)));
+            }
+        }
+
+        PQclear(table_res);
+        pfree(qbuf.data);
+
+        /* Update parent job */
+        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+        snprintf(pgx_clone_state->jobs[0].current_phase, 64,
+                 "%d parallel workers launched", workers_launched);
+
+        /* Find parent job to update */
+        {
+            PgxCloneJob *pj = find_job(parent_job_id);
+            if (pj)
+                snprintf(pj->current_phase, 64,
+                         "%d parallel workers for %d tables", workers_launched, ntables);
+        }
+        LWLockRelease(pgx_clone_state->lock);
+
+        ereport(NOTICE,
+                (errmsg("pgx_clone: launched %d parallel workers for %d tables in schema %s (parent job %d)",
+                        workers_launched, ntables, schema_name, parent_job_id)));
+
+        PG_RETURN_INT32(parent_job_id);
+    }
+    else
+    {
+        /*
+         * SEQUENTIAL MODE: Single worker for whole schema (original behavior)
+         */
+        BackgroundWorker worker;
+        BackgroundWorkerHandle *handle;
+
+        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+
+        job = find_free_slot();
+        if (!job)
+        {
+            LWLockRelease(pgx_clone_state->lock);
+            ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
+        }
+
+        job_id = pgx_clone_state->next_job_id++;
+        memset(job, 0, sizeof(PgxCloneJob));
+        job->job_id = job_id;
+        job->status = PGX_CLONE_JOB_PENDING;
+        job->op_type = PGX_CLONE_OP_SCHEMA;
+        job->database_oid = MyDatabaseId;
+
+        strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
+        strlcpy(job->schema_name, schema_name, NAMEDATALEN);
+
+        job->include_data        = include_data;
+        job->include_indexes     = opts.include_indexes;
+        job->include_constraints = opts.include_constraints;
+        job->include_triggers    = opts.include_triggers;
+        job->conflict_strategy   = conflict;
+        job->resumable           = true;
+
+        LWLockRelease(pgx_clone_state->lock);
+
+        memset(&worker, 0, sizeof(BackgroundWorker));
+        snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: schema %s (job %d)",
+                 schema_name, job_id);
+        snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+        worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+        worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+        worker.bgw_restart_time = BGW_NEVER_RESTART;
+        snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
+        snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+        worker.bgw_main_arg = Int32GetDatum(job_id);
+        worker.bgw_notify_pid = MyProcPid;
+
+        if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+        {
+            LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+            job->status = PGX_CLONE_JOB_FREE;
+            LWLockRelease(pgx_clone_state->lock);
+            ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
+        }
+
+        PG_RETURN_INT32(job_id);
+    }
 }
 
 /* ===============================================================

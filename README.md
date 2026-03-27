@@ -214,7 +214,7 @@ SELECT pgx_clone_table(
 
 ```sql
 SELECT pgx_clone_version();
--- Returns: pgx_clone 1.1.0
+-- Returns: pgx_clone 2.0.0
 ```
 
 ## Async Clone Operations (v1.0.0)
@@ -306,6 +306,41 @@ SELECT pgx_clone_schema_async(conn, 'sales', true,
     '{"conflict": "replace", "indexes": false, "triggers": false}');
 ```
 
+## Parallel Cloning (v2.0.0)
+
+Clone tables in parallel using multiple background workers:
+
+```sql
+-- Clone schema with 4 parallel workers
+SELECT pgx_clone_schema_async(
+    'host=source-server dbname=mydb user=postgres',
+    'sales', true,
+    '{"parallel": 4}'
+);
+
+-- Combine parallel with other options
+SELECT pgx_clone_schema_async(
+    'host=source-server dbname=mydb user=postgres',
+    'sales', true,
+    '{"parallel": 8, "conflict": "replace", "triggers": false}'
+);
+```
+
+Each table gets its own background worker. Track all workers via `pgx_clone_jobs()`.
+
+## Materialized Views (v1.2.0)
+
+Materialized views are now cloned automatically during schema clone, including their indexes and data. Disable with:
+
+```sql
+SELECT pgx_clone_schema(conn, 'analytics', true,
+    '{"matviews": false}');
+```
+
+## Exclusion Constraints (v1.2.0)
+
+Exclusion constraints are now fully supported and cloned automatically alongside PRIMARY KEY, UNIQUE, CHECK, and FOREIGN KEY constraints.
+
 ## Connection String Format
 
 The `source_conninfo` parameter uses standard PostgreSQL connection strings:
@@ -328,11 +363,9 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v1.1.0)
+## Current Limitations (v2.0.0)
 
-- Exclusion constraints not yet supported
-- Materialized views not yet cloned
-- Parallel workers clone tables sequentially within a single bgworker (true multi-worker parallelism planned)
+- Parallel cloning uses one bgworker per table — very large schemas may hit max_worker_processes limit
 - WHERE clause in data filtering is passed directly to SQL — use with trusted input only
 
 ## Roadmap
@@ -344,8 +377,8 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v0.3.0: Background worker for async operations with progress tracking~~ (done)
 - [x] ~~v1.0.0: Resume support and conflict resolution~~ (done)
 - [x] ~~v1.1.0: Selective column cloning and data filtering~~ (done)
-- [ ] v1.2.0: Clone materialized views and exclusion constraints
-- [ ] v2.0.0: True multi-worker parallel cloning
+- [x] ~~v1.2.0: Clone materialized views and exclusion constraints~~ (done)
+- [x] ~~v2.0.0: True multi-worker parallel cloning~~ (done)
 
 ## License
 
