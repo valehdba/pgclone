@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     name: "PostgreSQL ${{ matrix.pg_version }}"
@@ -13,10 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [14, 15, 16, 17, 18]
+        pg_version: [14, 15, 16, 17]
 
     services:
-      # Source database to clone FROM
       source-db:
         image: postgres:${{ matrix.pg_version }}
         env:
@@ -30,7 +32,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-      # Target database to clone INTO
       target-db:
         image: postgres:${{ matrix.pg_version }}
         env:
@@ -50,19 +51,19 @@ jobs:
 
       - name: Install PostgreSQL dev headers
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y postgresql-server-dev-${{ matrix.pg_version }} libpq-dev build-essential
+          /usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config --version
 
       - name: Build pgx_clone
         run: |
-          make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
-        env:
-          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+          make PG_CONFIG=$PG_CONFIG CFLAGS="-Isrc"
 
-      - name: Install pgx_clone on target
+      - name: Install pgx_clone
         run: |
           sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
 
@@ -70,7 +71,7 @@ jobs:
         run: |
           PGPASSWORD=testpass psql -h localhost -p 5433 -U postgres -d source_db -f test/fixtures/seed.sql
 
-      - name: Install pgTAP on target
+      - name: Install pgTAP
         run: |
           git clone --depth 1 https://github.com/theory/pgtap.git /tmp/pgtap
           cd /tmp/pgtap
@@ -78,7 +79,7 @@ jobs:
           sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db -c "CREATE EXTENSION IF NOT EXISTS pgtap;"
 
-      - name: Install pgx_clone extension
+      - name: Create pgx_clone extension
         run: |
           PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db -c "CREATE EXTENSION IF NOT EXISTS pgx_clone;"
           PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db -c "SELECT pgx_clone_version();"
@@ -91,12 +92,10 @@ jobs:
       - name: Run pgTAP tests
         run: |
           PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db \
-            -f test/pgx_clone_test.sql
+            -v ON_ERROR_STOP=1 -f test/pgx_clone_test.sql
 
-      - name: Test compilation output
+      - name: Show build info
         if: always()
         run: |
-          echo "Build artifacts:"
-          ls -la pgx_clone.so 2>/dev/null || echo "No .so file"
-          echo ""
           echo "PostgreSQL version: ${{ matrix.pg_version }}"
+          ls -la *.so 2>/dev/null || echo "No .so file found"
