@@ -42,18 +42,9 @@ jobs:
       - name: Install PostgreSQL ${{ matrix.pg_version }}
         run: |
           PG_VER=${{ matrix.pg_version }}
-          # Install target version from PGDG
-          . /etc/os-release
-          CODENAME="${VERSION_CODENAME}"
-
-          echo "Using Ubuntu codename: ${CODENAME}"
-          sudo install -d -m 0755 /etc/apt/keyrings
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
-          sudo chmod a+r /etc/apt/keyrings/postgresql.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-common ca-certificates curl gnupg
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get update -qq
           sudo apt-get install -y postgresql-$PG_VER postgresql-server-dev-$PG_VER libpq-dev build-essential
 
