@@ -26,6 +26,7 @@
 #include "commands/dbcommands.h"
 #include "utils/guc.h"
 #include "libpq-fe.h"
+#include "storage/ipc.h"
 
 #include "pgx_clone_bgw.h"
 
