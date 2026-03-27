@@ -28,7 +28,7 @@
 #include "libpq-fe.h"
 
 #if PG_VERSION_NUM >= 170000
-#include "tcop/tcopprot.h" 
+#include "postmaster/interrupt.h"
 #endif
 #include "pgx_clone_bgw.h"
 
