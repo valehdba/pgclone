@@ -46,10 +46,23 @@ jobs:
           sudo apt-get install -y postgresql-common ca-certificates curl gnupg
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get update -qq
-          sudo apt-get install -y postgresql-$PG_VER postgresql-server-dev-$PG_VER libpq-dev build-essential
+          if ! sudo apt-get install -y postgresql-$PG_VER postgresql-server-dev-$PG_VER libpq-dev build-essential; then
+            echo "Primary install failed for PG${PG_VER}. Dumping package candidates..."
+            apt-cache policy "postgresql-$PG_VER" || true
+            apt-cache policy "postgresql-server-dev-$PG_VER" || true
+            apt-cache search "^postgresql-[0-9]+" | sort | tail -n 40 || true
+            echo "Retrying with postgresql-server-dev-all fallback..."
+            sudo apt-get install -y "postgresql-$PG_VER" postgresql-server-dev-all libpq-dev build-essential
+          fi
 
           # Verify install
-          /usr/lib/postgresql/$PG_VER/bin/pg_config --version
+          if [ -x "/usr/lib/postgresql/$PG_VER/bin/pg_config" ]; then
+            /usr/lib/postgresql/$PG_VER/bin/pg_config --version
+          else
+            echo "Versioned pg_config not found, showing available pg_config:"
+            command -v pg_config || true
+            pg_config --version
+          fi
 
       - name: Build pgx_clone
         run: |
