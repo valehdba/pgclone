@@ -461,7 +461,12 @@ pgx_clone_bgw_main(Datum main_arg)
     char           *dbname;
 
     /* Set up signal handlers */
-    pqsignal(SIGTERM, die);
+    #if PG_VERSION_NUM >= 170000
+        pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+    #else
+        pqsignal(SIGTERM, die);
+    #endif
+
     BackgroundWorkerUnblockSignals();
 
     if (!pgx_clone_state)
