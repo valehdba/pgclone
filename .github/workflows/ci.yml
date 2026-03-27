@@ -86,12 +86,15 @@ jobs:
           rm -rf "$PGDATA"
           "$PGBIN/initdb" -D "$PGDATA" --username=postgres --auth=trust
 
-          {
-            echo "port = 5434"
-            echo "listen_addresses = 'localhost'"
-            echo "shared_preload_libraries = 'pgx_clone'"
-            echo "unix_socket_directories = '$PGDATA'"
-          } >> "$PGDATA/postgresql.conf"
+	  {
+  	    echo "port = 5434"
+  	    echo "listen_addresses = 'localhost'"
+ 	    echo "shared_buffers = '256MB'"
+ 	    echo "max_connections = 100"
+ 	    echo "max_parallel_workers_per_gather = 0"
+ 	    echo "shared_preload_libraries = 'pgx_clone'"
+  	    echo "unix_socket_directories = '$PGDATA'"
+	  } >> "$PGDATA/postgresql.conf"
 
           "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" start
           "$PGBIN/createdb" -h localhost -p 5434 -U postgres target_db
