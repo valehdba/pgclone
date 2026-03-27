@@ -86,8 +86,12 @@ jobs:
 
       - name: Set source conninfo
         run: |
+          # Get the actual IP of source-db service container
+          SOURCE_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+            $(docker ps -q --filter "ancestor=postgres:${{ matrix.pg_version }}" | head -1) 2>/dev/null || echo "localhost")
+          
           PGPASSWORD=testpass psql -h localhost -p 5434 -U postgres -d target_db \
-            -c "ALTER DATABASE target_db SET app.source_conninfo = 'host=localhost port=5433 dbname=source_db user=postgres password=testpass';"
+            -c "ALTER DATABASE target_db SET app.source_conninfo = 'host=${SOURCE_IP} port=5432 dbname=source_db user=postgres password=testpass';"
 
       - name: Run pgTAP tests
         run: |
@@ -99,3 +103,4 @@ jobs:
         run: |
           echo "PostgreSQL version: ${{ matrix.pg_version }}"
           ls -la *.so 2>/dev/null || echo "No .so file found"
+
