@@ -29,6 +29,8 @@
 
 #if PG_VERSION_NUM >= 170000
 #include "postmaster/interrupt.h"
+#else
+#include "tcop/tcopprot.h"
 #endif
 #include "pgx_clone_bgw.h"
 
