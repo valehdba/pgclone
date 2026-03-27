@@ -34,63 +34,151 @@ PG_MODULE_MAGIC;
  * Clone options struct — controls what gets cloned beyond the
  * table structure and data.
  * --------------------------------------------------------------- */
+#define PGX_CLONE_MAX_COLUMNS   64
+#define PGX_CLONE_MAX_WHERE     2048
+
 typedef struct CloneOptions
 {
     bool include_indexes;
     bool include_constraints;
     bool include_triggers;
+
+    /* Selective column cloning: if num_columns > 0, only these columns */
+    int  num_columns;
+    char columns[PGX_CLONE_MAX_COLUMNS][NAMEDATALEN];
+
+    /* Data filtering: WHERE clause applied during COPY */
+    char where_clause[PGX_CLONE_MAX_WHERE];
 } CloneOptions;
 
-/* Default: everything enabled */
+/* Default: everything enabled, no column/where filter */
 static CloneOptions
 pgx_clone_default_options(void)
 {
     CloneOptions opts;
+    memset(&opts, 0, sizeof(CloneOptions));
     opts.include_indexes     = true;
     opts.include_constraints = true;
     opts.include_triggers    = true;
+    opts.num_columns         = 0;
+    opts.where_clause[0]     = '\0';
     return opts;
 }
 
 /* ---------------------------------------------------------------
  * Parse a JSON options string like:
- *   {"indexes": false, "constraints": true, "triggers": false}
+ *   {"indexes": false, "constraints": true, "triggers": false,
+ *    "columns": ["id", "name", "email"],
+ *    "where": "status = 'active' AND created_at > '2024-01-01'"}
  *
- * Missing keys default to true. Simple parser — no external deps.
+ * Missing keys keep defaults. Simple parser — no external deps.
  * --------------------------------------------------------------- */
 static CloneOptions
 pgx_clone_parse_options(const char *json_str)
 {
     CloneOptions opts = pgx_clone_default_options();
+    const char *p;
 
     if (json_str == NULL || json_str[0] == '\0')
         return opts;
 
-    /* Look for "indexes": false */
-    if (strstr(json_str, "\"indexes\"") != NULL ||
-        strstr(json_str, "\"indexes\" ") != NULL)
+    /* Boolean options */
+    if (strstr(json_str, "\"indexes\": false") != NULL ||
+        strstr(json_str, "\"indexes\":false") != NULL)
+        opts.include_indexes = false;
+
+    if (strstr(json_str, "\"constraints\": false") != NULL ||
+        strstr(json_str, "\"constraints\":false") != NULL)
+        opts.include_constraints = false;
+
+    if (strstr(json_str, "\"triggers\": false") != NULL ||
+        strstr(json_str, "\"triggers\":false") != NULL)
+        opts.include_triggers = false;
+
+    /* Parse "columns": ["col1", "col2", ...] */
+    p = strstr(json_str, "\"columns\"");
+    if (p != NULL)
     {
-        if (strstr(json_str, "\"indexes\": false") != NULL ||
-            strstr(json_str, "\"indexes\":false") != NULL)
-            opts.include_indexes = false;
+        const char *bracket = strchr(p, '[');
+        if (bracket != NULL)
+        {
+            const char *end_bracket = strchr(bracket, ']');
+            if (end_bracket != NULL)
+            {
+                const char *cur = bracket + 1;
+                opts.num_columns = 0;
+
+                while (cur < end_bracket && opts.num_columns < PGX_CLONE_MAX_COLUMNS)
+                {
+                    const char *quote_start, *quote_end;
+
+                    /* Find opening quote */
+                    quote_start = strchr(cur, '"');
+                    if (!quote_start || quote_start >= end_bracket)
+                        break;
+                    quote_start++;
+
+                    /* Find closing quote */
+                    quote_end = strchr(quote_start, '"');
+                    if (!quote_end || quote_end >= end_bracket)
+                        break;
+
+                    {
+                        int len = quote_end - quote_start;
+                        if (len > 0 && len < NAMEDATALEN)
+                        {
+                            memcpy(opts.columns[opts.num_columns], quote_start, len);
+                            opts.columns[opts.num_columns][len] = '\0';
+                            opts.num_columns++;
+                        }
+                    }
+
+                    cur = quote_end + 1;
+                }
+            }
+        }
     }
 
-    /* Look for "constraints": false */
-    if (strstr(json_str, "\"constraints\"") != NULL ||
-        strstr(json_str, "\"constraints\" ") != NULL)
-    {
-        if (strstr(json_str, "\"constraints\": false") != NULL ||
-            strstr(json_str, "\"constraints\":false") != NULL)
-            opts.include_constraints = false;
-    }
+    /* Parse "where": "condition..." */
+    p = strstr(json_str, "\"where\"");
+    if (p == NULL)
+        p = strstr(json_str, "\"filter\"");  /* accept "filter" as alias */
 
-    /* Look for "triggers": false */
-    if (strstr(json_str, "\"triggers\"") != NULL ||
-        strstr(json_str, "\"triggers\" ") != NULL)
+    if (p != NULL)
     {
-        if (strstr(json_str, "\"triggers\": false") != NULL ||
-            strstr(json_str, "\"triggers\":false") != NULL)
-            opts.include_triggers = false;
+        const char *colon = strchr(p, ':');
+        if (colon != NULL)
+        {
+            const char *quote_start = strchr(colon, '"');
+            if (quote_start != NULL)
+            {
+                const char *quote_end;
+                quote_start++;
+
+                /* Find end quote — handle escaped quotes */
+                quote_end = quote_start;
+                while (*quote_end != '\0')
+                {
+                    if (*quote_end == '\\' && *(quote_end + 1) == '"')
+                    {
+                        quote_end += 2;
+                        continue;
+                    }
+                    if (*quote_end == '"')
+                        break;
+                    quote_end++;
+                }
+
+                {
+                    int len = quote_end - quote_start;
+                    if (len > 0 && len < PGX_CLONE_MAX_WHERE)
+                    {
+                        memcpy(opts.where_clause, quote_start, len);
+                        opts.where_clause[len] = '\0';
+                    }
+                }
+            }
+        }
     }
 
     return opts;
@@ -225,11 +313,15 @@ pgx_clone_connect_local(void)
 
 /* ---------------------------------------------------------------
  * Internal helper: stream data from source to target using COPY.
+ *
+ * When columns or where_clause are provided, uses
+ * COPY (SELECT cols FROM table WHERE filter) TO STDOUT
+ * instead of COPY table TO STDOUT.
  * --------------------------------------------------------------- */
 static int64
 pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
                     const char *schema_name, const char *source_table,
-                    const char *target_table)
+                    const char *target_table, const CloneOptions *opts)
 {
     PGresult       *res;
     StringInfoData  cmd;
@@ -237,13 +329,57 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
     int             ret;
     int64           bytes_transferred = 0;
     int64           row_count = 0;
+    bool            use_query_copy;
+
+    /* Determine if we need query-based COPY (for columns/WHERE) */
+    use_query_copy = (opts != NULL &&
+                      (opts->num_columns > 0 || opts->where_clause[0] != '\0'));
 
     /* Start COPY OUT on source */
     initStringInfo(&cmd);
-    appendStringInfo(&cmd,
-        "COPY %s.%s TO STDOUT WITH (FORMAT text)",
-        quote_identifier(schema_name),
-        quote_identifier(source_table));
+
+    if (use_query_copy)
+    {
+        /* COPY (SELECT columns FROM table WHERE filter) TO STDOUT */
+        StringInfoData select_cmd;
+        initStringInfo(&select_cmd);
+
+        appendStringInfoString(&select_cmd, "SELECT ");
+
+        if (opts->num_columns > 0)
+        {
+            int ci;
+            for (ci = 0; ci < opts->num_columns; ci++)
+            {
+                if (ci > 0)
+                    appendStringInfoString(&select_cmd, ", ");
+                appendStringInfo(&select_cmd, "%s",
+                                 quote_identifier(opts->columns[ci]));
+            }
+        }
+        else
+        {
+            appendStringInfoChar(&select_cmd, '*');
+        }
+
+        appendStringInfo(&select_cmd, " FROM %s.%s",
+                         quote_identifier(schema_name),
+                         quote_identifier(source_table));
+
+        if (opts->where_clause[0] != '\0')
+            appendStringInfo(&select_cmd, " WHERE %s", opts->where_clause);
+
+        appendStringInfo(&cmd, "COPY (%s) TO STDOUT WITH (FORMAT text)",
+                         select_cmd.data);
+        pfree(select_cmd.data);
+    }
+    else
+    {
+        appendStringInfo(&cmd,
+            "COPY %s.%s TO STDOUT WITH (FORMAT text)",
+            quote_identifier(schema_name),
+            quote_identifier(source_table));
+    }
 
     res = PQexec(source_conn, cmd.data);
 
@@ -258,12 +394,30 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
     }
     PQclear(res);
 
-    /* Start COPY IN on local */
+    /* Start COPY IN on local — with column list if selective */
     resetStringInfo(&cmd);
-    appendStringInfo(&cmd,
-        "COPY %s.%s FROM STDIN WITH (FORMAT text)",
-        quote_identifier(schema_name),
-        quote_identifier(target_table));
+
+    if (opts != NULL && opts->num_columns > 0)
+    {
+        int ci;
+        appendStringInfo(&cmd, "COPY %s.%s (",
+                         quote_identifier(schema_name),
+                         quote_identifier(target_table));
+        for (ci = 0; ci < opts->num_columns; ci++)
+        {
+            if (ci > 0)
+                appendStringInfoString(&cmd, ", ");
+            appendStringInfo(&cmd, "%s", quote_identifier(opts->columns[ci]));
+        }
+        appendStringInfoString(&cmd, ") FROM STDIN WITH (FORMAT text)");
+    }
+    else
+    {
+        appendStringInfo(&cmd,
+            "COPY %s.%s FROM STDIN WITH (FORMAT text)",
+            quote_identifier(schema_name),
+            quote_identifier(target_table));
+    }
 
     res = PQexec(local_conn, cmd.data);
     pfree(cmd.data);
@@ -617,24 +771,68 @@ pgx_clone_table(PG_FUNCTION_ARGS)
 
     /* ---- Step 1: Get CREATE TABLE DDL from source ---- */
     initStringInfo(&buf);
-    appendStringInfo(&buf,
-        "SELECT 'CREATE TABLE IF NOT EXISTS %s.%s (' || "
-        "string_agg(quote_ident(a.attname) || ' ' || "
-        "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
-        "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
-        "CASE WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END, "
-        "', ' ORDER BY a.attnum) || ')' AS ddl "
-        "FROM pg_catalog.pg_class c "
-        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-        "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
-        "LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum "
-        "WHERE n.nspname = %s AND c.relname = %s "
-        "AND a.attnum > 0 AND NOT a.attisdropped "
-        "GROUP BY c.relname",
-        quote_identifier(schema_name),
-        quote_identifier(target_name),
-        quote_literal_cstr(schema_name),
-        quote_literal_cstr(table_name));
+
+    if (opts.num_columns > 0)
+    {
+        /* Build column filter: AND a.attname IN ('col1', 'col2', ...) */
+        StringInfoData col_filter;
+        int ci;
+
+        initStringInfo(&col_filter);
+        appendStringInfoString(&col_filter, "AND a.attname IN (");
+        for (ci = 0; ci < opts.num_columns; ci++)
+        {
+            if (ci > 0)
+                appendStringInfoString(&col_filter, ", ");
+            appendStringInfo(&col_filter, "%s",
+                             quote_literal_cstr(opts.columns[ci]));
+        }
+        appendStringInfoChar(&col_filter, ')');
+
+        appendStringInfo(&buf,
+            "SELECT 'CREATE TABLE IF NOT EXISTS %s.%s (' || "
+            "string_agg(quote_ident(a.attname) || ' ' || "
+            "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
+            "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
+            "CASE WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END, "
+            "', ' ORDER BY a.attnum) || ')' AS ddl "
+            "FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
+            "LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum "
+            "WHERE n.nspname = %s AND c.relname = %s "
+            "AND a.attnum > 0 AND NOT a.attisdropped "
+            "%s "
+            "GROUP BY c.relname",
+            quote_identifier(schema_name),
+            quote_identifier(target_name),
+            quote_literal_cstr(schema_name),
+            quote_literal_cstr(table_name),
+            col_filter.data);
+
+        pfree(col_filter.data);
+    }
+    else
+    {
+        appendStringInfo(&buf,
+            "SELECT 'CREATE TABLE IF NOT EXISTS %s.%s (' || "
+            "string_agg(quote_ident(a.attname) || ' ' || "
+            "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
+            "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
+            "CASE WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END, "
+            "', ' ORDER BY a.attnum) || ')' AS ddl "
+            "FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
+            "LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum "
+            "WHERE n.nspname = %s AND c.relname = %s "
+            "AND a.attnum > 0 AND NOT a.attisdropped "
+            "GROUP BY c.relname",
+            quote_identifier(schema_name),
+            quote_identifier(target_name),
+            quote_literal_cstr(schema_name),
+            quote_literal_cstr(table_name));
+    }
 
     res = pgx_clone_exec(source_conn, buf.data);
 
@@ -687,7 +885,8 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         int64 row_count;
 
         row_count = pgx_clone_copy_data(source_conn, local_conn,
-                                        schema_name, table_name, target_name);
+                                        schema_name, table_name, target_name,
+                                        &opts);
 
         ereport(NOTICE,
                 (errmsg("pgx_clone: copied %ld rows into %s.%s using COPY protocol",
@@ -1160,7 +1359,7 @@ PG_FUNCTION_INFO_V1(pgx_clone_version);
 Datum
 pgx_clone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 1.0.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 1.1.0"));
 }
 
 /* ===============================================================

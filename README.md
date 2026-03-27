@@ -175,11 +175,46 @@ SELECT pgx_clone_schema_ex(
 );
 ```
 
+### Selective column cloning (v1.1.0)
+
+Clone only specific columns from a table:
+
+```sql
+-- Clone only id, name, email columns
+SELECT pgx_clone_table(
+    'host=source-server dbname=mydb user=postgres',
+    'public', 'users', true, 'users_lite',
+    '{"columns": ["id", "name", "email"]}'
+);
+```
+
+### Data filtering with WHERE clause (v1.1.0)
+
+Clone only rows matching a condition:
+
+```sql
+-- Clone only active users
+SELECT pgx_clone_table(
+    'host=source-server dbname=mydb user=postgres',
+    'public', 'users', true, 'active_users',
+    '{"where": "status = ''active''"}'
+);
+
+-- Combine columns + WHERE + disable triggers
+SELECT pgx_clone_table(
+    'host=source-server dbname=mydb user=postgres',
+    'public', 'orders', true, 'recent_orders',
+    '{"columns": ["id", "customer_id", "total", "created_at"],
+      "where": "created_at > ''2024-01-01''",
+      "triggers": false}'
+);
+```
+
 ### Check version
 
 ```sql
 SELECT pgx_clone_version();
--- Returns: pgx_clone 1.0.0
+-- Returns: pgx_clone 1.1.0
 ```
 
 ## Async Clone Operations (v1.0.0)
@@ -293,11 +328,12 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v1.0.0)
+## Current Limitations (v1.1.0)
 
 - Exclusion constraints not yet supported
 - Materialized views not yet cloned
 - Parallel workers clone tables sequentially within a single bgworker (true multi-worker parallelism planned)
+- WHERE clause in data filtering is passed directly to SQL — use with trusted input only
 
 ## Roadmap
 
@@ -307,7 +343,7 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v0.2.0: Optional control over indexes/constraints/triggers~~ (done)
 - [x] ~~v0.3.0: Background worker for async operations with progress tracking~~ (done)
 - [x] ~~v1.0.0: Resume support and conflict resolution~~ (done)
-- [ ] v1.1.0: Selective column cloning and data filtering
+- [x] ~~v1.1.0: Selective column cloning and data filtering~~ (done)
 - [ ] v1.2.0: Clone materialized views and exclusion constraints
 - [ ] v2.0.0: True multi-worker parallel cloning
 
