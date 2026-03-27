@@ -21,12 +21,11 @@ SELECT lives_ok(
     'pgx_clone extension loads'
 );
 
-SELECT like(
+SELECT matches(
     pgx_clone_version(),
-    'pgx_clone %',
+    '^pgx_clone ',
     'pgx_clone_version() returns version string'
 );
-
 -- ============================================================
 -- TEST GROUP 2: Clone single table (structure + data)
 -- ============================================================
