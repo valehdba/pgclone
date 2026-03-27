@@ -14,7 +14,6 @@
 #include "executor/spi.h"
 #include "libpq-fe.h"
 #include "miscadmin.h"
-#include "pgstat.h"
 #include "catalog/pg_type.h"
 #include "utils/syscache.h"
 #include "utils/guc.h"
