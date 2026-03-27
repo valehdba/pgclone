@@ -3,10 +3,10 @@
 
 EXTENSION    = pgx_clone
 MODULE_big   = pgx_clone
-OBJS         = src/pgx_clone.o
-DATA         = sql/pgx_clone--0.1.0.sql sql/pgx_clone--0.2.0.sql
+OBJS         = src/pgx_clone.o src/pgx_clone_bgw.o
+DATA         = sql/pgx_clone--0.1.0.sql sql/pgx_clone--0.2.0.sql sql/pgx_clone--1.0.0.sql
 
-PG_CPPFLAGS  = -I$(shell $(PG_CONFIG) --includedir)
+PG_CPPFLAGS  = -I$(shell $(PG_CONFIG) --includedir) -Isrc
 SHLIB_LINK   += -lpq
 
 # PostgreSQL Extension build system

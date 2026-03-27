@@ -20,6 +20,13 @@
 #include "utils/guc.h"
 #include "commands/dbcommands.h"
 #include "utils/jsonb.h"
+#include "postmaster/bgworker.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/shmem.h"
+#include "utils/timestamp.h"
+
+#include "pgx_clone_bgw.h"
 
 PG_MODULE_MAGIC;
 
@@ -1153,5 +1160,471 @@ PG_FUNCTION_INFO_V1(pgx_clone_version);
 Datum
 pgx_clone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 0.2.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 1.0.0"));
+}
+
+/* ===============================================================
+ * _PG_init — called when the shared library is loaded.
+ * Registers shared memory for job tracking.
+ * Required: shared_preload_libraries = 'pgx_clone'
+ * =============================================================== */
+void _PG_init(void);
+
+void
+_PG_init(void)
+{
+    if (!process_shared_preload_libraries_in_progress)
+        return;
+
+    pgx_clone_shmem_init();
+}
+
+/* ===============================================================
+ * ASYNC CLONE FUNCTIONS
+ *
+ * Submit clone jobs to background workers for non-blocking
+ * operations with progress tracking, cancel, and resume.
+ * =============================================================== */
+
+/* ===============================================================
+ * FUNCTION: pgx_clone_table_async(conninfo, schema, table,
+ *              include_data [, target_name [, options_json]])
+ *
+ * Returns job_id (INTEGER).
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgx_clone_table_async);
+
+Datum
+pgx_clone_table_async(PG_FUNCTION_ARGS)
+{
+    text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
+    text       *schema_t          = PG_GETARG_TEXT_PP(1);
+    text       *tablename_t       = PG_GETARG_TEXT_PP(2);
+    bool        include_data      = PG_GETARG_BOOL(3);
+
+    char       *source_conninfo   = text_to_cstring(source_conninfo_t);
+    char       *schema_name       = text_to_cstring(schema_t);
+    char       *table_name        = text_to_cstring(tablename_t);
+    char       *target_name       = table_name;
+    CloneOptions opts             = pgx_clone_default_options();
+    PgxCloneConflictStrategy conflict = PGX_CLONE_CONFLICT_ERROR;
+
+    BackgroundWorker worker;
+    BackgroundWorkerHandle *handle;
+    PgxCloneJob    *job;
+    int             job_id;
+
+    if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
+        target_name = text_to_cstring(PG_GETARG_TEXT_PP(4));
+
+    if (PG_NARGS() >= 6 && !PG_ARGISNULL(5))
+    {
+        char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(5));
+        opts = pgx_clone_parse_options(options_json);
+
+        if (strstr(options_json, "\"conflict\": \"skip\"") ||
+            strstr(options_json, "\"conflict\":\"skip\""))
+            conflict = PGX_CLONE_CONFLICT_SKIP;
+        else if (strstr(options_json, "\"conflict\": \"replace\"") ||
+                 strstr(options_json, "\"conflict\":\"replace\""))
+            conflict = PGX_CLONE_CONFLICT_REPLACE;
+        else if (strstr(options_json, "\"conflict\": \"rename\"") ||
+                 strstr(options_json, "\"conflict\":\"rename\""))
+            conflict = PGX_CLONE_CONFLICT_RENAME;
+
+        pfree(options_json);
+    }
+
+    if (!pgx_clone_state)
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("pgx_clone: shared memory not initialized"),
+                 errhint("Add pgx_clone to shared_preload_libraries in postgresql.conf")));
+
+    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+
+    job = find_free_slot();
+    if (!job)
+    {
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR,
+                (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+                 errmsg("pgx_clone: no free job slots (max %d)", PGX_CLONE_MAX_JOBS)));
+    }
+
+    job_id = pgx_clone_state->next_job_id++;
+    memset(job, 0, sizeof(PgxCloneJob));
+    job->job_id = job_id;
+    job->status = PGX_CLONE_JOB_PENDING;
+    job->op_type = PGX_CLONE_OP_TABLE;
+    job->database_oid = MyDatabaseId;
+
+    strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
+    strlcpy(job->schema_name, schema_name, NAMEDATALEN);
+    strlcpy(job->table_name, table_name, NAMEDATALEN);
+    strlcpy(job->target_name, target_name, NAMEDATALEN);
+
+    job->include_data        = include_data;
+    job->include_indexes     = opts.include_indexes;
+    job->include_constraints = opts.include_constraints;
+    job->include_triggers    = opts.include_triggers;
+    job->conflict_strategy   = conflict;
+    job->resumable           = true;
+
+    LWLockRelease(pgx_clone_state->lock);
+
+    memset(&worker, 0, sizeof(BackgroundWorker));
+    snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: job %d (%s.%s)",
+             job_id, schema_name, table_name);
+    snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+    worker.bgw_restart_time = BGW_NEVER_RESTART;
+    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
+    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+    worker.bgw_main_arg = Int32GetDatum(job_id);
+    worker.bgw_notify_pid = MyProcPid;
+
+    if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+    {
+        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+        job->status = PGX_CLONE_JOB_FREE;
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
+    }
+
+    PG_RETURN_INT32(job_id);
+}
+
+/* ===============================================================
+ * FUNCTION: pgx_clone_schema_async(conninfo, schema, include_data
+ *              [, options_json])
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgx_clone_schema_async);
+
+Datum
+pgx_clone_schema_async(PG_FUNCTION_ARGS)
+{
+    text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
+    text       *schema_t          = PG_GETARG_TEXT_PP(1);
+    bool        include_data      = PG_GETARG_BOOL(2);
+    CloneOptions opts             = pgx_clone_default_options();
+    PgxCloneConflictStrategy conflict = PGX_CLONE_CONFLICT_ERROR;
+
+    char       *source_conninfo   = text_to_cstring(source_conninfo_t);
+    char       *schema_name       = text_to_cstring(schema_t);
+
+    BackgroundWorker worker;
+    BackgroundWorkerHandle *handle;
+    PgxCloneJob    *job;
+    int             job_id;
+
+    if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
+    {
+        char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(3));
+        opts = pgx_clone_parse_options(options_json);
+
+        if (strstr(options_json, "\"conflict\": \"skip\"") ||
+            strstr(options_json, "\"conflict\":\"skip\""))
+            conflict = PGX_CLONE_CONFLICT_SKIP;
+        else if (strstr(options_json, "\"conflict\": \"replace\"") ||
+                 strstr(options_json, "\"conflict\":\"replace\""))
+            conflict = PGX_CLONE_CONFLICT_REPLACE;
+        else if (strstr(options_json, "\"conflict\": \"rename\"") ||
+                 strstr(options_json, "\"conflict\":\"rename\""))
+            conflict = PGX_CLONE_CONFLICT_RENAME;
+
+        pfree(options_json);
+    }
+
+    if (!pgx_clone_state)
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("pgx_clone: shared memory not initialized"),
+                 errhint("Add pgx_clone to shared_preload_libraries")));
+
+    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+
+    job = find_free_slot();
+    if (!job)
+    {
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
+    }
+
+    job_id = pgx_clone_state->next_job_id++;
+    memset(job, 0, sizeof(PgxCloneJob));
+    job->job_id = job_id;
+    job->status = PGX_CLONE_JOB_PENDING;
+    job->op_type = PGX_CLONE_OP_SCHEMA;
+    job->database_oid = MyDatabaseId;
+
+    strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
+    strlcpy(job->schema_name, schema_name, NAMEDATALEN);
+
+    job->include_data        = include_data;
+    job->include_indexes     = opts.include_indexes;
+    job->include_constraints = opts.include_constraints;
+    job->include_triggers    = opts.include_triggers;
+    job->conflict_strategy   = conflict;
+    job->resumable           = true;
+
+    LWLockRelease(pgx_clone_state->lock);
+
+    memset(&worker, 0, sizeof(BackgroundWorker));
+    snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: schema %s (job %d)",
+             schema_name, job_id);
+    snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+    worker.bgw_restart_time = BGW_NEVER_RESTART;
+    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
+    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+    worker.bgw_main_arg = Int32GetDatum(job_id);
+    worker.bgw_notify_pid = MyProcPid;
+
+    if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+    {
+        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+        job->status = PGX_CLONE_JOB_FREE;
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
+    }
+
+    PG_RETURN_INT32(job_id);
+}
+
+/* ===============================================================
+ * FUNCTION: pgx_clone_progress(job_id) — returns JSON
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgx_clone_progress);
+
+Datum
+pgx_clone_progress(PG_FUNCTION_ARGS)
+{
+    int             job_id = PG_GETARG_INT32(0);
+    PgxCloneJob    *job;
+    StringInfoData  result;
+    const char     *status_str;
+
+    if (!pgx_clone_state)
+        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+
+    LWLockAcquire(pgx_clone_state->lock, LW_SHARED);
+    job = find_job(job_id);
+
+    if (!job)
+    {
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: job %d not found", job_id)));
+    }
+
+    switch (job->status)
+    {
+        case PGX_CLONE_JOB_PENDING:   status_str = "pending";   break;
+        case PGX_CLONE_JOB_RUNNING:   status_str = "running";   break;
+        case PGX_CLONE_JOB_COMPLETED: status_str = "completed"; break;
+        case PGX_CLONE_JOB_FAILED:    status_str = "failed";    break;
+        case PGX_CLONE_JOB_CANCELLED: status_str = "cancelled"; break;
+        default:                      status_str = "unknown";    break;
+    }
+
+    initStringInfo(&result);
+    appendStringInfo(&result,
+        "{\"job_id\": %d, \"status\": \"%s\", \"phase\": \"%s\", "
+        "\"tables_completed\": %ld, \"tables_total\": %ld, "
+        "\"rows_copied\": %ld, \"current_table\": \"%s\"",
+        job->job_id, status_str, job->current_phase,
+        (long) job->completed_tables, (long) job->total_tables,
+        (long) job->copied_rows, job->current_table);
+
+    if (job->status == PGX_CLONE_JOB_FAILED)
+        appendStringInfo(&result, ", \"error\": \"%s\"", job->error_message);
+
+    if (job->resume_checkpoint[0] != '\0')
+        appendStringInfo(&result, ", \"checkpoint\": \"%s\"", job->resume_checkpoint);
+
+    if (job->start_time != 0)
+    {
+        long elapsed_ms;
+        if (job->end_time != 0)
+            elapsed_ms = (long)((job->end_time - job->start_time) / 1000);
+        else
+            elapsed_ms = (long)((GetCurrentTimestamp() - job->start_time) / 1000);
+        appendStringInfo(&result, ", \"elapsed_ms\": %ld", elapsed_ms);
+    }
+
+    appendStringInfoChar(&result, '}');
+    LWLockRelease(pgx_clone_state->lock);
+
+    PG_RETURN_TEXT_P(cstring_to_text(result.data));
+}
+
+/* ===============================================================
+ * FUNCTION: pgx_clone_cancel(job_id)
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgx_clone_cancel);
+
+Datum
+pgx_clone_cancel(PG_FUNCTION_ARGS)
+{
+    int             job_id = PG_GETARG_INT32(0);
+    PgxCloneJob    *job;
+
+    if (!pgx_clone_state)
+        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+
+    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+    job = find_job(job_id);
+
+    if (!job)
+    {
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: job %d not found", job_id)));
+    }
+
+    if (job->status == PGX_CLONE_JOB_RUNNING ||
+        job->status == PGX_CLONE_JOB_PENDING)
+    {
+        job->status = PGX_CLONE_JOB_CANCELLED;
+        job->end_time = GetCurrentTimestamp();
+        strlcpy(job->current_phase, "cancelled", 64);
+    }
+
+    LWLockRelease(pgx_clone_state->lock);
+
+    PG_RETURN_TEXT_P(cstring_to_text("cancelled"));
+}
+
+/* ===============================================================
+ * FUNCTION: pgx_clone_resume(job_id) — returns new job_id
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgx_clone_resume);
+
+Datum
+pgx_clone_resume(PG_FUNCTION_ARGS)
+{
+    int             old_job_id = PG_GETARG_INT32(0);
+    PgxCloneJob    *old_job, *new_job;
+    int             new_job_id;
+    BackgroundWorker worker;
+    BackgroundWorkerHandle *handle;
+
+    if (!pgx_clone_state)
+        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+
+    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+
+    old_job = find_job(old_job_id);
+    if (!old_job)
+    {
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: job %d not found", old_job_id)));
+    }
+
+    if (old_job->status != PGX_CLONE_JOB_FAILED &&
+        old_job->status != PGX_CLONE_JOB_CANCELLED)
+    {
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: job %d is not resumable", old_job_id)));
+    }
+
+    new_job = find_free_slot();
+    if (!new_job)
+    {
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
+    }
+
+    new_job_id = pgx_clone_state->next_job_id++;
+    memcpy(new_job, old_job, sizeof(PgxCloneJob));
+    new_job->job_id = new_job_id;
+    new_job->status = PGX_CLONE_JOB_PENDING;
+    new_job->worker_pid = 0;
+    new_job->start_time = 0;
+    new_job->end_time = 0;
+    new_job->error_message[0] = '\0';
+    /* resume_checkpoint preserved — bgworker will skip past it */
+
+    old_job->status = PGX_CLONE_JOB_FREE;
+
+    LWLockRelease(pgx_clone_state->lock);
+
+    memset(&worker, 0, sizeof(BackgroundWorker));
+    snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: resume job %d", new_job_id);
+    snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+    worker.bgw_restart_time = BGW_NEVER_RESTART;
+    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
+    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+    worker.bgw_main_arg = Int32GetDatum(new_job_id);
+    worker.bgw_notify_pid = MyProcPid;
+
+    if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+    {
+        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+        new_job->status = PGX_CLONE_JOB_FREE;
+        LWLockRelease(pgx_clone_state->lock);
+        ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
+    }
+
+    PG_RETURN_INT32(new_job_id);
+}
+
+/* ===============================================================
+ * FUNCTION: pgx_clone_jobs() — returns JSON array of all jobs
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgx_clone_jobs);
+
+Datum
+pgx_clone_jobs(PG_FUNCTION_ARGS)
+{
+    StringInfoData  result;
+    int             i;
+    bool            first = true;
+    const char     *status_str;
+
+    if (!pgx_clone_state)
+        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+
+    initStringInfo(&result);
+    appendStringInfoChar(&result, '[');
+
+    LWLockAcquire(pgx_clone_state->lock, LW_SHARED);
+
+    for (i = 0; i < PGX_CLONE_MAX_JOBS; i++)
+    {
+        PgxCloneJob *j = &pgx_clone_state->jobs[i];
+
+        if (j->status == PGX_CLONE_JOB_FREE)
+            continue;
+
+        if (!first)
+            appendStringInfoChar(&result, ',');
+        first = false;
+
+        switch (j->status)
+        {
+            case PGX_CLONE_JOB_PENDING:   status_str = "pending";   break;
+            case PGX_CLONE_JOB_RUNNING:   status_str = "running";   break;
+            case PGX_CLONE_JOB_COMPLETED: status_str = "completed"; break;
+            case PGX_CLONE_JOB_FAILED:    status_str = "failed";    break;
+            case PGX_CLONE_JOB_CANCELLED: status_str = "cancelled"; break;
+            default:                      status_str = "unknown";    break;
+        }
+
+        appendStringInfo(&result,
+            "{\"job_id\": %d, \"status\": \"%s\", \"schema\": \"%s\", "
+            "\"table\": \"%s\", \"phase\": \"%s\", "
+            "\"tables_completed\": %ld, \"tables_total\": %ld}",
+            j->job_id, status_str, j->schema_name,
+            j->table_name, j->current_phase,
+            (long) j->completed_tables, (long) j->total_tables);
+    }
+
+    LWLockRelease(pgx_clone_state->lock);
+    appendStringInfoChar(&result, ']');
+
+    PG_RETURN_TEXT_P(cstring_to_text(result.data));
 }

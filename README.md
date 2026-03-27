@@ -179,7 +179,96 @@ SELECT pgx_clone_schema_ex(
 
 ```sql
 SELECT pgx_clone_version();
--- Returns: pgx_clone 0.2.0
+-- Returns: pgx_clone 1.0.0
+```
+
+## Async Clone Operations (v1.0.0)
+
+Async functions run clone operations in background workers, allowing you to continue using your session while cloning proceeds.
+
+**Prerequisite:** Add to `postgresql.conf`:
+```
+shared_preload_libraries = 'pgx_clone'
+```
+Then restart PostgreSQL.
+
+### Async table clone
+
+```sql
+-- Returns job_id
+SELECT pgx_clone_table_async(
+    'host=source-server dbname=mydb user=postgres',
+    'public', 'large_table', true
+);
+-- Returns: 1
+```
+
+### Async schema clone
+
+```sql
+SELECT pgx_clone_schema_async(
+    'host=source-server dbname=mydb user=postgres',
+    'sales', true
+);
+```
+
+### Check progress
+
+```sql
+SELECT pgx_clone_progress(1);
+-- Returns JSON:
+-- {"job_id": 1, "status": "running", "phase": "copying data",
+--  "tables_completed": 5, "tables_total": 12,
+--  "rows_copied": 450000, "current_table": "orders", "elapsed_ms": 8500}
+```
+
+### List all jobs
+
+```sql
+SELECT pgx_clone_jobs();
+-- Returns JSON array of all active/recent jobs
+```
+
+### Cancel a job
+
+```sql
+SELECT pgx_clone_cancel(1);
+```
+
+### Resume a failed job
+
+```sql
+-- Resumes from last checkpoint, returns new job_id
+SELECT pgx_clone_resume(1);
+-- Returns: 2
+```
+
+## Conflict Resolution (v1.0.0)
+
+Control what happens when a target table already exists:
+
+```sql
+-- Error if exists (default)
+SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+    '{"conflict": "error"}');
+
+-- Skip if exists
+SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+    '{"conflict": "skip"}');
+
+-- Drop and re-create
+SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+    '{"conflict": "replace"}');
+
+-- Rename existing to orders_old
+SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+    '{"conflict": "rename"}');
+```
+
+Conflict strategy can be combined with other options:
+```sql
+SELECT pgx_clone_schema_async(conn, 'sales', true,
+    '{"conflict": "replace", "indexes": false, "triggers": false}');
 ```
 
 ## Connection String Format
@@ -204,22 +293,23 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v0.2.0)
+## Current Limitations (v1.0.0)
 
-- No progress tracking for long operations
-- No parallel cloning support yet
 - Exclusion constraints not yet supported
 - Materialized views not yet cloned
+- Parallel workers clone tables sequentially within a single bgworker (true multi-worker parallelism planned)
 
 ## Roadmap
 
 - [x] ~~v0.1.0: Clone tables, schemas, functions, databases~~ (done)
 - [x] ~~v0.1.0: Use COPY protocol for fast data transfer~~ (done)
 - [x] ~~v0.2.0: Clone indexes, constraints (PK, UNIQUE, CHECK, FK), and triggers~~ (done)
-- [ ] v0.3.0: Background worker for async operations with progress tracking
-- [ ] v0.4.0: Selective column cloning and data filtering
-- [ ] v0.5.0: Clone materialized views and exclusion constraints
-- [ ] v1.0.0: Parallel cloning, resume support, and conflict resolution
+- [x] ~~v0.2.0: Optional control over indexes/constraints/triggers~~ (done)
+- [x] ~~v0.3.0: Background worker for async operations with progress tracking~~ (done)
+- [x] ~~v1.0.0: Resume support and conflict resolution~~ (done)
+- [ ] v1.1.0: Selective column cloning and data filtering
+- [ ] v1.2.0: Clone materialized views and exclusion constraints
+- [ ] v2.0.0: True multi-worker parallel cloning
 
 ## License
 
