@@ -1,9 +1,7 @@
 # pgx_clone
 
 A PostgreSQL extension written in C for cloning databases, schemas, tables, and functions between PostgreSQL hosts — directly from SQL.
-<p align="center">
-  <img src="pgx_clone_logo.png" width="400" alt="pgx_clone logo">
-</p>
+ 
 ## Requirements
 
 - PostgreSQL 14 or later (tested on 14, 15, 16, 17, 18)
