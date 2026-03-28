@@ -83,20 +83,36 @@ jobs:
           PGDATA="$RUNNER_TEMP/pg_target_$PG_VER"
           PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
 
+          # Stop any pre-installed PostgreSQL to free ports/shmem
+          sudo systemctl stop postgresql 2>/dev/null || true
+          sudo pkill -9 postgres 2>/dev/null || true
+          sleep 1
+
           rm -rf "$PGDATA"
           "$PGBIN/initdb" -D "$PGDATA" --username=postgres --auth=trust
 
           {
             echo "port = 5434"
             echo "listen_addresses = 'localhost'"
-            echo "shared_buffers = '256MB'"
-            echo "max_connections = 100"
-            echo "max_parallel_workers_per_gather = 0"
+            echo "shared_buffers = '128MB'"
+            echo "max_connections = 50"
+            echo "huge_pages = off"
             echo "shared_preload_libraries = 'pgx_clone'"
-            echo "unix_socket_directories = '$PGDATA'"
+            echo "unix_socket_directories = '/tmp'"
+            echo "logging_collector = off"
           } >> "$PGDATA/postgresql.conf"
 
-          "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" start
+          # Verify pgx_clone.so is loadable
+          echo "=== Checking pgx_clone.so dependencies ==="
+          ldd "$($PGBIN/pg_config --pkglibdir)/pgx_clone.so" || true
+
+          # Start server — show log immediately if it fails
+          if ! "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" -w -t 30 start; then
+            echo "=== PostgreSQL failed to start. Log output: ==="
+            cat "$PGLOG"
+            exit 1
+          fi
+
           "$PGBIN/createdb" -h localhost -p 5434 -U postgres target_db
 
       - name: Seed source database
