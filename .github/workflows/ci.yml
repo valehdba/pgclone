@@ -84,9 +84,8 @@ jobs:
           PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
 
           # Stop any pre-installed PostgreSQL to free ports/shmem
+          # NOTE: do NOT pkill postgres — that would kill the Docker source-db container
           sudo systemctl stop postgresql 2>/dev/null || true
-          sudo pkill -9 postgres 2>/dev/null || true
-          sleep 1
 
           rm -rf "$PGDATA"
           "$PGBIN/initdb" -D "$PGDATA" --username=postgres --auth=trust
