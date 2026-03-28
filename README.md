@@ -2,7 +2,7 @@
 
 A PostgreSQL extension written in C for cloning databases, schemas, tables, and functions between PostgreSQL hosts — directly from SQL.
 <p align="center">
-  <img src="path/to/your/pgx_clone_logo.png" width="400" alt="pgx_clone logo">
+  <img src="pgx_clone_logo.png" width="400" alt="pgx_clone logo">
 </p>
 ## Requirements
 
