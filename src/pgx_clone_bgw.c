@@ -39,6 +39,10 @@ PgxCloneSharedState *pgx_clone_state = NULL;
 /* Shmem hook chain */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+#endif
+
 /* ---------------------------------------------------------------
  * Shared memory sizing and initialization
  * --------------------------------------------------------------- */
@@ -72,14 +76,37 @@ pgx_clone_shmem_startup(void)
     LWLockRelease(AddinShmemInitLock);
 }
 
+/*
+ * Request shared memory space and LWLocks.
+ *
+ * PG 15+ requires this to happen inside shmem_request_hook.
+ * PG 14 and earlier allow it directly in _PG_init.
+ */
+static void
+pgx_clone_shmem_request(void)
+{
+#if PG_VERSION_NUM >= 150000
+    if (prev_shmem_request_hook)
+        prev_shmem_request_hook();
+#endif
+
+    RequestAddinShmemSpace(pgx_clone_shmem_size());
+    RequestNamedLWLockTranche("pgx_clone", 1);
+}
+
 void
 pgx_clone_shmem_init(void)
 {
-    /* Request shared memory and LWLock */
-    RequestAddinShmemSpace(pgx_clone_shmem_size());
-    RequestNamedLWLockTranche("pgx_clone", 1);
+#if PG_VERSION_NUM >= 150000
+    /* PG 15+: register via shmem_request_hook */
+    prev_shmem_request_hook = shmem_request_hook;
+    shmem_request_hook = pgx_clone_shmem_request;
+#else
+    /* PG 14 and earlier: request directly */
+    pgx_clone_shmem_request();
+#endif
 
-    /* Install shmem startup hook */
+    /* Install shmem startup hook (works the same on all versions) */
     prev_shmem_startup_hook = shmem_startup_hook;
     shmem_startup_hook = pgx_clone_shmem_startup;
 }
