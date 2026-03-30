@@ -1,4 +1,4 @@
-name: pgx_clone CI
+name: pgclone CI
 
 on:
   push:
@@ -64,17 +64,17 @@ jobs:
             pg_config --version
           fi
 
-      - name: Build pgx_clone
+      - name: Build pgclone
         run: |
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           make PG_CONFIG=$PG_CONFIG CFLAGS="-Isrc"
 
-      - name: Install pgx_clone
+      - name: Install pgclone
         run: |
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           sudo make install PG_CONFIG=$PG_CONFIG
           echo "=== Installed shared library ==="
-          ls -la "$($PG_CONFIG --pkglibdir)"/pgx_clone*
+          ls -la "$($PG_CONFIG --pkglibdir)"/pgclone*
 
       - name: Start target PostgreSQL on the host
         run: |
@@ -96,14 +96,14 @@ jobs:
             echo "shared_buffers = '128MB'"
             echo "max_connections = 50"
             echo "huge_pages = off"
-            echo "shared_preload_libraries = 'pgx_clone'"
+            echo "shared_preload_libraries = 'pgclone'"
             echo "unix_socket_directories = '/tmp'"
             echo "logging_collector = off"
           } >> "$PGDATA/postgresql.conf"
 
-          # Verify pgx_clone.so is loadable
-          echo "=== Checking pgx_clone.so dependencies ==="
-          ldd "$($PGBIN/pg_config --pkglibdir)/pgx_clone.so" || true
+          # Verify pgclone.so is loadable
+          echo "=== Checking pgclone.so dependencies ==="
+          ldd "$($PGBIN/pg_config --pkglibdir)/pgclone.so" || true
 
           # Start server — show log immediately if it fails
           if ! "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" -w -t 30 start; then
@@ -128,12 +128,12 @@ jobs:
           psql -h localhost -p 5434 -U postgres -d target_db \
             -c "CREATE EXTENSION IF NOT EXISTS pgtap;"
 
-      - name: Create pgx_clone extension and verify
+      - name: Create pgclone extension and verify
         run: |
           psql -h localhost -p 5434 -U postgres -d target_db \
-            -c "CREATE EXTENSION IF NOT EXISTS pgx_clone;"
+            -c "CREATE EXTENSION IF NOT EXISTS pgclone;"
           psql -h localhost -p 5434 -U postgres -d target_db \
-            -c "SELECT pgx_clone_version();"
+            -c "SELECT pgclone_version();"
 
       - name: Set source conninfo
         run: |
@@ -143,7 +143,7 @@ jobs:
       - name: Run pgTAP tests
         run: |
           psql -h localhost -p 5434 -U postgres -d target_db \
-            -f test/pgx_clone_test.sql
+            -f test/pgclone_test.sql
 
       - name: Show logs on failure
         if: failure()

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Run pgx_clone tests locally using Docker
+# Run pgclone tests locally using Docker
 #
 # Usage:
 #   ./test/run_all.sh              # Test on all PG versions
@@ -13,7 +13,7 @@ set -e
 VERSIONS="${@:-14 15 16 17 18}"
 
 echo "============================================"
-echo "pgx_clone multi-version test suite"
+echo "pgclone multi-version test suite"
 echo "Testing on PostgreSQL: $VERSIONS"
 echo "============================================"
 echo ""

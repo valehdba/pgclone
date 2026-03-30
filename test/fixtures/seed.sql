@@ -1,5 +1,5 @@
 -- ============================================================
--- pgx_clone test fixtures
+-- pgclone test fixtures
 -- This creates test objects in the source database
 -- ============================================================
 

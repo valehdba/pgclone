@@ -1,8 +1,8 @@
 /*
- * pgx_clone - PostgreSQL extension for cloning databases, schemas, tables,
+ * pgclone - PostgreSQL extension for cloning databases, schemas, tables,
  *            and functions between PostgreSQL hosts.
  *
- * Copyright (c) 2026, Valeh Agayev pgx_clone contributors
+ * Copyright (c) 2026, Valeh Agayev pgclone contributors
  * Licensed under PostgreSQL License
  */
 
@@ -25,7 +25,7 @@
 #include "storage/shmem.h"
 #include "utils/timestamp.h"
 
-#include "pgx_clone_bgw.h"
+#include "pgclone_bgw.h"
 
 PG_MODULE_MAGIC;
 
@@ -33,8 +33,8 @@ PG_MODULE_MAGIC;
  * Clone options struct — controls what gets cloned beyond the
  * table structure and data.
  * --------------------------------------------------------------- */
-#define PGX_CLONE_MAX_COLUMNS   64
-#define PGX_CLONE_MAX_WHERE     2048
+#define PGCLONE_MAX_COLUMNS   64
+#define PGCLONE_MAX_WHERE     2048
 
 typedef struct CloneOptions
 {
@@ -45,10 +45,10 @@ typedef struct CloneOptions
 
     /* Selective column cloning: if num_columns > 0, only these columns */
     int  num_columns;
-    char columns[PGX_CLONE_MAX_COLUMNS][NAMEDATALEN];
+    char columns[PGCLONE_MAX_COLUMNS][NAMEDATALEN];
 
     /* Data filtering: WHERE clause applied during COPY */
-    char where_clause[PGX_CLONE_MAX_WHERE];
+    char where_clause[PGCLONE_MAX_WHERE];
 
     /* Parallel cloning: number of workers (0 = sequential) */
     int  parallel_workers;
@@ -56,7 +56,7 @@ typedef struct CloneOptions
 
 /* Default: everything enabled, no column/where filter */
 static CloneOptions
-pgx_clone_default_options(void)
+pgclone_default_options(void)
 {
     CloneOptions opts;
     memset(&opts, 0, sizeof(CloneOptions));
@@ -79,9 +79,9 @@ pgx_clone_default_options(void)
  * Missing keys keep defaults. Simple parser — no external deps.
  * --------------------------------------------------------------- */
 static CloneOptions
-pgx_clone_parse_options(const char *json_str)
+pgclone_parse_options(const char *json_str)
 {
-    CloneOptions opts = pgx_clone_default_options();
+    CloneOptions opts = pgclone_default_options();
     const char *p;
 
     if (json_str == NULL || json_str[0] == '\0')
@@ -113,7 +113,7 @@ pgx_clone_parse_options(const char *json_str)
             if (colon != NULL)
             {
                 int val = atoi(colon + 1);
-                if (val > 0 && val <= PGX_CLONE_MAX_JOBS)
+                if (val > 0 && val <= PGCLONE_MAX_JOBS)
                     opts.parallel_workers = val;
             }
         }
@@ -132,7 +132,7 @@ pgx_clone_parse_options(const char *json_str)
                 const char *cur = bracket + 1;
                 opts.num_columns = 0;
 
-                while (cur < end_bracket && opts.num_columns < PGX_CLONE_MAX_COLUMNS)
+                while (cur < end_bracket && opts.num_columns < PGCLONE_MAX_COLUMNS)
                 {
                     const char *quote_start, *quote_end;
 
@@ -195,7 +195,7 @@ pgx_clone_parse_options(const char *json_str)
 
                 {
                     int len = quote_end - quote_start;
-                    if (len > 0 && len < PGX_CLONE_MAX_WHERE)
+                    if (len > 0 && len < PGCLONE_MAX_WHERE)
                     {
                         memcpy(opts.where_clause, quote_start, len);
                         opts.where_clause[len] = '\0';
@@ -212,7 +212,7 @@ pgx_clone_parse_options(const char *json_str)
  * Internal helper: connect to a remote PostgreSQL host
  * --------------------------------------------------------------- */
 static PGconn *
-pgx_clone_connect(const char *conninfo)
+pgclone_connect(const char *conninfo)
 {
     PGconn *conn;
 
@@ -224,7 +224,7 @@ pgx_clone_connect(const char *conninfo)
         PQfinish(conn);
         ereport(ERROR,
                 (errcode(ERRCODE_CONNECTION_FAILURE),
-                 errmsg("pgx_clone: could not connect to remote host: %s", conn_errmsg)));
+                 errmsg("pgclone: could not connect to remote host: %s", conn_errmsg)));
     }
 
     return conn;
@@ -235,7 +235,7 @@ pgx_clone_connect(const char *conninfo)
  * Returns the PGresult (caller must PQclear it)
  * --------------------------------------------------------------- */
 static PGresult *
-pgx_clone_exec(PGconn *conn, const char *query)
+pgclone_exec(PGconn *conn, const char *query)
 {
     PGresult *res;
 
@@ -248,7 +248,7 @@ pgx_clone_exec(PGconn *conn, const char *query)
         PQclear(res);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgx_clone: remote query failed: %s", exec_errmsg)));
+                 errmsg("pgclone: remote query failed: %s", exec_errmsg)));
     }
 
     return res;
@@ -258,7 +258,7 @@ pgx_clone_exec(PGconn *conn, const char *query)
  * Internal helper: execute DDL on the local database via SPI
  * --------------------------------------------------------------- */
 static void
-pgx_clone_exec_local(const char *query)
+pgclone_exec_local(const char *query)
 {
     int ret;
 
@@ -268,7 +268,7 @@ pgx_clone_exec_local(const char *query)
         ret != SPI_OK_INSERT && ret != SPI_OK_UPDATE)
     {
         ereport(WARNING,
-                (errmsg("pgx_clone: local execution returned code %d for: %.128s",
+                (errmsg("pgclone: local execution returned code %d for: %.128s",
                         ret, query)));
     }
 }
@@ -279,7 +279,7 @@ pgx_clone_exec_local(const char *query)
  * Returns true on success, false on failure (with WARNING).
  * --------------------------------------------------------------- */
 static bool
-pgx_clone_exec_conn(PGconn *conn, const char *query)
+pgclone_exec_conn(PGconn *conn, const char *query)
 {
     PGresult *res;
 
@@ -291,7 +291,7 @@ pgx_clone_exec_conn(PGconn *conn, const char *query)
         char *conn_errmsg = pstrdup(PQerrorMessage(conn));
         PQclear(res);
         ereport(WARNING,
-                (errmsg("pgx_clone: local exec failed: %s (query: %.128s)",
+                (errmsg("pgclone: local exec failed: %s (query: %.128s)",
                         conn_errmsg, query)));
         return false;
     }
@@ -304,7 +304,7 @@ pgx_clone_exec_conn(PGconn *conn, const char *query)
  * Internal helper: get a libpq connection to the LOCAL database.
  * --------------------------------------------------------------- */
 static PGconn *
-pgx_clone_connect_local(void)
+pgclone_connect_local(void)
 {
     PGconn         *conn;
     StringInfoData  conninfo;
@@ -328,7 +328,7 @@ pgx_clone_connect_local(void)
         PQfinish(conn);
         ereport(ERROR,
                 (errcode(ERRCODE_CONNECTION_FAILURE),
-                 errmsg("pgx_clone: could not connect to local database: %s",
+                 errmsg("pgclone: could not connect to local database: %s",
                         local_errmsg)));
     }
 
@@ -343,7 +343,7 @@ pgx_clone_connect_local(void)
  * instead of COPY table TO STDOUT.
  * --------------------------------------------------------------- */
 static int64
-pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
+pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
                     const char *schema_name, const char *source_table,
                     const char *target_table, const CloneOptions *opts)
 {
@@ -414,7 +414,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
         pfree(cmd.data);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgx_clone: COPY OUT failed on source: %s", copy_errmsg)));
+                 errmsg("pgclone: COPY OUT failed on source: %s", copy_errmsg)));
     }
     PQclear(res);
 
@@ -456,7 +456,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgx_clone: COPY IN failed on local: %s", copy_errmsg)));
+                 errmsg("pgclone: COPY IN failed on local: %s", copy_errmsg)));
     }
     PQclear(res);
 
@@ -470,7 +470,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
             PQputCopyEnd(local_conn, "aborted");
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                     errmsg("pgx_clone: error writing COPY data to local: %s",
+                     errmsg("pgclone: error writing COPY data to local: %s",
                             copy_errmsg)));
         }
 
@@ -482,7 +482,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
         {
             CHECK_FOR_INTERRUPTS();
             ereport(NOTICE,
-                    (errmsg("pgx_clone: ... %ld rows transferred so far",
+                    (errmsg("pgclone: ... %ld rows transferred so far",
                             (long) row_count)));
         }
     }
@@ -493,7 +493,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
         PQputCopyEnd(local_conn, "source error");
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgx_clone: COPY stream error from source: %s",
+                 errmsg("pgclone: COPY stream error from source: %s",
                         copy_errmsg)));
     }
 
@@ -502,7 +502,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
         char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgx_clone: error finalizing COPY on local: %s",
+                 errmsg("pgclone: error finalizing COPY on local: %s",
                         copy_errmsg)));
     }
 
@@ -513,7 +513,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
         PQclear(res);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgx_clone: COPY completed with error: %s",
+                 errmsg("pgclone: COPY completed with error: %s",
                         copy_errmsg)));
     }
 
@@ -527,7 +527,7 @@ pgx_clone_copy_data(PGconn *source_conn, PGconn *local_conn,
  * Internal helper: clone indexes for a table from source.
  * --------------------------------------------------------------- */
 static int
-pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
+pgclone_indexes(PGconn *source_conn, PGconn *target_conn,
                   const char *schema_name, const char *source_table,
                   const char *target_table,
                   const CloneOptions *opts)
@@ -555,7 +555,7 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
         quote_literal_cstr(schema_name),
         quote_literal_cstr(source_table));
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     count = PQntuples(res);
     for (i = 0; i < count; i++)
@@ -660,7 +660,7 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
             }
         }
 
-        if (pgx_clone_exec_conn(target_conn, final_def.data))
+        if (pgclone_exec_conn(target_conn, final_def.data))
             created++;
 
         pfree(final_def.data);
@@ -677,7 +677,7 @@ pgx_clone_indexes(PGconn *source_conn, PGconn *target_conn,
  * Internal helper: clone constraints for a table from source.
  * --------------------------------------------------------------- */
 static int
-pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
+pgclone_constraints(PGconn *source_conn, PGconn *target_conn,
                       const char *schema_name, const char *source_table,
                       const char *target_table,
                       const CloneOptions *opts)
@@ -708,7 +708,7 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
         quote_literal_cstr(schema_name),
         quote_literal_cstr(source_table));
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     count = PQntuples(res);
     for (i = 0; i < count; i++)
@@ -763,7 +763,7 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
                 quote_literal_cstr(source_table),
                 quote_literal_cstr(conname));
 
-            col_chk = pgx_clone_exec(source_conn, col_buf.data);
+            col_chk = pgclone_exec(source_conn, col_buf.data);
             pfree(col_buf.data);
 
             if (PQresultStatus(col_chk) == PGRES_TUPLES_OK)
@@ -821,7 +821,7 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
                 condef);
         }
 
-        if (pgx_clone_exec_conn(target_conn, buf.data))
+        if (pgclone_exec_conn(target_conn, buf.data))
             created++;
     }
 
@@ -835,7 +835,7 @@ pgx_clone_constraints(PGconn *source_conn, PGconn *target_conn,
  * Internal helper: clone triggers for a table from source.
  * --------------------------------------------------------------- */
 static int
-pgx_clone_triggers(PGconn *source_conn, PGconn *target_conn,
+pgclone_triggers(PGconn *source_conn, PGconn *target_conn,
                    const char *schema_name, const char *source_table,
                    const char *target_table)
 {
@@ -855,7 +855,7 @@ pgx_clone_triggers(PGconn *source_conn, PGconn *target_conn,
         quote_literal_cstr(schema_name),
         quote_literal_cstr(source_table));
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     count = PQntuples(res);
     for (i = 0; i < count; i++)
@@ -882,19 +882,19 @@ pgx_clone_triggers(PGconn *source_conn, PGconn *target_conn,
                                  quote_identifier(target_table));
                 appendStringInfoString(&new_def, pos + strlen(search_str));
 
-                if (pgx_clone_exec_conn(target_conn, new_def.data))
+                if (pgclone_exec_conn(target_conn, new_def.data))
                     created++;
                 pfree(new_def.data);
             }
             else
             {
-                if (pgx_clone_exec_conn(target_conn, trigdef))
+                if (pgclone_exec_conn(target_conn, trigdef))
                     created++;
             }
         }
         else
         {
-            if (pgx_clone_exec_conn(target_conn, trigdef))
+            if (pgclone_exec_conn(target_conn, trigdef))
                 created++;
         }
     }
@@ -906,22 +906,22 @@ pgx_clone_triggers(PGconn *source_conn, PGconn *target_conn,
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_table
+ * FUNCTION: pgclone_table
  *
  * Overloads:
- *   pgx_clone_table(conninfo, schema, table, include_data)
- *   pgx_clone_table(conninfo, schema, table, include_data, target_name)
- *   pgx_clone_table(conninfo, schema, table, include_data, target_name, options_json)
- *   pgx_clone_table_ex(conninfo, schema, table, include_data, target_name,
+ *   pgclone_table(conninfo, schema, table, include_data)
+ *   pgclone_table(conninfo, schema, table, include_data, target_name)
+ *   pgclone_table(conninfo, schema, table, include_data, target_name, options_json)
+ *   pgclone_table_ex(conninfo, schema, table, include_data, target_name,
  *                      include_indexes, include_constraints, include_triggers)
  *
  * All variants go through the same C function. Arguments are
  * detected by PG_NARGS() and PG_ARGISNULL().
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_table);
+PG_FUNCTION_INFO_V1(pgclone_table);
 
 Datum
-pgx_clone_table(PG_FUNCTION_ARGS)
+pgclone_table(PG_FUNCTION_ARGS)
 {
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     text       *schema_t          = PG_GETARG_TEXT_PP(1);
@@ -932,7 +932,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     char       *schema_name       = text_to_cstring(schema_t);
     char       *table_name        = text_to_cstring(tablename_t);
     char       *target_name;
-    CloneOptions opts             = pgx_clone_default_options();
+    CloneOptions opts             = pgclone_default_options();
 
     PGconn     *source_conn;
     PGconn     *local_conn;
@@ -949,11 +949,11 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     if (PG_NARGS() == 6 && !PG_ARGISNULL(5))
     {
         char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(5));
-        opts = pgx_clone_parse_options(options_json);
+        opts = pgclone_parse_options(options_json);
         pfree(options_json);
     }
 
-    /* Args 5,6,7: boolean overload (8 args via pgx_clone_table_ex) */
+    /* Args 5,6,7: boolean overload (8 args via pgclone_table_ex) */
     if (PG_NARGS() == 8)
     {
         if (!PG_ARGISNULL(5))
@@ -965,7 +965,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     }
 
     /* Connect to source */
-    source_conn = pgx_clone_connect(source_conninfo);
+    source_conn = pgclone_connect(source_conninfo);
 
     /* ---- Step 1: Get CREATE TABLE DDL from source ---- */
     initStringInfo(&buf);
@@ -1032,7 +1032,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
             quote_literal_cstr(table_name));
     }
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     if (PQntuples(res) == 0)
     {
@@ -1040,19 +1040,19 @@ pgx_clone_table(PG_FUNCTION_ARGS)
         PQfinish(source_conn);
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_TABLE),
-                 errmsg("pgx_clone: table \"%s.%s\" not found on source",
+                 errmsg("pgclone: table \"%s.%s\" not found on source",
                         schema_name, table_name)));
     }
 
     /* Use loopback libpq connection for ALL local operations */
-    local_conn = pgx_clone_connect_local();
+    local_conn = pgclone_connect_local();
 
     /* ---- Step 1b: Create schema locally ---- */
     {
         resetStringInfo(&buf);
         appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                          quote_identifier(schema_name));
-        pgx_clone_exec_conn(local_conn, buf.data);
+        pgclone_exec_conn(local_conn, buf.data);
     }
 
     /* ---- Step 1c: Pre-create sequences this table depends on ---- */
@@ -1081,7 +1081,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
             quote_literal_cstr(schema_name),
             quote_literal_cstr(table_name));
 
-        seq_res = pgx_clone_exec(source_conn, buf.data);
+        seq_res = pgclone_exec(source_conn, buf.data);
         nseqs   = PQntuples(seq_res);
 
         for (si = 0; si < nseqs; si++)
@@ -1107,7 +1107,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
             lcres = PQexec(local_conn, buf.data);
             if (PQresultStatus(lcres) != PGRES_COMMAND_OK)
                 ereport(WARNING,
-                        (errmsg("pgx_clone: could not create sequence %s.%s: %s",
+                        (errmsg("pgclone: could not create sequence %s.%s: %s",
                                 schema_name, PQgetvalue(seq_res, si, 0),
                                 PQerrorMessage(local_conn))));
             PQclear(lcres);
@@ -1133,7 +1133,7 @@ pgx_clone_table(PG_FUNCTION_ARGS)
             pfree(ddl);
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                     errmsg("pgx_clone: failed to create table locally: %s",
+                     errmsg("pgclone: failed to create table locally: %s",
                             ddl_errmsg)));
         }
         PQclear(local_res);
@@ -1145,47 +1145,47 @@ pgx_clone_table(PG_FUNCTION_ARGS)
     {
         int64 row_count;
 
-        row_count = pgx_clone_copy_data(source_conn, local_conn,
+        row_count = pgclone_copy_data(source_conn, local_conn,
                                         schema_name, table_name, target_name,
                                         &opts);
 
         ereport(NOTICE,
-                (errmsg("pgx_clone: copied %ld rows into %s.%s using COPY protocol",
+                (errmsg("pgclone: copied %ld rows into %s.%s using COPY protocol",
                         (long) row_count, schema_name, target_name)));
     }
 
     /* ---- Step 4: Clone constraints if enabled ---- */
     if (opts.include_constraints)
     {
-        int con_count = pgx_clone_constraints(source_conn, local_conn,
+        int con_count = pgclone_constraints(source_conn, local_conn,
                                               schema_name, table_name, target_name,
                                               &opts);
         if (con_count > 0)
             ereport(NOTICE,
-                    (errmsg("pgx_clone: cloned %d constraints for %s.%s",
+                    (errmsg("pgclone: cloned %d constraints for %s.%s",
                             con_count, schema_name, target_name)));
     }
 
     /* ---- Step 5: Clone indexes if enabled ---- */
     if (opts.include_indexes)
     {
-        int idx_count = pgx_clone_indexes(source_conn, local_conn,
+        int idx_count = pgclone_indexes(source_conn, local_conn,
                                           schema_name, table_name, target_name,
                                           &opts);
         if (idx_count > 0)
             ereport(NOTICE,
-                    (errmsg("pgx_clone: cloned %d indexes for %s.%s",
+                    (errmsg("pgclone: cloned %d indexes for %s.%s",
                             idx_count, schema_name, target_name)));
     }
 
     /* ---- Step 6: Clone triggers if enabled ---- */
     if (opts.include_triggers)
     {
-        int trig_count = pgx_clone_triggers(source_conn, local_conn,
+        int trig_count = pgclone_triggers(source_conn, local_conn,
                                             schema_name, table_name, target_name);
         if (trig_count > 0)
             ereport(NOTICE,
-                    (errmsg("pgx_clone: cloned %d triggers for %s.%s",
+                    (errmsg("pgclone: cloned %d triggers for %s.%s",
                             trig_count, schema_name, target_name)));
     }
 
@@ -1196,31 +1196,31 @@ pgx_clone_table(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_table_ex
+ * FUNCTION: pgclone_table_ex
  *
  * Boolean overload: separate params for indexes, constraints, triggers
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_table_ex);
+PG_FUNCTION_INFO_V1(pgclone_table_ex);
 
 Datum
-pgx_clone_table_ex(PG_FUNCTION_ARGS)
+pgclone_table_ex(PG_FUNCTION_ARGS)
 {
-    /* Just forward to pgx_clone_table — same C function handles both */
-    return pgx_clone_table(fcinfo);
+    /* Just forward to pgclone_table — same C function handles both */
+    return pgclone_table(fcinfo);
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_schema(source_conninfo, schema, include_data [, options])
+ * FUNCTION: pgclone_schema(source_conninfo, schema, include_data [, options])
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_schema);
+PG_FUNCTION_INFO_V1(pgclone_schema);
 
 Datum
-pgx_clone_schema(PG_FUNCTION_ARGS)
+pgclone_schema(PG_FUNCTION_ARGS)
 {
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     text       *schema_t          = PG_GETARG_TEXT_PP(1);
     bool        include_data      = PG_GETARG_BOOL(2);
-    CloneOptions opts             = pgx_clone_default_options();
+    CloneOptions opts             = pgclone_default_options();
 
     char       *source_conninfo   = text_to_cstring(source_conninfo_t);
     char       *schema_name       = text_to_cstring(schema_t);
@@ -1236,11 +1236,11 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
     {
         char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(3));
-        opts = pgx_clone_parse_options(options_json);
+        opts = pgclone_parse_options(options_json);
         pfree(options_json);
     }
 
-    /* Arg 3,4,5: boolean overload (6 args via pgx_clone_schema_ex) */
+    /* Arg 3,4,5: boolean overload (6 args via pgclone_schema_ex) */
     if (PG_NARGS() == 6)
     {
         if (!PG_ARGISNULL(3))
@@ -1251,14 +1251,14 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
             opts.include_triggers = PG_GETARG_BOOL(5);
     }
 
-    source_conn = pgx_clone_connect(source_conninfo);
-    local_conn = pgx_clone_connect_local();
+    source_conn = pgclone_connect(source_conninfo);
+    local_conn = pgclone_connect_local();
 
     /* ---- Step 1: Create schema ---- */
     initStringInfo(&buf);
     appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                      quote_identifier(schema_name));
-    pgx_clone_exec_conn(local_conn, buf.data);
+    pgclone_exec_conn(local_conn, buf.data);
 
     /* ---- Step 2: Clone all functions/procedures ---- */
     resetStringInfo(&buf);
@@ -1269,14 +1269,14 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
         "WHERE n.nspname = %s",
         quote_literal_cstr(schema_name));
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     for (i = 0; i < PQntuples(res); i++)
     {
-        pgx_clone_exec_conn(local_conn, PQgetvalue(res, i, 0));
+        pgclone_exec_conn(local_conn, PQgetvalue(res, i, 0));
     }
     ereport(NOTICE,
-            (errmsg("pgx_clone: cloned %d functions from schema %s",
+            (errmsg("pgclone: cloned %d functions from schema %s",
                     PQntuples(res), schema_name)));
     PQclear(res);
 
@@ -1289,7 +1289,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
         "WHERE sequence_schema = %s",
         quote_literal_cstr(schema_name));
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     for (i = 0; i < PQntuples(res); i++)
     {
@@ -1306,10 +1306,10 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
             PQgetvalue(res, i, 4),
             PQgetvalue(res, i, 5),
             strcmp(PQgetvalue(res, i, 6), "YES") == 0 ? "CYCLE" : "NO CYCLE");
-        pgx_clone_exec_conn(local_conn, buf.data);
+        pgclone_exec_conn(local_conn, buf.data);
     }
     ereport(NOTICE,
-            (errmsg("pgx_clone: cloned %d sequences from schema %s",
+            (errmsg("pgclone: cloned %d sequences from schema %s",
                     PQntuples(res), schema_name)));
     PQclear(res);
 
@@ -1322,7 +1322,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
         "WHERE schemaname = %s ORDER BY tablename",
         quote_literal_cstr(schema_name));
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     ntables = PQntuples(res);
 
@@ -1335,7 +1335,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     PQclear(res);
     PQfinish(source_conn);
 
-    /* Build options JSON to pass through to pgx_clone_table */
+    /* Build options JSON to pass through to pgclone_table */
     {
         StringInfoData opts_json;
         initStringInfo(&opts_json);
@@ -1350,7 +1350,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
             Datum result;
 
             /* Call 6-arg version: conninfo, schema, table, include_data, target_name, options */
-            result = DirectFunctionCall6(pgx_clone_table,
+            result = DirectFunctionCall6(pgclone_table,
                         CStringGetTextDatum(source_conninfo),
                         CStringGetTextDatum(schema_name),
                         CStringGetTextDatum(table_names[i]),
@@ -1364,14 +1364,14 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     }
 
     ereport(NOTICE,
-            (errmsg("pgx_clone: cloned %d tables from schema %s",
+            (errmsg("pgclone: cloned %d tables from schema %s",
                     ntables, schema_name)));
 
     /* ---- Step 5: Retry FK constraints if constraints enabled ---- */
     if (opts.include_constraints)
     {
-        PGconn *src_retry  = pgx_clone_connect(source_conninfo);
-        PGconn *lcl_retry  = pgx_clone_connect_local();
+        PGconn *src_retry  = pgclone_connect(source_conninfo);
+        PGconn *lcl_retry  = pgclone_connect_local();
         int     fk_created = 0;
 
         for (i = 0; i < ntables; i++)
@@ -1387,7 +1387,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                 quote_literal_cstr(schema_name),
                 quote_literal_cstr(table_names[i]));
 
-            res = pgx_clone_exec(src_retry, buf.data);
+            res = pgclone_exec(src_retry, buf.data);
 
             {
                 int j;
@@ -1407,7 +1407,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                         quote_identifier(conname),
                         condef);
 
-                    if (pgx_clone_exec_conn(lcl_retry, buf.data))
+                    if (pgclone_exec_conn(lcl_retry, buf.data))
                         fk_created++;
                 }
             }
@@ -1417,7 +1417,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
 
         if (fk_created > 0)
             ereport(NOTICE,
-                    (errmsg("pgx_clone: FK retry pass: ensured %d foreign key constraints in schema %s",
+                    (errmsg("pgclone: FK retry pass: ensured %d foreign key constraints in schema %s",
                             fk_created, schema_name)));
 
         PQfinish(lcl_retry);
@@ -1426,8 +1426,8 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
 
     /* ---- Step 6: Clone views ---- */
     {
-        PGconn *src_views = pgx_clone_connect(source_conninfo);
-        PGconn *lcl_views = pgx_clone_connect_local();
+        PGconn *src_views = pgclone_connect(source_conninfo);
+        PGconn *lcl_views = pgclone_connect_local();
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
@@ -1436,7 +1436,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
             "WHERE table_schema = %s",
             quote_literal_cstr(schema_name));
 
-        res = pgx_clone_exec(src_views, buf.data);
+        res = pgclone_exec(src_views, buf.data);
 
         for (i = 0; i < PQntuples(res); i++)
         {
@@ -1446,10 +1446,10 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                 quote_identifier(schema_name),
                 quote_identifier(PQgetvalue(res, i, 0)),
                 PQgetvalue(res, i, 1));
-            pgx_clone_exec_conn(lcl_views, buf.data);
+            pgclone_exec_conn(lcl_views, buf.data);
         }
         ereport(NOTICE,
-                (errmsg("pgx_clone: cloned %d views from schema %s",
+                (errmsg("pgclone: cloned %d views from schema %s",
                         PQntuples(res), schema_name)));
         PQclear(res);
 
@@ -1466,7 +1466,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                 "ORDER BY c.relname",
                 quote_literal_cstr(schema_name));
 
-            res = pgx_clone_exec(src_views, buf.data);
+            res = pgclone_exec(src_views, buf.data);
 
             for (i = 0; i < PQntuples(res); i++)
             {
@@ -1489,7 +1489,7 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                         quote_identifier(schema_name),
                         quote_identifier(mv_name),
                         mv_def_clean);
-                    pgx_clone_exec_conn(lcl_views, buf.data);
+                    pgclone_exec_conn(lcl_views, buf.data);
                     pfree(mv_def_clean);
                 }
 
@@ -1509,15 +1509,15 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
                         quote_literal_cstr(schema_name),
                         quote_literal_cstr(mv_name));
 
-                    idx_res = pgx_clone_exec(src_views, buf.data);
+                    idx_res = pgclone_exec(src_views, buf.data);
                     for (idx_i = 0; idx_i < PQntuples(idx_res); idx_i++)
-                        pgx_clone_exec_conn(lcl_views, PQgetvalue(idx_res, idx_i, 0));
+                        pgclone_exec_conn(lcl_views, PQgetvalue(idx_res, idx_i, 0));
                     PQclear(idx_res);
                 }
             }
 
             ereport(NOTICE,
-                    (errmsg("pgx_clone: cloned %d materialized views from schema %s",
+                    (errmsg("pgclone: cloned %d materialized views from schema %s",
                             PQntuples(res), schema_name)));
             PQclear(res);
         }
@@ -1536,22 +1536,22 @@ pgx_clone_schema(PG_FUNCTION_ARGS)
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
 
-/* pgx_clone_schema_ex — boolean overload for schema */
-PG_FUNCTION_INFO_V1(pgx_clone_schema_ex);
+/* pgclone_schema_ex — boolean overload for schema */
+PG_FUNCTION_INFO_V1(pgclone_schema_ex);
 
 Datum
-pgx_clone_schema_ex(PG_FUNCTION_ARGS)
+pgclone_schema_ex(PG_FUNCTION_ARGS)
 {
-    return pgx_clone_schema(fcinfo);
+    return pgclone_schema(fcinfo);
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_functions(source_conninfo, schema)
+ * FUNCTION: pgclone_functions(source_conninfo, schema)
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_functions);
+PG_FUNCTION_INFO_V1(pgclone_functions);
 
 Datum
-pgx_clone_functions(PG_FUNCTION_ARGS)
+pgclone_functions(PG_FUNCTION_ARGS)
 {
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     text       *schema_t          = PG_GETARG_TEXT_PP(1);
@@ -1565,13 +1565,13 @@ pgx_clone_functions(PG_FUNCTION_ARGS)
     StringInfoData buf;
     int         i, count;
 
-    source_conn = pgx_clone_connect(source_conninfo);
-    local_conn  = pgx_clone_connect_local();
+    source_conn = pgclone_connect(source_conninfo);
+    local_conn  = pgclone_connect_local();
 
     initStringInfo(&buf);
     appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                      quote_identifier(schema_name));
-    pgx_clone_exec_conn(local_conn, buf.data);
+    pgclone_exec_conn(local_conn, buf.data);
 
     resetStringInfo(&buf);
     appendStringInfo(&buf,
@@ -1581,12 +1581,12 @@ pgx_clone_functions(PG_FUNCTION_ARGS)
         "WHERE n.nspname = %s",
         quote_literal_cstr(schema_name));
 
-    res = pgx_clone_exec(source_conn, buf.data);
+    res = pgclone_exec(source_conn, buf.data);
 
     count = PQntuples(res);
     for (i = 0; i < count; i++)
     {
-        pgx_clone_exec_conn(local_conn, PQgetvalue(res, i, 0));
+        pgclone_exec_conn(local_conn, PQgetvalue(res, i, 0));
     }
 
     PQclear(res);
@@ -1594,23 +1594,23 @@ pgx_clone_functions(PG_FUNCTION_ARGS)
     PQfinish(source_conn);
 
     ereport(NOTICE,
-            (errmsg("pgx_clone: successfully cloned %d functions from %s",
+            (errmsg("pgclone: successfully cloned %d functions from %s",
                     count, schema_name)));
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_database(source_conninfo, include_data [, options])
+ * FUNCTION: pgclone_database(source_conninfo, include_data [, options])
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_database);
+PG_FUNCTION_INFO_V1(pgclone_database);
 
 Datum
-pgx_clone_database(PG_FUNCTION_ARGS)
+pgclone_database(PG_FUNCTION_ARGS)
 {
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     bool        include_data      = PG_GETARG_BOOL(1);
-    CloneOptions opts             = pgx_clone_default_options();
+    CloneOptions opts             = pgclone_default_options();
 
     char       *source_conninfo   = text_to_cstring(source_conninfo_t);
 
@@ -1623,13 +1623,13 @@ pgx_clone_database(PG_FUNCTION_ARGS)
     if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
     {
         char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(2));
-        opts = pgx_clone_parse_options(options_json);
+        opts = pgclone_parse_options(options_json);
         pfree(options_json);
     }
 
-    source_conn = pgx_clone_connect(source_conninfo);
+    source_conn = pgclone_connect(source_conninfo);
 
-    res = pgx_clone_exec(source_conn,
+    res = pgclone_exec(source_conn,
         "SELECT nspname FROM pg_catalog.pg_namespace "
         "WHERE nspname NOT LIKE 'pg_%' "
         "AND nspname <> 'information_schema' "
@@ -1658,10 +1658,10 @@ pgx_clone_database(PG_FUNCTION_ARGS)
             Datum result;
 
             ereport(NOTICE,
-                    (errmsg("pgx_clone: cloning schema %s (%d/%d)",
+                    (errmsg("pgclone: cloning schema %s (%d/%d)",
                             schema_names[i], i + 1, nschemas)));
 
-            result = DirectFunctionCall4(pgx_clone_schema,
+            result = DirectFunctionCall4(pgclone_schema,
                         CStringGetTextDatum(source_conninfo),
                         CStringGetTextDatum(schema_names[i]),
                         BoolGetDatum(include_data),
@@ -1673,7 +1673,7 @@ pgx_clone_database(PG_FUNCTION_ARGS)
     }
 
     ereport(NOTICE,
-            (errmsg("pgx_clone: database clone complete — %d schemas cloned",
+            (errmsg("pgclone: database clone complete — %d schemas cloned",
                     nschemas)));
 
     for (i = 0; i < nschemas; i++)
@@ -1684,20 +1684,20 @@ pgx_clone_database(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_version()
+ * FUNCTION: pgclone_version()
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_version);
+PG_FUNCTION_INFO_V1(pgclone_version);
 
 Datum
-pgx_clone_version(PG_FUNCTION_ARGS)
+pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgx_clone 2.0.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.0.0"));
 }
 
 /* ===============================================================
  * _PG_init — called when the shared library is loaded.
  * Registers shared memory for job tracking.
- * Required: shared_preload_libraries = 'pgx_clone'
+ * Required: shared_preload_libraries = 'pgclone'
  * =============================================================== */
 void _PG_init(void);
 
@@ -1707,7 +1707,7 @@ _PG_init(void)
     if (!process_shared_preload_libraries_in_progress)
         return;
 
-    pgx_clone_shmem_init();
+    pgclone_shmem_init();
 }
 
 /* ===============================================================
@@ -1718,15 +1718,15 @@ _PG_init(void)
  * =============================================================== */
 
 /* ===============================================================
- * FUNCTION: pgx_clone_table_async(conninfo, schema, table,
+ * FUNCTION: pgclone_table_async(conninfo, schema, table,
  *              include_data [, target_name [, options_json]])
  *
  * Returns job_id (INTEGER).
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_table_async);
+PG_FUNCTION_INFO_V1(pgclone_table_async);
 
 Datum
-pgx_clone_table_async(PG_FUNCTION_ARGS)
+pgclone_table_async(PG_FUNCTION_ARGS)
 {
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     text       *schema_t          = PG_GETARG_TEXT_PP(1);
@@ -1737,12 +1737,12 @@ pgx_clone_table_async(PG_FUNCTION_ARGS)
     char       *schema_name       = text_to_cstring(schema_t);
     char       *table_name        = text_to_cstring(tablename_t);
     char       *target_name       = table_name;
-    CloneOptions opts             = pgx_clone_default_options();
-    PgxCloneConflictStrategy conflict = PGX_CLONE_CONFLICT_ERROR;
+    CloneOptions opts             = pgclone_default_options();
+    PgcloneConflictStrategy conflict = PGCLONE_CONFLICT_ERROR;
 
     BackgroundWorker worker;
     BackgroundWorkerHandle *handle;
-    PgxCloneJob    *job;
+    PgcloneJob    *job;
     int             job_id;
 
     if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
@@ -1751,43 +1751,43 @@ pgx_clone_table_async(PG_FUNCTION_ARGS)
     if (PG_NARGS() >= 6 && !PG_ARGISNULL(5))
     {
         char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(5));
-        opts = pgx_clone_parse_options(options_json);
+        opts = pgclone_parse_options(options_json);
 
         if (strstr(options_json, "\"conflict\": \"skip\"") ||
             strstr(options_json, "\"conflict\":\"skip\""))
-            conflict = PGX_CLONE_CONFLICT_SKIP;
+            conflict = PGCLONE_CONFLICT_SKIP;
         else if (strstr(options_json, "\"conflict\": \"replace\"") ||
                  strstr(options_json, "\"conflict\":\"replace\""))
-            conflict = PGX_CLONE_CONFLICT_REPLACE;
+            conflict = PGCLONE_CONFLICT_REPLACE;
         else if (strstr(options_json, "\"conflict\": \"rename\"") ||
                  strstr(options_json, "\"conflict\":\"rename\""))
-            conflict = PGX_CLONE_CONFLICT_RENAME;
+            conflict = PGCLONE_CONFLICT_RENAME;
 
         pfree(options_json);
     }
 
-    if (!pgx_clone_state)
+    if (!pgclone_state)
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("pgx_clone: shared memory not initialized"),
-                 errhint("Add pgx_clone to shared_preload_libraries in postgresql.conf")));
+                 errmsg("pgclone: shared memory not initialized"),
+                 errhint("Add pgclone to shared_preload_libraries in postgresql.conf")));
 
-    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
 
     job = find_free_slot();
     if (!job)
     {
-        LWLockRelease(pgx_clone_state->lock);
+        LWLockRelease(pgclone_state->lock);
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-                 errmsg("pgx_clone: no free job slots (max %d)", PGX_CLONE_MAX_JOBS)));
+                 errmsg("pgclone: no free job slots (max %d)", PGCLONE_MAX_JOBS)));
     }
 
-    job_id = pgx_clone_state->next_job_id++;
-    memset(job, 0, sizeof(PgxCloneJob));
+    job_id = pgclone_state->next_job_id++;
+    memset(job, 0, sizeof(PgcloneJob));
     job->job_id = job_id;
-    job->status = PGX_CLONE_JOB_PENDING;
-    job->op_type = PGX_CLONE_OP_TABLE;
+    job->status = PGCLONE_JOB_PENDING;
+    job->op_type = PGCLONE_OP_TABLE;
     job->database_oid = MyDatabaseId;
 
     strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
@@ -1802,81 +1802,81 @@ pgx_clone_table_async(PG_FUNCTION_ARGS)
     job->conflict_strategy   = conflict;
     job->resumable           = true;
 
-    LWLockRelease(pgx_clone_state->lock);
+    LWLockRelease(pgclone_state->lock);
 
     memset(&worker, 0, sizeof(BackgroundWorker));
-    snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: job %d (%s.%s)",
+    snprintf(worker.bgw_name, BGW_MAXLEN, "pgclone: job %d (%s.%s)",
              job_id, schema_name, table_name);
-    snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+    snprintf(worker.bgw_type, BGW_MAXLEN, "pgclone worker");
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     worker.bgw_restart_time = BGW_NEVER_RESTART;
-    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
-    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgclone");
+    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgclone_bgw_main");
     worker.bgw_main_arg = Int32GetDatum(job_id);
     worker.bgw_notify_pid = MyProcPid;
 
     if (!RegisterDynamicBackgroundWorker(&worker, &handle))
     {
-        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
-        job->status = PGX_CLONE_JOB_FREE;
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        job->status = PGCLONE_JOB_FREE;
+        LWLockRelease(pgclone_state->lock);
+        ereport(ERROR, (errmsg("pgclone: could not register background worker")));
     }
 
     PG_RETURN_INT32(job_id);
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_schema_async(conninfo, schema, include_data
+ * FUNCTION: pgclone_schema_async(conninfo, schema, include_data
  *              [, options_json])
  *
  * When options contains "parallel": N (N > 1), launches N background
  * workers that each clone a subset of tables concurrently.
  * Without parallel, launches a single worker (as before).
  *
- * Returns the parent job_id. Child jobs are visible via pgx_clone_jobs().
+ * Returns the parent job_id. Child jobs are visible via pgclone_jobs().
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_schema_async);
+PG_FUNCTION_INFO_V1(pgclone_schema_async);
 
 Datum
-pgx_clone_schema_async(PG_FUNCTION_ARGS)
+pgclone_schema_async(PG_FUNCTION_ARGS)
 {
     text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
     text       *schema_t          = PG_GETARG_TEXT_PP(1);
     bool        include_data      = PG_GETARG_BOOL(2);
-    CloneOptions opts             = pgx_clone_default_options();
-    PgxCloneConflictStrategy conflict = PGX_CLONE_CONFLICT_ERROR;
+    CloneOptions opts             = pgclone_default_options();
+    PgcloneConflictStrategy conflict = PGCLONE_CONFLICT_ERROR;
 
     char       *source_conninfo   = text_to_cstring(source_conninfo_t);
     char       *schema_name       = text_to_cstring(schema_t);
 
-    PgxCloneJob    *job;
+    PgcloneJob    *job;
     int             job_id;
 
     if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
     {
         char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(3));
-        opts = pgx_clone_parse_options(options_json);
+        opts = pgclone_parse_options(options_json);
 
         if (strstr(options_json, "\"conflict\": \"skip\"") ||
             strstr(options_json, "\"conflict\":\"skip\""))
-            conflict = PGX_CLONE_CONFLICT_SKIP;
+            conflict = PGCLONE_CONFLICT_SKIP;
         else if (strstr(options_json, "\"conflict\": \"replace\"") ||
                  strstr(options_json, "\"conflict\":\"replace\""))
-            conflict = PGX_CLONE_CONFLICT_REPLACE;
+            conflict = PGCLONE_CONFLICT_REPLACE;
         else if (strstr(options_json, "\"conflict\": \"rename\"") ||
                  strstr(options_json, "\"conflict\":\"rename\""))
-            conflict = PGX_CLONE_CONFLICT_RENAME;
+            conflict = PGCLONE_CONFLICT_RENAME;
 
         pfree(options_json);
     }
 
-    if (!pgx_clone_state)
+    if (!pgclone_state)
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("pgx_clone: shared memory not initialized"),
-                 errhint("Add pgx_clone to shared_preload_libraries")));
+                 errmsg("pgclone: shared memory not initialized"),
+                 errhint("Add pgclone to shared_preload_libraries")));
 
     if (opts.parallel_workers > 1)
     {
@@ -1893,21 +1893,21 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
 
         /* First create schema + sequences + functions via loopback */
         {
-            PGconn     *local_conn = pgx_clone_connect_local();
+            PGconn     *local_conn = pgclone_connect_local();
             PGresult   *func_res;
             StringInfoData fbuf;
 
             initStringInfo(&fbuf);
             appendStringInfo(&fbuf, "CREATE SCHEMA IF NOT EXISTS %s",
                              quote_identifier(schema_name));
-            pgx_clone_exec_conn(local_conn, fbuf.data);
+            pgclone_exec_conn(local_conn, fbuf.data);
 
             PQfinish(local_conn);
             pfree(fbuf.data);
         }
 
         /* Get table list from source */
-        source_conn = pgx_clone_connect(source_conninfo);
+        source_conn = pgclone_connect(source_conninfo);
 
         initStringInfo(&qbuf);
         appendStringInfo(&qbuf,
@@ -1915,7 +1915,7 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
             "WHERE schemaname = %s ORDER BY tablename",
             quote_literal_cstr(schema_name));
 
-        table_res = pgx_clone_exec(source_conn, qbuf.data);
+        table_res = pgclone_exec(source_conn, qbuf.data);
         ntables = PQntuples(table_res);
 
         PQfinish(source_conn);
@@ -1924,27 +1924,27 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
         {
             PQclear(table_res);
             pfree(qbuf.data);
-            ereport(NOTICE, (errmsg("pgx_clone: no tables found in schema %s", schema_name)));
+            ereport(NOTICE, (errmsg("pgclone: no tables found in schema %s", schema_name)));
             PG_RETURN_INT32(0);
         }
 
         /* Allocate parent job for tracking */
-        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
 
         job = find_free_slot();
         if (!job)
         {
-            LWLockRelease(pgx_clone_state->lock);
+            LWLockRelease(pgclone_state->lock);
             PQclear(table_res);
             pfree(qbuf.data);
-            ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
+            ereport(ERROR, (errmsg("pgclone: no free job slots")));
         }
 
-        parent_job_id = pgx_clone_state->next_job_id++;
-        memset(job, 0, sizeof(PgxCloneJob));
+        parent_job_id = pgclone_state->next_job_id++;
+        memset(job, 0, sizeof(PgcloneJob));
         job->job_id = parent_job_id;
-        job->status = PGX_CLONE_JOB_RUNNING;
-        job->op_type = PGX_CLONE_OP_SCHEMA;
+        job->status = PGCLONE_JOB_RUNNING;
+        job->op_type = PGCLONE_OP_SCHEMA;
         job->database_oid = MyDatabaseId;
         job->total_tables = ntables;
         job->parallel_workers = opts.parallel_workers;
@@ -1953,7 +1953,7 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
         strlcpy(job->schema_name, schema_name, NAMEDATALEN);
         strlcpy(job->current_phase, "launching parallel workers", 64);
 
-        LWLockRelease(pgx_clone_state->lock);
+        LWLockRelease(pgclone_state->lock);
 
         /* Launch workers — each gets a subset of tables */
         tables_per_worker = (ntables + opts.parallel_workers - 1) / opts.parallel_workers;
@@ -1965,7 +1965,7 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
             int ti;
             BackgroundWorker worker;
             BackgroundWorkerHandle *handle;
-            PgxCloneJob *child_job;
+            PgcloneJob *child_job;
             int child_job_id;
 
             if (end_idx > ntables)
@@ -1976,22 +1976,22 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
             {
                 const char *tname = PQgetvalue(table_res, ti, 0);
 
-                LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+                LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
 
                 child_job = find_free_slot();
                 if (!child_job)
                 {
-                    LWLockRelease(pgx_clone_state->lock);
+                    LWLockRelease(pgclone_state->lock);
                     ereport(WARNING,
-                            (errmsg("pgx_clone: no free job slot for table %s, skipping", tname)));
+                            (errmsg("pgclone: no free job slot for table %s, skipping", tname)));
                     continue;
                 }
 
-                child_job_id = pgx_clone_state->next_job_id++;
-                memset(child_job, 0, sizeof(PgxCloneJob));
+                child_job_id = pgclone_state->next_job_id++;
+                memset(child_job, 0, sizeof(PgcloneJob));
                 child_job->job_id = child_job_id;
-                child_job->status = PGX_CLONE_JOB_PENDING;
-                child_job->op_type = PGX_CLONE_OP_TABLE;
+                child_job->status = PGCLONE_JOB_PENDING;
+                child_job->op_type = PGCLONE_OP_TABLE;
                 child_job->database_oid = MyDatabaseId;
                 child_job->include_data = include_data;
                 child_job->include_indexes = opts.include_indexes;
@@ -2005,19 +2005,19 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
                 strlcpy(child_job->table_name, tname, NAMEDATALEN);
                 strlcpy(child_job->target_name, tname, NAMEDATALEN);
 
-                LWLockRelease(pgx_clone_state->lock);
+                LWLockRelease(pgclone_state->lock);
 
                 /* Launch bgworker for this table */
                 memset(&worker, 0, sizeof(BackgroundWorker));
                 snprintf(worker.bgw_name, BGW_MAXLEN,
-                         "pgx_clone: %s.%s (parallel job %d, worker %d)",
+                         "pgclone: %s.%s (parallel job %d, worker %d)",
                          schema_name, tname, parent_job_id, wi);
-                snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+                snprintf(worker.bgw_type, BGW_MAXLEN, "pgclone worker");
                 worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
                 worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
                 worker.bgw_restart_time = BGW_NEVER_RESTART;
-                snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
-                snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+                snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgclone");
+                snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgclone_bgw_main");
                 worker.bgw_main_arg = Int32GetDatum(child_job_id);
                 worker.bgw_notify_pid = MyProcPid;
 
@@ -2025,7 +2025,7 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
                     workers_launched++;
                 else
                     ereport(WARNING,
-                            (errmsg("pgx_clone: could not launch worker for table %s", tname)));
+                            (errmsg("pgclone: could not launch worker for table %s", tname)));
             }
         }
 
@@ -2033,21 +2033,21 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
         pfree(qbuf.data);
 
         /* Update parent job */
-        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
-        snprintf(pgx_clone_state->jobs[0].current_phase, 64,
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        snprintf(pgclone_state->jobs[0].current_phase, 64,
                  "%d parallel workers launched", workers_launched);
 
         /* Find parent job to update */
         {
-            PgxCloneJob *pj = find_job(parent_job_id);
+            PgcloneJob *pj = find_job(parent_job_id);
             if (pj)
                 snprintf(pj->current_phase, 64,
                          "%d parallel workers for %d tables", workers_launched, ntables);
         }
-        LWLockRelease(pgx_clone_state->lock);
+        LWLockRelease(pgclone_state->lock);
 
         ereport(NOTICE,
-                (errmsg("pgx_clone: launched %d parallel workers for %d tables in schema %s (parent job %d)",
+                (errmsg("pgclone: launched %d parallel workers for %d tables in schema %s (parent job %d)",
                         workers_launched, ntables, schema_name, parent_job_id)));
 
         PG_RETURN_INT32(parent_job_id);
@@ -2060,20 +2060,20 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
         BackgroundWorker worker;
         BackgroundWorkerHandle *handle;
 
-        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
 
         job = find_free_slot();
         if (!job)
         {
-            LWLockRelease(pgx_clone_state->lock);
-            ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
+            LWLockRelease(pgclone_state->lock);
+            ereport(ERROR, (errmsg("pgclone: no free job slots")));
         }
 
-        job_id = pgx_clone_state->next_job_id++;
-        memset(job, 0, sizeof(PgxCloneJob));
+        job_id = pgclone_state->next_job_id++;
+        memset(job, 0, sizeof(PgcloneJob));
         job->job_id = job_id;
-        job->status = PGX_CLONE_JOB_PENDING;
-        job->op_type = PGX_CLONE_OP_SCHEMA;
+        job->status = PGCLONE_JOB_PENDING;
+        job->op_type = PGCLONE_OP_SCHEMA;
         job->database_oid = MyDatabaseId;
 
         strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
@@ -2086,26 +2086,26 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
         job->conflict_strategy   = conflict;
         job->resumable           = true;
 
-        LWLockRelease(pgx_clone_state->lock);
+        LWLockRelease(pgclone_state->lock);
 
         memset(&worker, 0, sizeof(BackgroundWorker));
-        snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: schema %s (job %d)",
+        snprintf(worker.bgw_name, BGW_MAXLEN, "pgclone: schema %s (job %d)",
                  schema_name, job_id);
-        snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+        snprintf(worker.bgw_type, BGW_MAXLEN, "pgclone worker");
         worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
         worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
         worker.bgw_restart_time = BGW_NEVER_RESTART;
-        snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
-        snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+        snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgclone");
+        snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgclone_bgw_main");
         worker.bgw_main_arg = Int32GetDatum(job_id);
         worker.bgw_notify_pid = MyProcPid;
 
         if (!RegisterDynamicBackgroundWorker(&worker, &handle))
         {
-            LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
-            job->status = PGX_CLONE_JOB_FREE;
-            LWLockRelease(pgx_clone_state->lock);
-            ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            job->status = PGCLONE_JOB_FREE;
+            LWLockRelease(pgclone_state->lock);
+            ereport(ERROR, (errmsg("pgclone: could not register background worker")));
         }
 
         PG_RETURN_INT32(job_id);
@@ -2113,37 +2113,37 @@ pgx_clone_schema_async(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_progress(job_id) — returns JSON
+ * FUNCTION: pgclone_progress(job_id) — returns JSON
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_progress);
+PG_FUNCTION_INFO_V1(pgclone_progress);
 
 Datum
-pgx_clone_progress(PG_FUNCTION_ARGS)
+pgclone_progress(PG_FUNCTION_ARGS)
 {
     int             job_id = PG_GETARG_INT32(0);
-    PgxCloneJob    *job;
+    PgcloneJob    *job;
     StringInfoData  result;
     const char     *status_str;
 
-    if (!pgx_clone_state)
-        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+    if (!pgclone_state)
+        ereport(ERROR, (errmsg("pgclone: shared memory not initialized")));
 
-    LWLockAcquire(pgx_clone_state->lock, LW_SHARED);
+    LWLockAcquire(pgclone_state->lock, LW_SHARED);
     job = find_job(job_id);
 
     if (!job)
     {
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: job %d not found", job_id)));
+        LWLockRelease(pgclone_state->lock);
+        ereport(ERROR, (errmsg("pgclone: job %d not found", job_id)));
     }
 
     switch (job->status)
     {
-        case PGX_CLONE_JOB_PENDING:   status_str = "pending";   break;
-        case PGX_CLONE_JOB_RUNNING:   status_str = "running";   break;
-        case PGX_CLONE_JOB_COMPLETED: status_str = "completed"; break;
-        case PGX_CLONE_JOB_FAILED:    status_str = "failed";    break;
-        case PGX_CLONE_JOB_CANCELLED: status_str = "cancelled"; break;
+        case PGCLONE_JOB_PENDING:   status_str = "pending";   break;
+        case PGCLONE_JOB_RUNNING:   status_str = "running";   break;
+        case PGCLONE_JOB_COMPLETED: status_str = "completed"; break;
+        case PGCLONE_JOB_FAILED:    status_str = "failed";    break;
+        case PGCLONE_JOB_CANCELLED: status_str = "cancelled"; break;
         default:                      status_str = "unknown";    break;
     }
 
@@ -2156,7 +2156,7 @@ pgx_clone_progress(PG_FUNCTION_ARGS)
         (long) job->completed_tables, (long) job->total_tables,
         (long) job->copied_rows, job->current_table);
 
-    if (job->status == PGX_CLONE_JOB_FAILED)
+    if (job->status == PGCLONE_JOB_FAILED)
         appendStringInfo(&result, ", \"error\": \"%s\"", job->error_message);
 
     if (job->resume_checkpoint[0] != '\0')
@@ -2173,149 +2173,149 @@ pgx_clone_progress(PG_FUNCTION_ARGS)
     }
 
     appendStringInfoChar(&result, '}');
-    LWLockRelease(pgx_clone_state->lock);
+    LWLockRelease(pgclone_state->lock);
 
     PG_RETURN_TEXT_P(cstring_to_text(result.data));
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_cancel(job_id)
+ * FUNCTION: pgclone_cancel(job_id)
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_cancel);
+PG_FUNCTION_INFO_V1(pgclone_cancel);
 
 Datum
-pgx_clone_cancel(PG_FUNCTION_ARGS)
+pgclone_cancel(PG_FUNCTION_ARGS)
 {
     int             job_id = PG_GETARG_INT32(0);
-    PgxCloneJob    *job;
+    PgcloneJob    *job;
 
-    if (!pgx_clone_state)
-        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+    if (!pgclone_state)
+        ereport(ERROR, (errmsg("pgclone: shared memory not initialized")));
 
-    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
     job = find_job(job_id);
 
     if (!job)
     {
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: job %d not found", job_id)));
+        LWLockRelease(pgclone_state->lock);
+        ereport(ERROR, (errmsg("pgclone: job %d not found", job_id)));
     }
 
-    if (job->status == PGX_CLONE_JOB_RUNNING ||
-        job->status == PGX_CLONE_JOB_PENDING)
+    if (job->status == PGCLONE_JOB_RUNNING ||
+        job->status == PGCLONE_JOB_PENDING)
     {
-        job->status = PGX_CLONE_JOB_CANCELLED;
+        job->status = PGCLONE_JOB_CANCELLED;
         job->end_time = GetCurrentTimestamp();
         strlcpy(job->current_phase, "cancelled", 64);
     }
 
-    LWLockRelease(pgx_clone_state->lock);
+    LWLockRelease(pgclone_state->lock);
 
     PG_RETURN_TEXT_P(cstring_to_text("cancelled"));
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_resume(job_id) — returns new job_id
+ * FUNCTION: pgclone_resume(job_id) — returns new job_id
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_resume);
+PG_FUNCTION_INFO_V1(pgclone_resume);
 
 Datum
-pgx_clone_resume(PG_FUNCTION_ARGS)
+pgclone_resume(PG_FUNCTION_ARGS)
 {
     int             old_job_id = PG_GETARG_INT32(0);
-    PgxCloneJob    *old_job, *new_job;
+    PgcloneJob    *old_job, *new_job;
     int             new_job_id;
     BackgroundWorker worker;
     BackgroundWorkerHandle *handle;
 
-    if (!pgx_clone_state)
-        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+    if (!pgclone_state)
+        ereport(ERROR, (errmsg("pgclone: shared memory not initialized")));
 
-    LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
 
     old_job = find_job(old_job_id);
     if (!old_job)
     {
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: job %d not found", old_job_id)));
+        LWLockRelease(pgclone_state->lock);
+        ereport(ERROR, (errmsg("pgclone: job %d not found", old_job_id)));
     }
 
-    if (old_job->status != PGX_CLONE_JOB_FAILED &&
-        old_job->status != PGX_CLONE_JOB_CANCELLED)
+    if (old_job->status != PGCLONE_JOB_FAILED &&
+        old_job->status != PGCLONE_JOB_CANCELLED)
     {
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: job %d is not resumable", old_job_id)));
+        LWLockRelease(pgclone_state->lock);
+        ereport(ERROR, (errmsg("pgclone: job %d is not resumable", old_job_id)));
     }
 
     new_job = find_free_slot();
     if (!new_job)
     {
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: no free job slots")));
+        LWLockRelease(pgclone_state->lock);
+        ereport(ERROR, (errmsg("pgclone: no free job slots")));
     }
 
-    new_job_id = pgx_clone_state->next_job_id++;
-    memcpy(new_job, old_job, sizeof(PgxCloneJob));
+    new_job_id = pgclone_state->next_job_id++;
+    memcpy(new_job, old_job, sizeof(PgcloneJob));
     new_job->job_id = new_job_id;
-    new_job->status = PGX_CLONE_JOB_PENDING;
+    new_job->status = PGCLONE_JOB_PENDING;
     new_job->worker_pid = 0;
     new_job->start_time = 0;
     new_job->end_time = 0;
     new_job->error_message[0] = '\0';
     /* resume_checkpoint preserved — bgworker will skip past it */
 
-    old_job->status = PGX_CLONE_JOB_FREE;
+    old_job->status = PGCLONE_JOB_FREE;
 
-    LWLockRelease(pgx_clone_state->lock);
+    LWLockRelease(pgclone_state->lock);
 
     memset(&worker, 0, sizeof(BackgroundWorker));
-    snprintf(worker.bgw_name, BGW_MAXLEN, "pgx_clone: resume job %d", new_job_id);
-    snprintf(worker.bgw_type, BGW_MAXLEN, "pgx_clone worker");
+    snprintf(worker.bgw_name, BGW_MAXLEN, "pgclone: resume job %d", new_job_id);
+    snprintf(worker.bgw_type, BGW_MAXLEN, "pgclone worker");
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
     worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
     worker.bgw_restart_time = BGW_NEVER_RESTART;
-    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgx_clone");
-    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgx_clone_bgw_main");
+    snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgclone");
+    snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgclone_bgw_main");
     worker.bgw_main_arg = Int32GetDatum(new_job_id);
     worker.bgw_notify_pid = MyProcPid;
 
     if (!RegisterDynamicBackgroundWorker(&worker, &handle))
     {
-        LWLockAcquire(pgx_clone_state->lock, LW_EXCLUSIVE);
-        new_job->status = PGX_CLONE_JOB_FREE;
-        LWLockRelease(pgx_clone_state->lock);
-        ereport(ERROR, (errmsg("pgx_clone: could not register background worker")));
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        new_job->status = PGCLONE_JOB_FREE;
+        LWLockRelease(pgclone_state->lock);
+        ereport(ERROR, (errmsg("pgclone: could not register background worker")));
     }
 
     PG_RETURN_INT32(new_job_id);
 }
 
 /* ===============================================================
- * FUNCTION: pgx_clone_jobs() — returns JSON array of all jobs
+ * FUNCTION: pgclone_jobs() — returns JSON array of all jobs
  * =============================================================== */
-PG_FUNCTION_INFO_V1(pgx_clone_jobs);
+PG_FUNCTION_INFO_V1(pgclone_jobs);
 
 Datum
-pgx_clone_jobs(PG_FUNCTION_ARGS)
+pgclone_jobs(PG_FUNCTION_ARGS)
 {
     StringInfoData  result;
     int             i;
     bool            first = true;
     const char     *status_str;
 
-    if (!pgx_clone_state)
-        ereport(ERROR, (errmsg("pgx_clone: shared memory not initialized")));
+    if (!pgclone_state)
+        ereport(ERROR, (errmsg("pgclone: shared memory not initialized")));
 
     initStringInfo(&result);
     appendStringInfoChar(&result, '[');
 
-    LWLockAcquire(pgx_clone_state->lock, LW_SHARED);
+    LWLockAcquire(pgclone_state->lock, LW_SHARED);
 
-    for (i = 0; i < PGX_CLONE_MAX_JOBS; i++)
+    for (i = 0; i < PGCLONE_MAX_JOBS; i++)
     {
-        PgxCloneJob *j = &pgx_clone_state->jobs[i];
+        PgcloneJob *j = &pgclone_state->jobs[i];
 
-        if (j->status == PGX_CLONE_JOB_FREE)
+        if (j->status == PGCLONE_JOB_FREE)
             continue;
 
         if (!first)
@@ -2324,11 +2324,11 @@ pgx_clone_jobs(PG_FUNCTION_ARGS)
 
         switch (j->status)
         {
-            case PGX_CLONE_JOB_PENDING:   status_str = "pending";   break;
-            case PGX_CLONE_JOB_RUNNING:   status_str = "running";   break;
-            case PGX_CLONE_JOB_COMPLETED: status_str = "completed"; break;
-            case PGX_CLONE_JOB_FAILED:    status_str = "failed";    break;
-            case PGX_CLONE_JOB_CANCELLED: status_str = "cancelled"; break;
+            case PGCLONE_JOB_PENDING:   status_str = "pending";   break;
+            case PGCLONE_JOB_RUNNING:   status_str = "running";   break;
+            case PGCLONE_JOB_COMPLETED: status_str = "completed"; break;
+            case PGCLONE_JOB_FAILED:    status_str = "failed";    break;
+            case PGCLONE_JOB_CANCELLED: status_str = "cancelled"; break;
             default:                      status_str = "unknown";    break;
         }
 
@@ -2341,7 +2341,7 @@ pgx_clone_jobs(PG_FUNCTION_ARGS)
             (long) j->completed_tables, (long) j->total_tables);
     }
 
-    LWLockRelease(pgx_clone_state->lock);
+    LWLockRelease(pgclone_state->lock);
     appendStringInfoChar(&result, ']');
 
     PG_RETURN_TEXT_P(cstring_to_text(result.data));

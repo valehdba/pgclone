@@ -1,4 +1,4 @@
-# pgx_clone
+# pgclone
 
 A PostgreSQL extension written in C for cloning databases, schemas, tables, and functions between PostgreSQL hosts — directly from SQL.
  
@@ -35,8 +35,8 @@ brew install postgresql@18
 ### Build and install
 
 ```bash
-git clone https://github.com/valehdba/pgx_clone.git
-cd pgx_clone
+git clone https://github.com/valehdba/pgclone.git
+cd pgclone
 make
 sudo make install
 ```
@@ -52,10 +52,10 @@ sudo make install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 
 ```sql
 -- Connect to your target database
-CREATE EXTENSION pgx_clone;
+CREATE EXTENSION pgclone;
 
 -- Verify installation
-SELECT pgx_clone_version();
+SELECT pgclone_version();
 ```
 
 ## Usage
@@ -63,7 +63,7 @@ SELECT pgx_clone_version();
 ### Clone a single table (with data)
 
 ```sql
-SELECT pgx_clone_table(
+SELECT pgclone_table(
     'host=source-server dbname=mydb user=postgres password=secret',
     'public',           -- schema name
     'customers',        -- table name
@@ -74,7 +74,7 @@ SELECT pgx_clone_table(
 ### Clone a table (structure only, no data)
 
 ```sql
-SELECT pgx_clone_table(
+SELECT pgclone_table(
     'host=source-server dbname=mydb user=postgres',
     'public',
     'customers',
@@ -85,7 +85,7 @@ SELECT pgx_clone_table(
 ### Clone a table with a different name on target
 
 ```sql
-SELECT pgx_clone_table(
+SELECT pgclone_table(
     'host=source-server dbname=mydb user=postgres',
     'public',
     'customers',        -- source table name
@@ -97,7 +97,7 @@ SELECT pgx_clone_table(
 ### Clone an entire schema (tables + views + functions + sequences)
 
 ```sql
-SELECT pgx_clone_schema(
+SELECT pgclone_schema(
     'host=source-server dbname=mydb user=postgres',
     'sales',            -- schema to clone
     true                -- include table data
@@ -107,7 +107,7 @@ SELECT pgx_clone_schema(
 ### Clone only functions from a schema
 
 ```sql
-SELECT pgx_clone_functions(
+SELECT pgclone_functions(
     'host=source-server dbname=mydb user=postgres',
     'utils'             -- schema containing functions
 );
@@ -116,7 +116,7 @@ SELECT pgx_clone_functions(
 ### Clone an entire database (all user schemas)
 
 ```sql
-SELECT pgx_clone_database(
+SELECT pgclone_database(
     'host=source-server dbname=mydb user=postgres',
     true                -- include data
 );
@@ -130,21 +130,21 @@ By default, all indexes, constraints (PK, UNIQUE, CHECK, FK), and triggers are c
 
 ```sql
 -- Clone table without indexes and triggers
-SELECT pgx_clone_table(
+SELECT pgclone_table(
     'host=source-server dbname=mydb user=postgres',
     'public', 'orders', true, 'orders',
     '{"indexes": false, "triggers": false}'
 );
 
 -- Clone schema without any constraints
-SELECT pgx_clone_schema(
+SELECT pgclone_schema(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
     '{"constraints": false}'
 );
 
 -- Clone database without triggers
-SELECT pgx_clone_database(
+SELECT pgclone_database(
     'host=source-server dbname=mydb user=postgres',
     true,
     '{"triggers": false}'
@@ -154,9 +154,9 @@ SELECT pgx_clone_database(
 #### Boolean parameters format
 
 ```sql
--- pgx_clone_table_ex(conninfo, schema, table, include_data, target_name,
+-- pgclone_table_ex(conninfo, schema, table, include_data, target_name,
 --                     include_indexes, include_constraints, include_triggers)
-SELECT pgx_clone_table_ex(
+SELECT pgclone_table_ex(
     'host=source-server dbname=mydb user=postgres',
     'public', 'orders', true, 'orders_copy',
     false,   -- skip indexes
@@ -164,9 +164,9 @@ SELECT pgx_clone_table_ex(
     false    -- skip triggers
 );
 
--- pgx_clone_schema_ex(conninfo, schema, include_data,
+-- pgclone_schema_ex(conninfo, schema, include_data,
 --                      include_indexes, include_constraints, include_triggers)
-SELECT pgx_clone_schema_ex(
+SELECT pgclone_schema_ex(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
     true,    -- include indexes
@@ -181,7 +181,7 @@ Clone only specific columns from a table:
 
 ```sql
 -- Clone only id, name, email columns
-SELECT pgx_clone_table(
+SELECT pgclone_table(
     'host=source-server dbname=mydb user=postgres',
     'public', 'users', true, 'users_lite',
     '{"columns": ["id", "name", "email"]}'
@@ -194,14 +194,14 @@ Clone only rows matching a condition:
 
 ```sql
 -- Clone only active users
-SELECT pgx_clone_table(
+SELECT pgclone_table(
     'host=source-server dbname=mydb user=postgres',
     'public', 'users', true, 'active_users',
     '{"where": "status = ''active''"}'
 );
 
 -- Combine columns + WHERE + disable triggers
-SELECT pgx_clone_table(
+SELECT pgclone_table(
     'host=source-server dbname=mydb user=postgres',
     'public', 'orders', true, 'recent_orders',
     '{"columns": ["id", "customer_id", "total", "created_at"],
@@ -213,8 +213,8 @@ SELECT pgx_clone_table(
 ### Check version
 
 ```sql
-SELECT pgx_clone_version();
--- Returns: pgx_clone 2.0.0
+SELECT pgclone_version();
+-- Returns: pgclone 2.0.0
 ```
 
 ## Async Clone Operations (v1.0.0)
@@ -223,7 +223,7 @@ Async functions run clone operations in background workers, allowing you to cont
 
 **Prerequisite:** Add to `postgresql.conf`:
 ```
-shared_preload_libraries = 'pgx_clone'
+shared_preload_libraries = 'pgclone'
 ```
 Then restart PostgreSQL.
 
@@ -231,7 +231,7 @@ Then restart PostgreSQL.
 
 ```sql
 -- Returns job_id
-SELECT pgx_clone_table_async(
+SELECT pgclone_table_async(
     'host=source-server dbname=mydb user=postgres',
     'public', 'large_table', true
 );
@@ -241,7 +241,7 @@ SELECT pgx_clone_table_async(
 ### Async schema clone
 
 ```sql
-SELECT pgx_clone_schema_async(
+SELECT pgclone_schema_async(
     'host=source-server dbname=mydb user=postgres',
     'sales', true
 );
@@ -250,7 +250,7 @@ SELECT pgx_clone_schema_async(
 ### Check progress
 
 ```sql
-SELECT pgx_clone_progress(1);
+SELECT pgclone_progress(1);
 -- Returns JSON:
 -- {"job_id": 1, "status": "running", "phase": "copying data",
 --  "tables_completed": 5, "tables_total": 12,
@@ -260,21 +260,21 @@ SELECT pgx_clone_progress(1);
 ### List all jobs
 
 ```sql
-SELECT pgx_clone_jobs();
+SELECT pgclone_jobs();
 -- Returns JSON array of all active/recent jobs
 ```
 
 ### Cancel a job
 
 ```sql
-SELECT pgx_clone_cancel(1);
+SELECT pgclone_cancel(1);
 ```
 
 ### Resume a failed job
 
 ```sql
 -- Resumes from last checkpoint, returns new job_id
-SELECT pgx_clone_resume(1);
+SELECT pgclone_resume(1);
 -- Returns: 2
 ```
 
@@ -284,25 +284,25 @@ Control what happens when a target table already exists:
 
 ```sql
 -- Error if exists (default)
-SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
     '{"conflict": "error"}');
 
 -- Skip if exists
-SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
     '{"conflict": "skip"}');
 
 -- Drop and re-create
-SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
     '{"conflict": "replace"}');
 
 -- Rename existing to orders_old
-SELECT pgx_clone_table_async(conn, 'public', 'orders', true, 'orders',
+SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
     '{"conflict": "rename"}');
 ```
 
 Conflict strategy can be combined with other options:
 ```sql
-SELECT pgx_clone_schema_async(conn, 'sales', true,
+SELECT pgclone_schema_async(conn, 'sales', true,
     '{"conflict": "replace", "indexes": false, "triggers": false}');
 ```
 
@@ -312,28 +312,28 @@ Clone tables in parallel using multiple background workers:
 
 ```sql
 -- Clone schema with 4 parallel workers
-SELECT pgx_clone_schema_async(
+SELECT pgclone_schema_async(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
     '{"parallel": 4}'
 );
 
 -- Combine parallel with other options
-SELECT pgx_clone_schema_async(
+SELECT pgclone_schema_async(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
     '{"parallel": 8, "conflict": "replace", "triggers": false}'
 );
 ```
 
-Each table gets its own background worker. Track all workers via `pgx_clone_jobs()`.
+Each table gets its own background worker. Track all workers via `pgclone_jobs()`.
 
 ## Materialized Views (v1.2.0)
 
 Materialized views are now cloned automatically during schema clone, including their indexes and data. Disable with:
 
 ```sql
-SELECT pgx_clone_schema(conn, 'analytics', true,
+SELECT pgclone_schema(conn, 'analytics', true,
     '{"matviews": false}');
 ```
 

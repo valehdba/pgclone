@@ -1,6 +1,6 @@
 -- ============================================================
--- pgx_clone pgTAP test suite
--- Run with: pg_prove -d target_db test/pgx_clone_test.sql
+-- pgclone pgTAP test suite
+-- Run with: pg_prove -d target_db test/pgclone_test.sql
 -- ============================================================
 
 BEGIN;
@@ -17,24 +17,24 @@ SELECT lives_ok(
 );
 
 SELECT lives_ok(
-    'CREATE EXTENSION IF NOT EXISTS pgx_clone',
-    'pgx_clone extension loads'
+    'CREATE EXTENSION IF NOT EXISTS pgclone',
+    'pgclone extension loads'
 );
 
 SELECT matches(
-    pgx_clone_version(),
-    '^pgx_clone ',
-    'pgx_clone_version() returns version string'
+    pgclone_version(),
+    '^pgclone ',
+    'pgclone_version() returns version string'
 );
 -- ============================================================
 -- TEST GROUP 2: Clone single table (structure + data)
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgx_clone_table(%L, %L, %L, true)',
+    format('SELECT pgclone_table(%L, %L, %L, true)',
         current_setting('app.source_conninfo'),
         'public', 'simple_test'),
-    'pgx_clone_table clones simple_test with data'
+    'pgclone_table clones simple_test with data'
 );
 
 SELECT has_table('public', 'simple_test', 'simple_test table exists locally');
@@ -50,10 +50,10 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgx_clone_table(%L, %L, %L, true, %L)',
+    format('SELECT pgclone_table(%L, %L, %L, true, %L)',
         current_setting('app.source_conninfo'),
         'public', 'simple_test', 'simple_test_copy'),
-    'pgx_clone_table clones with different target name'
+    'pgclone_table clones with different target name'
 );
 
 SELECT has_table('public', 'simple_test_copy', 'simple_test_copy table exists');
@@ -69,10 +69,10 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgx_clone_table(%L, %L, %L, false, %L)',
+    format('SELECT pgclone_table(%L, %L, %L, false, %L)',
         current_setting('app.source_conninfo'),
         'public', 'simple_test', 'simple_test_empty'),
-    'pgx_clone_table clones structure only'
+    'pgclone_table clones structure only'
 );
 
 SELECT has_table('public', 'simple_test_empty', 'simple_test_empty table exists');
@@ -88,10 +88,10 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgx_clone_schema(%L, %L, true)',
+    format('SELECT pgclone_schema(%L, %L, true)',
         current_setting('app.source_conninfo'),
         'test_schema'),
-    'pgx_clone_schema clones test_schema'
+    'pgclone_schema clones test_schema'
 );
 
 SELECT has_schema('test_schema', 'test_schema exists');
@@ -167,11 +167,11 @@ SELECT has_function(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgx_clone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'customers_lite',
         '{"columns": ["id", "name", "email"]}'),
-    'pgx_clone_table with selective columns'
+    'pgclone_table with selective columns'
 );
 
 SELECT has_table('test_schema', 'customers_lite', 'customers_lite created');
@@ -188,11 +188,11 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgx_clone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'active_only',
         '{"where": "status = ''active''"}'),
-    'pgx_clone_table with WHERE filter'
+    'pgclone_table with WHERE filter'
 );
 
 SELECT results_eq(

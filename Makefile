@@ -1,10 +1,10 @@
-# pgx_clone Makefile
+# pgclone Makefile
 # Uses PGXS (PostgreSQL Extension Build Infrastructure)
 
-EXTENSION    = pgx_clone
-MODULE_big   = pgx_clone
-OBJS         = src/pgx_clone.o src/pgx_clone_bgw.o
-DATA         = sql/pgx_clone--0.1.0.sql sql/pgx_clone--0.2.0.sql sql/pgx_clone--1.0.0.sql sql/pgx_clone--1.1.0.sql sql/pgx_clone--2.0.0.sql
+EXTENSION    = pgclone
+MODULE_big   = pgclone
+OBJS         = src/pgclone.o src/pgclone_bgw.o
+DATA         = sql/pgclone--0.1.0.sql sql/pgclone--0.2.0.sql sql/pgclone--1.0.0.sql sql/pgclone--1.1.0.sql sql/pgclone--2.0.0.sql
 
 PG_CPPFLAGS  = -I$(shell $(PG_CONFIG) --includedir) -Isrc
 SHLIB_LINK   += -lpq

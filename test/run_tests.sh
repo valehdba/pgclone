@@ -1,13 +1,13 @@
 #!/bin/bash
 # ============================================================
-# pgx_clone test runner
+# pgclone test runner
 # Runs inside the Docker container after PostgreSQL starts
 # ============================================================
 
 set -e
 
 echo "============================================"
-echo "pgx_clone test runner"
+echo "pgclone test runner"
 echo "PostgreSQL version: $(pg_config --version)"
 echo "============================================"
 
@@ -33,8 +33,8 @@ echo ""
 echo "Installing extensions..."
 psql -U postgres -d target_db <<SQL
     CREATE EXTENSION IF NOT EXISTS pgtap;
-    CREATE EXTENSION IF NOT EXISTS pgx_clone;
-    SELECT pgx_clone_version();
+    CREATE EXTENSION IF NOT EXISTS pgclone;
+    SELECT pgclone_version();
 SQL
 
 # Set conninfo as a GUC so tests can access it
@@ -47,7 +47,7 @@ echo "Running pgTAP tests..."
 echo "============================================"
 
 # Use psql to run tests (pg_prove may not be installed)
-psql -U postgres -d target_db -f /build/pgx_clone/test/pgx_clone_test.sql 2>&1
+psql -U postgres -d target_db -f /build/pgclone/test/pgclone_test.sql 2>&1
 
 TEST_EXIT=$?
 

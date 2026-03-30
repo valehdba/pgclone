@@ -16,8 +16,8 @@ RUN git clone --depth 1 https://github.com/theory/pgtap.git /tmp/pgtap && \
     rm -rf /tmp/pgtap
 
 # Copy extension source
-COPY . /build/pgx_clone
-WORKDIR /build/pgx_clone
+COPY . /build/pgclone
+WORKDIR /build/pgclone
 
 # Build and install
 RUN make clean && make && make install
