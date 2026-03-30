@@ -1,4 +1,4 @@
-# pgclone
+# PgClone
 
 A PostgreSQL extension written in C for cloning databases, schemas, tables, and functions between PostgreSQL hosts — directly from SQL.
  
