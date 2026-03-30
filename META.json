@@ -15,7 +15,7 @@
    "prereqs": {
       "runtime": {
          "requires": {
-            "PostgreSQL": "14.0"
+            "PostgreSQL": "14.0.0"
          }
       }
    },
@@ -29,7 +29,7 @@
          "type": "git"
       }
    },
-   "generated_by": "valehdba",
+   "generated_by": "Valeh A. Agayev",
    "meta-spec": {
       "version": "1.0.0",
       "url": "https://pgxn.org/meta/spec.txt"
