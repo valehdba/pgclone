@@ -379,6 +379,9 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v1.1.0: Selective column cloning and data filtering~~ (done)
 - [x] ~~v1.2.0: Clone materialized views and exclusion constraints~~ (done)
 - [x] ~~v2.0.0: True multi-worker parallel cloning~~ (done)
+- [ ] Applying Static Data Masking to cloned data 
+- [ ] Applying Dynamic Data Masking to cloned data 
+
 
 ## License
 
