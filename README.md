@@ -379,9 +379,10 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v1.1.0: Selective column cloning and data filtering~~ (done)
 - [x] ~~v1.2.0: Clone materialized views and exclusion constraints~~ (done)
 - [x] ~~v2.0.0: True multi-worker parallel cloning~~ (done)
-- [ ] ~~v2.0.1: CREATE database if database does not exist during SELECT pgclone_database('source_db', 'target_db').
+- [ ] ~~v2.0.1: CREATE database if database does not exist, prom postgres DB - SELECT pgclone_database('source_db', 'target_db').
 - [ ] ~~v2.1.0: Applying Static Data Masking to cloned data 
-- [ ] ~~v2.1.1: Applying Dynamic Data Masking to cloned data 
+- [ ] ~~v2.1.1: Applying Dynamic Data Masking to cloned data
+- [ ] ~~v2.2.0: Copy-on-Write (CoW)  mode for local cloning SELECT pgclone_database_cow('source_db', 'target_db');
 
 
 ## License
