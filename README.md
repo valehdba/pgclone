@@ -75,7 +75,7 @@ SELECT pgclone_table(
 
 ```sql
 SELECT pgclone_table(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     'public',
     'customers',
     false
@@ -86,7 +86,7 @@ SELECT pgclone_table(
 
 ```sql
 SELECT pgclone_table(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     'public',
     'customers',        -- source table name
     true,               -- include data
@@ -98,7 +98,7 @@ SELECT pgclone_table(
 
 ```sql
 SELECT pgclone_schema(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     'sales',            -- schema to clone
     true                -- include table data
 );
@@ -108,7 +108,7 @@ SELECT pgclone_schema(
 
 ```sql
 SELECT pgclone_functions(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     'utils'             -- schema containing functions
 );
 ```
@@ -117,7 +117,7 @@ SELECT pgclone_functions(
 
 ```sql
 SELECT pgclone_database(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     true                -- include data
 );
 ```
@@ -131,21 +131,21 @@ By default, all indexes, constraints (PK, UNIQUE, CHECK, FK), and triggers are c
 ```sql
 -- Clone table without indexes and triggers
 SELECT pgclone_table(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     'public', 'orders', true, 'orders',
     '{"indexes": false, "triggers": false}'
 );
 
 -- Clone schema without any constraints
 SELECT pgclone_schema(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     'sales', true,
     '{"constraints": false}'
 );
 
 -- Clone database without triggers
 SELECT pgclone_database(
-    'host=source-server dbname=mydb user=postgres',
+    'host=source-server dbname=mydb user=postgres password=secret',
     true,
     '{"triggers": false}'
 );
