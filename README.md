@@ -1,5 +1,5 @@
 # PgClone
-## What is pgx_clone?
+## What is PgClone?
 One of the most time-consuming operations in our daily workflow — especially when working with large datasets — is cloning a database. Whether it's refreshing a Staging environment, creating a clean database for automated tests in CI/CD pipelines, or giving developers an isolated environment with production-like data, we constantly need a reliable and fast clone operation.
 PgClone is a PostgreSQL extension written in C that lets you clone databases,
 schemas, tables, and functions between PostgreSQL instances directly from SQL.
