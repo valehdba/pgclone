@@ -416,14 +416,14 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v1.2.0: Clone materialized views and exclusion constraints~~ (done)
 - [x] ~~v2.0.0: True multi-worker parallel cloning~~ (done)
 - [x] ~~v2.0.1: CREATE database if database does not exist, from postgres DB - SELECT pgclone_database('source_db', 'target_db').~~ (done)
-- [ ] ~~v2.1.0: Progress Tracking View
-- [ ] ~~v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred
-- [ ] ~~v2.1.2: Elapsed Time 
-- [ ] ~~v3.0.0: Data Anonymization / Masking
-- [ ] ~~v3.1.0: Auto-Discovery of Sensitive Data
-- [ ] ~~v3.2.1: Applying Static Data Masking to cloned data 
-- [ ] ~~v3.2.2: Applying Dynamic Data Masking to cloned data
-- [ ] ~~v4.0.0: Copy-on-Write (CoW)  mode for local cloning SELECT pgclone_database_cow('source_db', 'target_db');
+- [ ] v2.1.0: Progress Tracking View
+- [ ] v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred
+- [ ] v2.1.2: Elapsed Time 
+- [ ] v3.0.0: Data Anonymization / Masking
+- [ ] v3.1.0: Auto-Discovery of Sensitive Data
+- [ ] v3.2.1: Applying Static Data Masking to cloned data 
+- [ ] v3.2.2: Applying Dynamic Data Masking to cloned data
+- [ ] v4.0.0: Copy-on-Write (CoW)  mode for local cloning SELECT pgclone_database_cow('source_db', 'target_db');
 
 
 ## License
