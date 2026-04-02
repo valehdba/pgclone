@@ -1684,6 +1684,225 @@ pgclone_database(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
+ * FUNCTION: pgclone_database_create(source_conninfo, target_dbname
+ *              [, include_data [, options]])
+ *
+ * Creates the target database locally if it does not exist,
+ * installs the pgclone extension in it, then delegates to
+ * pgclone_database() running inside the target database so that
+ * all schemas, tables, functions, etc. are cloned from the
+ * remote source into the freshly created local database.
+ *
+ * Must be called from any local database (typically "postgres").
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgclone_database_create);
+
+Datum
+pgclone_database_create(PG_FUNCTION_ARGS)
+{
+    text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
+    text       *target_dbname_t   = PG_GETARG_TEXT_PP(1);
+    bool        include_data      = true;
+    char       *options_json      = NULL;
+
+    char       *source_conninfo   = text_to_cstring(source_conninfo_t);
+    char       *target_dbname     = text_to_cstring(target_dbname_t);
+
+    PGconn     *admin_conn;       /* connection to local postgres DB */
+    PGconn     *target_conn;      /* connection to local target DB   */
+    PGresult   *res;
+    StringInfoData buf;
+    const char *port;
+
+    /* Optional arg 2: include_data */
+    if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
+        include_data = PG_GETARG_BOOL(2);
+
+    /* Optional arg 3: JSON options */
+    if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
+        options_json = text_to_cstring(PG_GETARG_TEXT_PP(3));
+
+    /* Validate target_dbname: must be a simple identifier */
+    {
+        int ci;
+        for (ci = 0; target_dbname[ci] != '\0'; ci++)
+        {
+            char ch = target_dbname[ci];
+            if (!((ch >= 'a' && ch <= 'z') ||
+                  (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= '0' && ch <= '9') ||
+                  ch == '_'))
+            {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("pgclone: invalid database name: %s", target_dbname)));
+            }
+        }
+        if (ci == 0)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("pgclone: database name cannot be empty")));
+    }
+
+    port = GetConfigOption("port", false, false);
+
+    /* ---- Step 1: Connect to local "postgres" DB ---- */
+    initStringInfo(&buf);
+    appendStringInfo(&buf, "dbname=%s port=%s",
+                     quote_literal_cstr("postgres"),
+                     port ? port : "5432");
+
+    admin_conn = PQconnectdb(buf.data);
+    if (PQstatus(admin_conn) != CONNECTION_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(admin_conn));
+        PQfinish(admin_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_CONNECTION_FAILURE),
+                 errmsg("pgclone: could not connect to postgres DB: %s",
+                        errmsg_str)));
+    }
+
+    /* ---- Step 2: Check if target database exists ---- */
+    resetStringInfo(&buf);
+    appendStringInfo(&buf,
+        "SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s",
+        quote_literal_cstr(target_dbname));
+
+    res = PQexec(admin_conn, buf.data);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(admin_conn));
+        PQclear(res);
+        PQfinish(admin_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not check database existence: %s",
+                        errmsg_str)));
+    }
+
+    if (PQntuples(res) == 0)
+    {
+        PQclear(res);
+
+        /* CREATE DATABASE — cannot run inside a transaction */
+        resetStringInfo(&buf);
+        appendStringInfo(&buf, "CREATE DATABASE %s",
+                         quote_identifier(target_dbname));
+
+        res = PQexec(admin_conn, buf.data);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        {
+            char *errmsg_str = pstrdup(PQerrorMessage(admin_conn));
+            PQclear(res);
+            PQfinish(admin_conn);
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgclone: could not create database %s: %s",
+                            target_dbname, errmsg_str)));
+        }
+        PQclear(res);
+
+        ereport(NOTICE,
+                (errmsg("pgclone: created database %s", target_dbname)));
+    }
+    else
+    {
+        PQclear(res);
+        ereport(NOTICE,
+                (errmsg("pgclone: database %s already exists, cloning into it",
+                        target_dbname)));
+    }
+
+    PQfinish(admin_conn);
+
+    /* ---- Step 3: Connect to target database ---- */
+    resetStringInfo(&buf);
+    appendStringInfo(&buf, "dbname=%s port=%s",
+                     quote_literal_cstr(target_dbname),
+                     port ? port : "5432");
+
+    target_conn = PQconnectdb(buf.data);
+    if (PQstatus(target_conn) != CONNECTION_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(target_conn));
+        PQfinish(target_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_CONNECTION_FAILURE),
+                 errmsg("pgclone: could not connect to target database %s: %s",
+                        target_dbname, errmsg_str)));
+    }
+
+    /* ---- Step 4: Install pgclone extension in target DB ---- */
+    res = PQexec(target_conn, "CREATE EXTENSION IF NOT EXISTS pgclone");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(target_conn));
+        PQclear(res);
+        PQfinish(target_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not install pgclone in %s: %s",
+                        target_dbname, errmsg_str)));
+    }
+    PQclear(res);
+
+    ereport(NOTICE,
+            (errmsg("pgclone: pgclone extension ready in %s", target_dbname)));
+
+    /* ---- Step 5: Execute pgclone_database() inside target DB ---- */
+    resetStringInfo(&buf);
+
+    if (options_json != NULL)
+    {
+        /* 3-arg: pgclone_database(conninfo, include_data, options) */
+        appendStringInfo(&buf,
+            "SELECT pgclone_database(%s, %s, %s)",
+            quote_literal_cstr(source_conninfo),
+            include_data ? "true" : "false",
+            quote_literal_cstr(options_json));
+    }
+    else
+    {
+        /* 2-arg: pgclone_database(conninfo, include_data) */
+        appendStringInfo(&buf,
+            "SELECT pgclone_database(%s, %s)",
+            quote_literal_cstr(source_conninfo),
+            include_data ? "true" : "false");
+    }
+
+    ereport(NOTICE,
+            (errmsg("pgclone: starting database clone from source into %s ...",
+                    target_dbname)));
+
+    res = PQexec(target_conn, buf.data);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(target_conn));
+        PQclear(res);
+        PQfinish(target_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: database clone failed in %s: %s",
+                        target_dbname, errmsg_str)));
+    }
+    PQclear(res);
+    PQfinish(target_conn);
+
+    pfree(buf.data);
+    pfree(source_conninfo);
+    pfree(target_dbname);
+    if (options_json)
+        pfree(options_json);
+
+    ereport(NOTICE,
+            (errmsg("pgclone: database clone complete — target database %s ready",
+                    text_to_cstring(target_dbname_t))));
+
+    PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
+}
+
+/* ===============================================================
  * FUNCTION: pgclone_version()
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgclone_version);
@@ -1691,7 +1910,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.0.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.0.1"));
 }
 
 /* ===============================================================

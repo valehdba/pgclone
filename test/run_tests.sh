@@ -51,6 +51,20 @@ psql -U postgres -d target_db -f /build/pgclone/test/pgclone_test.sql 2>&1
 
 TEST_EXIT=$?
 
+# Run pgclone_database_create tests (outside transaction)
+echo ""
+echo "============================================"
+echo "Running pgclone_database_create tests..."
+echo "============================================"
+
+bash /build/pgclone/test/test_database_create.sh 2>&1
+
+DB_CREATE_EXIT=$?
+
+if [ $DB_CREATE_EXIT -ne 0 ]; then
+    TEST_EXIT=1
+fi
+
 echo ""
 echo "============================================"
 if [ $TEST_EXIT -eq 0 ]; then
