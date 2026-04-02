@@ -218,8 +218,40 @@ SELECT pgclone_table(
 
 ```sql
 SELECT pgclone_version();
--- Returns: pgclone 2.0.0
+-- Returns: pgclone 2.0.1
 ```
+
+### Clone into a new database (v2.0.1)
+
+Create a new local database and clone everything from a remote source into it. Run this from the `postgres` database:
+
+```sql
+\c postgres
+CREATE EXTENSION pgclone;
+
+-- Clone remote database into a new local database
+SELECT pgclone_database_create(
+    'host=source-server dbname=production user=postgres password=secret',
+    'staging_db'            -- target database name (created if not exists)
+);
+
+-- Clone without data (structure only)
+SELECT pgclone_database_create(
+    'host=source-server dbname=production user=postgres password=secret',
+    'staging_db',
+    false                   -- include_data = false
+);
+
+-- Clone with options (e.g., skip triggers)
+SELECT pgclone_database_create(
+    'host=source-server dbname=production user=postgres password=secret',
+    'staging_db',
+    true,
+    '{"triggers": false}'
+);
+```
+
+If the target database already exists, it clones into the existing database. The function automatically installs the pgclone extension in the target database.
 
 ## Async Clone Operations (v1.0.0)
 
@@ -367,7 +399,7 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v2.0.0)
+## Current Limitations (v2.0.1)
 
 - Parallel cloning uses one bgworker per table — very large schemas may hit max_worker_processes limit
 - WHERE clause in data filtering is passed directly to SQL — use with trusted input only
@@ -383,7 +415,7 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v1.1.0: Selective column cloning and data filtering~~ (done)
 - [x] ~~v1.2.0: Clone materialized views and exclusion constraints~~ (done)
 - [x] ~~v2.0.0: True multi-worker parallel cloning~~ (done)
-- [ ] ~~v2.0.1: CREATE database if database does not exist, from postgres DB - SELECT pgclone_database('source_db', 'target_db').
+- [x] ~~v2.0.1: CREATE database if database does not exist, from postgres DB - SELECT pgclone_database('source_db', 'target_db').~~ (done)
 - [ ] ~~v2.1.0: Progress Tracking View
 - [ ] ~~v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred
 - [ ] ~~v2.1.2: Elapsed Time 
