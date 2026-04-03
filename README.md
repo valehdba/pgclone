@@ -8,7 +8,7 @@
   <a href="https://github.com/valehdba/pgclone/actions/workflows/ci.yml"><img src="https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/version-2.1.2-00ff88?style=flat-square&labelColor=1a1a2e" alt="Version">
   <img src="https://img.shields.io/badge/PostgreSQL-14%20|%2015%20|%2016%20|%2017%20|%2018-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
-  <img src="https://img.shields.io/badge/language-C-555555?style=flat-square&logo=c&logoColor=white" alt="C">
+  <img src="https://img.shields.io/badge/PostgreSQL-Extension%20in%20C-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL Extension in C">
   <img src="https://img.shields.io/badge/license-PostgreSQL-336791?style=flat-square" alt="License">
   <img src="https://img.shields.io/github/stars/valehdba/pgclone?style=flat-square&color=ffbd2e&labelColor=1a1a2e" alt="Stars">
   <img src="https://img.shields.io/github/issues/valehdba/pgclone?style=flat-square&color=ff5f56&labelColor=1a1a2e" alt="Issues">
