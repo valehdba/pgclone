@@ -256,8 +256,6 @@ SELECT pgclone_table(
 Create a new local database and clone everything from a remote source into it. Run this from the `postgres` database:
 
 ```sql
-\c postgres
-CREATE EXTENSION pgclone;
 
 -- Clone remote database into a new local database
 SELECT pgclone_database_create(
