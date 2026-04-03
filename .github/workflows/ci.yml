@@ -2,7 +2,7 @@ name: pgclone CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'fix/**', 'feature/**' ]
   pull_request:
     branches: [ main ]
 
@@ -16,11 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [14, 15, 16, 17]
+        pg_version: [14, 15, 16, 17, 18]
 
-    # Only source-db runs in Docker.
-    # Target PostgreSQL runs on the host so `make install` places the
-    # .so where the server can find it via shared_preload_libraries.
     services:
       source-db:
         image: postgres:${{ matrix.pg_version }}
@@ -47,46 +44,26 @@ jobs:
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get update -qq
           if ! sudo apt-get install -y postgresql-$PG_VER postgresql-server-dev-$PG_VER libpq-dev build-essential; then
-            echo "Primary install failed for PG${PG_VER}. Dumping package candidates..."
+            echo "Primary install failed for PG${PG_VER}. Trying fallback..."
             apt-cache policy "postgresql-$PG_VER" || true
-            apt-cache policy "postgresql-server-dev-$PG_VER" || true
-            apt-cache search "^postgresql-[0-9]+" | sort | tail -n 40 || true
-            echo "Retrying with postgresql-server-dev-all fallback..."
             sudo apt-get install -y "postgresql-$PG_VER" postgresql-server-dev-all libpq-dev build-essential
           fi
+          /usr/lib/postgresql/$PG_VER/bin/pg_config --version || pg_config --version
 
-          # Verify install
-          if [ -x "/usr/lib/postgresql/$PG_VER/bin/pg_config" ]; then
-            /usr/lib/postgresql/$PG_VER/bin/pg_config --version
-          else
-            echo "Versioned pg_config not found, showing available pg_config:"
-            command -v pg_config || true
-            pg_config --version
-          fi
-
-      - name: Build pgclone
+      - name: Build and install pgclone
         run: |
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           make PG_CONFIG=$PG_CONFIG CFLAGS="-Isrc"
-
-      - name: Install pgclone
-        run: |
-          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           sudo make install PG_CONFIG=$PG_CONFIG
-          echo "=== Installed shared library ==="
-          ls -la "$($PG_CONFIG --pkglibdir)"/pgclone*
 
-      - name: Start target PostgreSQL on the host
+      - name: Start target PostgreSQL
         run: |
           PG_VER=${{ matrix.pg_version }}
           PGBIN=/usr/lib/postgresql/$PG_VER/bin
           PGDATA="$RUNNER_TEMP/pg_target_$PG_VER"
           PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
 
-          # Stop any pre-installed PostgreSQL to free ports/shmem
-          # NOTE: do NOT pkill postgres — that would kill the Docker source-db container
           sudo systemctl stop postgresql 2>/dev/null || true
-
           rm -rf "$PGDATA"
           "$PGBIN/initdb" -D "$PGDATA" --username=postgres --auth=trust
 
@@ -97,17 +74,13 @@ jobs:
             echo "max_connections = 50"
             echo "huge_pages = off"
             echo "shared_preload_libraries = 'pgclone'"
+            echo "max_worker_processes = 32"
             echo "unix_socket_directories = '/tmp'"
             echo "logging_collector = off"
           } >> "$PGDATA/postgresql.conf"
 
-          # Verify pgclone.so is loadable
-          echo "=== Checking pgclone.so dependencies ==="
-          ldd "$($PGBIN/pg_config --pkglibdir)/pgclone.so" || true
-
-          # Start server — show log immediately if it fails
           if ! "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" -w -t 30 start; then
-            echo "=== PostgreSQL failed to start. Log output: ==="
+            echo "=== PostgreSQL failed to start ==="
             cat "$PGLOG"
             exit 1
           fi
@@ -119,47 +92,144 @@ jobs:
           PGPASSWORD=testpass psql -h localhost -p 5433 -U postgres -d source_db \
             -f test/fixtures/seed.sql
 
-      - name: Install pgTAP
+      - name: Install pgTAP and create extensions
         run: |
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
           git clone --depth 1 https://github.com/theory/pgtap.git /tmp/pgtap
-          cd /tmp/pgtap
-          make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
-          sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
-          psql -h localhost -p 5434 -U postgres -d target_db \
-            -c "CREATE EXTENSION IF NOT EXISTS pgtap;"
+          cd /tmp/pgtap && make PG_CONFIG=$PG_CONFIG && sudo make install PG_CONFIG=$PG_CONFIG
 
-      - name: Create pgclone extension and verify
-        run: |
-          psql -h localhost -p 5434 -U postgres -d target_db \
-            -c "CREATE EXTENSION IF NOT EXISTS pgclone;"
-          psql -h localhost -p 5434 -U postgres -d target_db \
-            -c "SELECT pgclone_version();"
+          psql -h localhost -p 5434 -U postgres -d target_db <<SQL
+            CREATE EXTENSION IF NOT EXISTS pgtap;
+            CREATE EXTENSION IF NOT EXISTS pgclone;
+            SELECT pgclone_version();
+          SQL
 
-      - name: Set source conninfo
-        run: |
           psql -h localhost -p 5434 -U postgres -d target_db \
             -c "ALTER DATABASE target_db SET app.source_conninfo = 'host=localhost port=5433 dbname=source_db user=postgres password=testpass';"
 
-      - name: Run pgTAP tests
+      - name: "Test: pgTAP (33 sync tests)"
         run: |
           psql -h localhost -p 5434 -U postgres -d target_db \
             -f test/pgclone_test.sql
+
+      - name: "Test: pgclone_database_create"
+        run: |
+          SOURCE_CONNINFO="host=localhost port=5433 dbname=source_db user=postgres password=testpass"
+
+          psql -h localhost -p 5434 -U postgres -d postgres \
+            -c "CREATE EXTENSION IF NOT EXISTS pgclone;"
+          psql -h localhost -p 5434 -U postgres -d postgres \
+            -c "DROP DATABASE IF EXISTS clone_test_db;" 2>/dev/null || true
+
+          # Create and clone
+          psql -h localhost -p 5434 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "SELECT pgclone_database_create('${SOURCE_CONNINFO}', 'clone_test_db', true);"
+
+          # Verify
+          DB_EXISTS=$(psql -h localhost -p 5434 -U postgres -d postgres -tAc \
+            "SELECT 1 FROM pg_database WHERE datname = 'clone_test_db'")
+          [ "$DB_EXISTS" = "1" ] || { echo "FAIL: DB not created"; exit 1; }
+
+          ROW_COUNT=$(psql -h localhost -p 5434 -U postgres -d clone_test_db -tAc \
+            "SELECT count(*) FROM test_schema.customers")
+          [ "$ROW_COUNT" -ge 1 ] || { echo "FAIL: no data"; exit 1; }
+
+          # Idempotent re-clone
+          psql -h localhost -p 5434 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "SELECT pgclone_database_create('${SOURCE_CONNINFO}', 'clone_test_db', false);"
+
+          # Cleanup
+          psql -h localhost -p 5434 -U postgres -d postgres \
+            -c "DROP DATABASE IF EXISTS clone_test_db;" 2>/dev/null || true
+
+          echo "ALL database_create tests PASSED"
+
+      - name: "Test: Async functions (bgworker)"
+        run: |
+          SOURCE_CONNINFO="host=localhost port=5433 dbname=source_db user=postgres password=testpass"
+          PG="psql -h localhost -p 5434 -U postgres -d target_db"
+          PASS=0; FAIL=0
+
+          run_test() {
+            if eval "$2" 2>/dev/null; then
+              echo "  PASS: $1"; PASS=$((PASS + 1))
+            else
+              echo "  FAIL: $1"; FAIL=$((FAIL + 1))
+            fi
+          }
+
+          # Clean slate — drop leftover tables from sync tests
+          $PG -c "SELECT pgclone_clear_jobs();" 2>/dev/null || true
+          $PG <<SQL 2>/dev/null
+            DROP TABLE IF EXISTS public.simple_test CASCADE;
+            DROP TABLE IF EXISTS public.simple_test_copy CASCADE;
+            DROP TABLE IF EXISTS public.simple_test_empty CASCADE;
+            DROP TABLE IF EXISTS public.async_renamed CASCADE;
+            DROP TABLE IF EXISTS test_schema.customers_lite CASCADE;
+            DROP TABLE IF EXISTS test_schema.active_only CASCADE;
+          SQL
+
+          # 1: table_async basic
+          echo "---- Async: table_async basic ----"
+          JOB=$($PG -tAc "SELECT pgclone_table_async('${SOURCE_CONNINFO}', 'public', 'simple_test', true);")
+          run_test "returns job_id" "[ -n '$JOB' ] && [ '$JOB' -gt 0 ]"
+          for i in $(seq 1 30); do
+            S=$($PG -tAc "SELECT status FROM pgclone_jobs_view WHERE job_id=$JOB;" 2>/dev/null | tr -d '[:space:]')
+            [ "$S" = "completed" ] || [ "$S" = "failed" ] && break; sleep 1
+          done
+          run_test "job completed" "[ '$S' = 'completed' ]"
+          RC=$($PG -tAc "SELECT count(*)::int FROM public.simple_test;" 2>/dev/null | tr -d '[:space:]')
+          run_test "simple_test has 5 rows" "[ '$RC' = '5' ]"
+
+          # 2: table_async with target name
+          echo "---- Async: table_async target name ----"
+          JOB2=$($PG -tAc "SELECT pgclone_table_async('${SOURCE_CONNINFO}', 'public', 'simple_test', true, 'async_renamed');")
+          for i in $(seq 1 30); do
+            S2=$($PG -tAc "SELECT status FROM pgclone_jobs_view WHERE job_id=$JOB2;" 2>/dev/null | tr -d '[:space:]')
+            [ "$S2" = "completed" ] || [ "$S2" = "failed" ] && break; sleep 1
+          done
+          run_test "renamed job completed" "[ '$S2' = 'completed' ]"
+          TE=$($PG -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='async_renamed';" 2>/dev/null | tr -d '[:space:]')
+          run_test "async_renamed exists" "[ '$TE' = '1' ]"
+
+          # 3: schema_async
+          echo "---- Async: schema_async ----"
+          $PG -c "DROP SCHEMA IF EXISTS test_schema CASCADE;" 2>/dev/null || true
+          JOB3=$($PG -tAc "SELECT pgclone_schema_async('${SOURCE_CONNINFO}', 'test_schema', true);")
+          for i in $(seq 1 60); do
+            S3=$($PG -tAc "SELECT status FROM pgclone_jobs_view WHERE job_id=$JOB3;" 2>/dev/null | tr -d '[:space:]')
+            [ "$S3" = "completed" ] || [ "$S3" = "failed" ] && break; sleep 1
+          done
+          run_test "schema_async completed" "[ '$S3' = 'completed' ]"
+          CC=$($PG -tAc "SELECT count(*)::int FROM test_schema.customers;" 2>/dev/null | tr -d '[:space:]')
+          run_test "customers has 10 rows" "[ '$CC' = '10' ]"
+
+          # 4: progress/jobs/view
+          echo "---- Async: progress & jobs ----"
+          PR=$($PG -tAc "SELECT pgclone_progress($JOB);" 2>/dev/null)
+          run_test "progress returns JSON" "echo '$PR' | grep -q 'job_id'"
+          JJ=$($PG -tAc "SELECT pgclone_jobs();" 2>/dev/null)
+          run_test "jobs returns JSON" "echo '$JJ' | grep -q 'job_id'"
+          VC=$($PG -tAc "SELECT count(*) FROM pgclone_jobs_view;" 2>/dev/null | tr -d '[:space:]')
+          run_test "jobs_view has rows" "[ '$VC' -ge 1 ]"
+
+          # 5: clear_jobs
+          echo "---- Async: clear_jobs ----"
+          CL=$($PG -tAc "SELECT pgclone_clear_jobs();" 2>/dev/null | tr -d '[:space:]')
+          run_test "clear_jobs works" "[ '$CL' -ge 1 ]"
+
+          echo ""
+          echo "============================================"
+          echo "ASYNC: $PASS passed, $FAIL failed"
+          echo "============================================"
+          [ $FAIL -eq 0 ] || exit 1
 
       - name: Show logs on failure
         if: failure()
         run: |
           PG_VER=${{ matrix.pg_version }}
           PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
-          echo "=== PostgreSQL log ==="
-          if [ -f "$PGLOG" ]; then
-            tail -120 "$PGLOG"
-          else
-            echo "No target PostgreSQL log found at $PGLOG"
-          fi
+          echo "=== PostgreSQL $PG_VER log ==="
+          [ -f "$PGLOG" ] && tail -150 "$PGLOG" || echo "No log found"
           echo "=== Port usage ==="
           sudo ss -tlnp | grep -E '5432|5433|5434' || true
-
-      - name: Show build info
-        if: always()
-        run: |
-          echo "PostgreSQL version: ${{ matrix.pg_version }}"

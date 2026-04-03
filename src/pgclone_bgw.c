@@ -239,6 +239,7 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
     StringInfoData  cmd;
     char           *buf;
     int             ret;
+    int64           chunk_count = 0;
     int64           row_count = 0;
 
     initStringInfo(&cmd);
@@ -248,6 +249,8 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
     res = PQexec(source_conn, cmd.data);
     if (PQresultStatus(res) != PGRES_COPY_OUT)
     {
+        elog(WARNING, "pgclone bgw: COPY TO STDOUT failed: %s",
+             PQerrorMessage(source_conn));
         PQclear(res);
         pfree(cmd.data);
         return -1;
@@ -263,10 +266,15 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
 
     if (PQresultStatus(res) != PGRES_COPY_IN)
     {
+        elog(WARNING, "pgclone bgw: COPY FROM STDIN failed: %s",
+             PQerrorMessage(local_conn));
         PQclear(res);
         /* Drain source */
         while (PQgetCopyData(source_conn, &buf, 0) > 0)
             PQfreemem(buf);
+        /* Consume source COPY result */
+        res = PQgetResult(source_conn);
+        if (res) PQclear(res);
         return -1;
     }
     PQclear(res);
@@ -275,24 +283,43 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
     {
         PQputCopyData(local_conn, buf, ret);
         PQfreemem(buf);
-        row_count++;
+        chunk_count++;
 
-        /* Update progress in shared memory */
-        if (job && row_count % 10000 == 0)
+        /* Update progress in shared memory every 10000 rows */
+        if (job && chunk_count % 10000 == 0)
         {
             LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
-            job->copied_rows += 10000;
+            job->copied_rows = chunk_count;
             LWLockRelease(pgclone_state->lock);
         }
     }
+
+    /* Consume the source COPY OUT completion result */
+    res = PQgetResult(source_conn);
+    if (res) PQclear(res);
 
     PQputCopyEnd(local_conn, NULL);
     res = PQgetResult(local_conn);
 
     if (PQresultStatus(res) == PGRES_COMMAND_OK)
         row_count = atol(PQcmdTuples(res));
+    else
+    {
+        elog(WARNING, "pgclone bgw: COPY completed with error: %s",
+             PQerrorMessage(local_conn));
+        PQclear(res);
+        return -1;
+    }
 
     PQclear(res);
+
+    /* Final row count update */
+    if (job)
+    {
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        job->copied_rows = row_count;
+        LWLockRelease(pgclone_state->lock);
+    }
 
     return row_count;
 }
@@ -306,8 +333,15 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
 {
     PGresult       *res;
     StringInfoData  buf;
-    const char     *target = table_name;
+    const char     *target;
     int64           rows;
+
+    /* Use target_name if set and different from source table */
+    if (job->target_name[0] != '\0' && strcmp(job->target_name, table_name) != 0)
+        target = job->target_name;
+    else
+        target = table_name;
+
 
     /* Update current table in progress */
     LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
@@ -331,7 +365,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
 
     initStringInfo(&buf);
     appendStringInfo(&buf,
-        "SELECT 'CREATE TABLE IF NOT EXISTS %s.' || quote_ident(c.relname) || ' (' || "
+        "SELECT 'CREATE TABLE IF NOT EXISTS %s.%s (' || "
         "string_agg(quote_ident(a.attname) || ' ' || "
         "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
         "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
@@ -344,7 +378,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
         "WHERE n.nspname = '%s' AND c.relname = '%s' "
         "AND a.attnum > 0 AND NOT a.attisdropped "
         "GROUP BY c.relname",
-        job->schema_name, job->schema_name, table_name);
+        job->schema_name, target, job->schema_name, table_name);
 
     res = PQexec(source_conn, buf.data);
     if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0)
@@ -356,6 +390,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
 
     bgw_exec(local_conn, PQgetvalue(res, 0, 0));
     PQclear(res);
+
 
     /* Copy data */
     if (job->include_data)
@@ -480,7 +515,15 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
  *
  * Reads job parameters from shared memory, executes the clone,
  * and updates progress throughout.
+ *
+ * Note: We use __attribute__((visibility("default"))) directly
+ * because PGDLLEXPORT may be a no-op on some PostgreSQL versions
+ * when compiled with -fvisibility=hidden. The bgworker entry point
+ * MUST be visible to PostgreSQL's dynamic linker.
  * =============================================================== */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("default")))
+#endif
 void
 pgclone_bgw_main(Datum main_arg)
 {
@@ -489,7 +532,9 @@ pgclone_bgw_main(Datum main_arg)
     PGconn         *source_conn = NULL;
     PGconn         *local_conn = NULL;
     const char     *port;
-    char           *dbname;
+    const char     *dbname;
+
+    /* Very first thing — log that we entered the function */
 
     /* Set up signal handlers */
     #if PG_VERSION_NUM >= 170000
@@ -500,19 +545,23 @@ pgclone_bgw_main(Datum main_arg)
 
     BackgroundWorkerUnblockSignals();
 
+
     if (!pgclone_state)
     {
         elog(ERROR, "pgclone: shared memory not initialized");
         return;
     }
 
-    /* Find our job */
+
+    /* Find our job and mark as running */
     LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+
     job = find_job(job_id);
     if (!job || job->status != PGCLONE_JOB_PENDING)
     {
         LWLockRelease(pgclone_state->lock);
-        elog(ERROR, "pgclone bgw: job %d not found or not pending", job_id);
+        elog(ERROR, "pgclone bgw: job %d not found or not pending (job=%p status=%d)",
+             job_id, (void*)job, job ? job->status : -1);
         return;
     }
     job->status = PGCLONE_JOB_RUNNING;
@@ -520,15 +569,24 @@ pgclone_bgw_main(Datum main_arg)
     job->start_time = GetCurrentTimestamp();
     LWLockRelease(pgclone_state->lock);
 
-    /* Connect to source */
+    /*
+     * Initialize database connection. This MUST happen before any
+     * palloc, SPI, or catalog access. Note: shared memory pointers
+     * remain valid after this call since we use ShmemInitStruct.
+     */
     BackgroundWorkerInitializeConnectionByOid(job->database_oid, InvalidOid, 0);
 
-    dbname = get_database_name(job->database_oid);
+    /* Use database name stored in job (get_database_name needs catalog access
+     * which may not be available in bgworker without an active transaction) */
+    dbname = job->database_name;
     port = GetConfigOption("port", false, false);
+
 
     source_conn = PQconnectdb(job->source_conninfo);
     if (PQstatus(source_conn) != CONNECTION_OK)
     {
+        elog(WARNING, "pgclone bgw: source connection failed: %s",
+             PQerrorMessage(source_conn));
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
         job->status = PGCLONE_JOB_FAILED;
         strlcpy(job->error_message, "could not connect to source", 256);
@@ -592,6 +650,32 @@ pgclone_bgw_main(Datum main_arg)
         appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                          job->schema_name);
         bgw_exec(local_conn, buf.data);
+
+        /* Clone sequences first (tables may depend on them for DEFAULT values) */
+        {
+            PGresult *seq_res;
+            resetStringInfo(&buf);
+            appendStringInfo(&buf,
+                "SELECT sequence_name FROM information_schema.sequences "
+                "WHERE sequence_schema = '%s'",
+                job->schema_name);
+
+            seq_res = PQexec(source_conn, buf.data);
+            if (PQresultStatus(seq_res) == PGRES_TUPLES_OK)
+            {
+                int si;
+                for (si = 0; si < PQntuples(seq_res); si++)
+                {
+                    const char *seqname = PQgetvalue(seq_res, si, 0);
+                    resetStringInfo(&buf);
+                    appendStringInfo(&buf,
+                        "CREATE SEQUENCE IF NOT EXISTS %s.%s",
+                        job->schema_name, seqname);
+                    bgw_exec(local_conn, buf.data);
+                }
+            }
+            PQclear(seq_res);
+        }
 
         /* Get table list */
         resetStringInfo(&buf);

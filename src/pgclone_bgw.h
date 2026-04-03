@@ -89,6 +89,7 @@ typedef struct PgcloneJob
 
     /* Database for loopback connection */
     Oid             database_oid;
+    char            database_name[NAMEDATALEN];
 } PgcloneJob;
 
 /* Shared memory state */
@@ -103,7 +104,11 @@ typedef struct PgcloneSharedState
 extern PgcloneSharedState *pgclone_state;
 
 /* Function declarations */
-extern void pgclone_bgw_main(Datum main_arg);
+#if defined(__GNUC__) || defined(__clang__)
+extern __attribute__((visibility("default"))) void pgclone_bgw_main(Datum main_arg);
+#else
+extern PGDLLEXPORT void pgclone_bgw_main(Datum main_arg);
+#endif
 extern Size pgclone_shmem_size(void);
 extern void pgclone_shmem_init(void);
 

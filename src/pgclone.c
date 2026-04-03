@@ -1995,6 +1995,7 @@ pgclone_table_async(PG_FUNCTION_ARGS)
     job->status = PGCLONE_JOB_PENDING;
     job->op_type = PGCLONE_OP_TABLE;
     job->database_oid = MyDatabaseId;
+    strlcpy(job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
 
     strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
     strlcpy(job->schema_name, schema_name, NAMEDATALEN);
@@ -2170,6 +2171,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         job->status = PGCLONE_JOB_RUNNING;
         job->op_type = PGCLONE_OP_SCHEMA;
         job->database_oid = MyDatabaseId;
+        strlcpy(job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
         job->total_tables = ntables;
         job->parallel_workers = opts.parallel_workers;
         job->start_time = GetCurrentTimestamp();
@@ -2217,6 +2219,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
                 child_job->status = PGCLONE_JOB_PENDING;
                 child_job->op_type = PGCLONE_OP_TABLE;
                 child_job->database_oid = MyDatabaseId;
+                strlcpy(child_job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
                 child_job->include_data = include_data;
                 child_job->include_indexes = opts.include_indexes;
                 child_job->include_constraints = opts.include_constraints;
@@ -2265,17 +2268,25 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         PQclear(table_res);
         pfree(qbuf.data);
 
-        /* Update parent job */
+        /* Update parent job — track workers launched and mark completed */
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
-        snprintf(pgclone_state->jobs[0].current_phase, 64,
-                 "%d parallel workers launched", workers_launched);
-
-        /* Find parent job to update */
         {
             PgcloneJob *pj = find_job(parent_job_id);
             if (pj)
+            {
                 snprintf(pj->current_phase, 64,
                          "%d parallel workers for %d tables", workers_launched, ntables);
+                pj->total_tables = ntables;
+                /*
+                 * Parent job transitions to COMPLETED since all child workers
+                 * are launched. Individual child jobs track their own status.
+                 */
+                if (workers_launched > 0)
+                    pj->status = PGCLONE_JOB_COMPLETED;
+                else
+                    pj->status = PGCLONE_JOB_FAILED;
+                pj->end_time = GetCurrentTimestamp();
+            }
         }
         LWLockRelease(pgclone_state->lock);
 
@@ -2308,6 +2319,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         job->status = PGCLONE_JOB_PENDING;
         job->op_type = PGCLONE_OP_SCHEMA;
         job->database_oid = MyDatabaseId;
+        strlcpy(job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
 
         strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
         strlcpy(job->schema_name, schema_name, NAMEDATALEN);

@@ -65,6 +65,26 @@ if [ $DB_CREATE_EXIT -ne 0 ]; then
     TEST_EXIT=1
 fi
 
+# Run async tests (require shared_preload_libraries = 'pgclone')
+echo ""
+echo "============================================"
+echo "Running pgclone ASYNC tests..."
+echo "============================================"
+
+# Check if pgclone is in shared_preload_libraries
+SPL=$(psql -U postgres -d target_db -tAc "SHOW shared_preload_libraries;" 2>/dev/null || echo "")
+if echo "$SPL" | grep -q "pgclone"; then
+    bash /build/pgclone/test/test_async.sh 2>&1
+    ASYNC_EXIT=$?
+    if [ $ASYNC_EXIT -ne 0 ]; then
+        TEST_EXIT=1
+    fi
+else
+    echo "WARNING: pgclone not in shared_preload_libraries, skipping async tests"
+    echo "To run async tests, add to postgresql.conf:"
+    echo "  shared_preload_libraries = 'pgclone'"
+fi
+
 echo ""
 echo "============================================"
 if [ $TEST_EXIT -eq 0 ]; then
@@ -73,5 +93,9 @@ else
     echo "SOME TESTS FAILED on $(pg_config --version)"
 fi
 echo "============================================"
+
+# Stop PostgreSQL to force container exit (Docker entrypoint would
+# otherwise restart the server after initdb scripts complete)
+pg_ctl -D "$PGDATA" -m fast stop 2>/dev/null || true
 
 exit $TEST_EXIT
