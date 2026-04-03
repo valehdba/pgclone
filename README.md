@@ -72,6 +72,28 @@ SELECT pgclone_version();
 
 ## Usage
 
+## Connection String Format
+
+The `source_conninfo` parameter uses standard PostgreSQL connection strings:
+
+```
+host=hostname dbname=database user=username password=password port=5432
+```
+
+Or URI format:
+
+```
+postgresql://username:password@hostname:5432/database
+```
+
+## Security Notes
+
+- This extension requires **superuser** privileges to install and use
+- Connection strings may contain passwords — consider using `.pgpass` files
+  or `PGPASSFILE` environment variable instead
+- The extension connects to remote hosts using `libpq` — ensure network
+  connectivity and firewall rules allow the connection
+  
 ### Clone a single table (with data)
 
 ```sql
@@ -444,28 +466,6 @@ SELECT pgclone_schema(conn, 'analytics', true,
 ## Exclusion Constraints (v1.2.0)
 
 Exclusion constraints are now fully supported and cloned automatically alongside PRIMARY KEY, UNIQUE, CHECK, and FOREIGN KEY constraints.
-
-## Connection String Format
-
-The `source_conninfo` parameter uses standard PostgreSQL connection strings:
-
-```
-host=hostname dbname=database user=username password=password port=5432
-```
-
-Or URI format:
-
-```
-postgresql://username:password@hostname:5432/database
-```
-
-## Security Notes
-
-- This extension requires **superuser** privileges to install and use
-- Connection strings may contain passwords — consider using `.pgpass` files
-  or `PGPASSFILE` environment variable instead
-- The extension connects to remote hosts using `libpq` — ensure network
-  connectivity and firewall rules allow the connection
 
 ## Current Limitations (v2.1.2)
 
