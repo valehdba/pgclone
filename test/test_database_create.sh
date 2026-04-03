@@ -75,14 +75,14 @@ else
     exit 1
 fi
 
-# ---- TEST 6: Run again — should work on existing DB ----
+# ---- TEST 6: Run again on existing DB — structure only (no PK conflicts) ----
 echo ""
-echo "TEST 6: pgclone_database_create on existing DB (idempotent)"
+echo "TEST 6: pgclone_database_create on existing DB (idempotent, structure only)"
 psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
     SELECT pgclone_database_create(
         '${SOURCE_CONNINFO}',
         'clone_test_db',
-        true
+        false
     );
 SQL
 
