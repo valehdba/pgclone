@@ -457,6 +457,8 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v2.1.0: Progress Tracking View~~ (done)
 - [ ] ~~v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred
 - [ ] ~~v2.1.2: Elapsed Time 
+- [ ] ~~v2.2.0: Worker pool for parallel cloning (fixed pool size instead of one bgworker per table)
+- [ ] ~~v2.2.1: Read-only transaction for WHERE clause execution (SQL injection protection)
 - [ ] ~~v3.0.0: Data Anonymization / Masking
 - [ ] ~~v3.1.0: Auto-Discovery of Sensitive Data
 - [ ] ~~v3.2.1: Applying Static Data Masking to cloned data 
