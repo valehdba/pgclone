@@ -249,12 +249,7 @@ SELECT pgclone_table(
 );
 ```
 
-### Check version
-
-```sql
-SELECT pgclone_version();
--- Returns: pgclone 2.1.2
-```
+ 
 
 ### Clone into a new database (v2.0.1)
 
