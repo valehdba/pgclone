@@ -4,7 +4,7 @@
 EXTENSION    = pgclone
 MODULE_big   = pgclone
 OBJS         = src/pgclone.o src/pgclone_bgw.o
-DATA         = sql/pgclone--0.1.0.sql sql/pgclone--0.2.0.sql sql/pgclone--1.0.0.sql sql/pgclone--1.1.0.sql sql/pgclone--2.0.0.sql sql/pgclone--2.0.1.sql
+DATA         = sql/pgclone--0.1.0.sql sql/pgclone--0.2.0.sql sql/pgclone--1.0.0.sql sql/pgclone--1.1.0.sql sql/pgclone--2.0.0.sql sql/pgclone--2.0.1.sql sql/pgclone--2.1.0.sql
 
 PG_CPPFLAGS  = -I$(shell $(PG_CONFIG) --includedir) -Isrc
 SHLIB_LINK   += -lpq
