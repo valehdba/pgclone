@@ -28,6 +28,8 @@ CREATE FUNCTION pgclone_progress(job_id INTEGER) RETURNS TEXT AS 'MODULE_PATHNAM
 CREATE FUNCTION pgclone_cancel(job_id INTEGER) RETURNS TEXT AS 'MODULE_PATHNAME', 'pgclone_cancel' LANGUAGE C VOLATILE STRICT;
 CREATE FUNCTION pgclone_resume(job_id INTEGER) RETURNS INTEGER AS 'MODULE_PATHNAME', 'pgclone_resume' LANGUAGE C VOLATILE STRICT;
 CREATE FUNCTION pgclone_jobs() RETURNS TEXT AS 'MODULE_PATHNAME', 'pgclone_jobs' LANGUAGE C VOLATILE STRICT;
+CREATE FUNCTION pgclone_clear_jobs() RETURNS INTEGER AS 'MODULE_PATHNAME', 'pgclone_clear_jobs' LANGUAGE C VOLATILE STRICT;
+COMMENT ON FUNCTION pgclone_clear_jobs() IS 'Clear completed/failed/cancelled job slots from shared memory';
 
 -- v2.1.0+v2.1.1+v2.1.2: Progress Tracking View with progress bar, elapsed time, ETA
 CREATE FUNCTION pgclone_progress_detail()

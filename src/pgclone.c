@@ -2554,6 +2554,47 @@ pgclone_jobs(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
+ * FUNCTION: pgclone_clear_jobs() — free completed/failed/cancelled slots
+ *
+ * Clears all non-active job slots from shared memory so they can
+ * be reused. Running and pending jobs are preserved.
+ * Returns the number of slots cleared.
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgclone_clear_jobs);
+
+Datum
+pgclone_clear_jobs(PG_FUNCTION_ARGS)
+{
+    int cleared = 0;
+    int i;
+
+    if (!pgclone_state)
+        ereport(ERROR, (errmsg("pgclone: shared memory not initialized")));
+
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+
+    for (i = 0; i < PGCLONE_MAX_JOBS; i++)
+    {
+        PgcloneJob *j = &pgclone_state->jobs[i];
+
+        if (j->status == PGCLONE_JOB_COMPLETED ||
+            j->status == PGCLONE_JOB_FAILED ||
+            j->status == PGCLONE_JOB_CANCELLED)
+        {
+            j->status = PGCLONE_JOB_FREE;
+            cleared++;
+        }
+    }
+
+    LWLockRelease(pgclone_state->lock);
+
+    ereport(NOTICE,
+            (errmsg("pgclone: cleared %d finished job slots", cleared)));
+
+    PG_RETURN_INT32(cleared);
+}
+
+/* ===============================================================
  * FUNCTION: pgclone_progress_view() — SET-RETURNING FUNCTION
  *
  * Returns one row per active/recent job from shared memory.
