@@ -1910,7 +1910,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.0.1"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.0"));
 }
 
 /* ===============================================================
@@ -2564,4 +2564,179 @@ pgclone_jobs(PG_FUNCTION_ARGS)
     appendStringInfoChar(&result, ']');
 
     PG_RETURN_TEXT_P(cstring_to_text(result.data));
+}
+
+/* ===============================================================
+ * FUNCTION: pgclone_progress_view() — SET-RETURNING FUNCTION
+ *
+ * Returns one row per active/recent job from shared memory.
+ * Designed to back the pgclone_jobs_view VIEW.
+ *
+ * Columns:
+ *   job_id              INTEGER
+ *   status              TEXT
+ *   op_type             TEXT
+ *   schema_name         TEXT
+ *   table_name          TEXT
+ *   current_phase       TEXT
+ *   current_table       TEXT
+ *   tables_total        BIGINT
+ *   tables_completed    BIGINT
+ *   rows_copied         BIGINT
+ *   bytes_copied        BIGINT
+ *   elapsed_ms          BIGINT
+ *   start_time          TIMESTAMPTZ
+ *   end_time            TIMESTAMPTZ
+ *   error_message       TEXT
+ *   pct_complete        DOUBLE PRECISION
+ * =============================================================== */
+#define PGCLONE_VIEW_COLS 16
+
+PG_FUNCTION_INFO_V1(pgclone_progress_view);
+
+Datum
+pgclone_progress_view(PG_FUNCTION_ARGS)
+{
+    FuncCallContext    *funcctx;
+    PgcloneJob         *job;
+    int                 slot_index;
+
+    if (!pgclone_state)
+        ereport(ERROR, (errmsg("pgclone: shared memory not initialized — "
+                               "add pgclone to shared_preload_libraries")));
+
+    if (SRF_IS_FIRSTCALL())
+    {
+        MemoryContext   oldctx;
+        TupleDesc       tupdesc;
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldctx  = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        tupdesc = CreateTemplateTupleDesc(PGCLONE_VIEW_COLS);
+        TupleDescInitEntry(tupdesc,  1, "job_id",           INT4OID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  2, "status",           TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  3, "op_type",          TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  4, "schema_name",      TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  5, "table_name",       TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  6, "current_phase",    TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  7, "current_table",    TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  8, "tables_total",     INT8OID,   -1, 0);
+        TupleDescInitEntry(tupdesc,  9, "tables_completed", INT8OID,   -1, 0);
+        TupleDescInitEntry(tupdesc, 10, "rows_copied",      INT8OID,   -1, 0);
+        TupleDescInitEntry(tupdesc, 11, "bytes_copied",     INT8OID,   -1, 0);
+        TupleDescInitEntry(tupdesc, 12, "elapsed_ms",       INT8OID,   -1, 0);
+        TupleDescInitEntry(tupdesc, 13, "start_time",       TIMESTAMPTZOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 14, "end_time",         TIMESTAMPTZOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 15, "error_message",    TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc, 16, "pct_complete",     FLOAT8OID, -1, 0);
+
+        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+        funcctx->user_fctx  = (void *)(intptr_t) 0;   /* slot_index */
+
+        MemoryContextSwitchTo(oldctx);
+    }
+
+    funcctx    = SRF_PERCALL_SETUP();
+    slot_index = (int)(intptr_t) funcctx->user_fctx;
+
+    /* Scan shared memory slots for next non-free job */
+    while (slot_index < PGCLONE_MAX_JOBS)
+    {
+        Datum       values[PGCLONE_VIEW_COLS];
+        bool        nulls[PGCLONE_VIEW_COLS];
+        HeapTuple   tuple;
+        const char *status_str;
+        const char *op_str;
+        int64       elapsed_ms = 0;
+        float8      pct = 0.0;
+
+        LWLockAcquire(pgclone_state->lock, LW_SHARED);
+        job = &pgclone_state->jobs[slot_index];
+
+        if (job->status == PGCLONE_JOB_FREE)
+        {
+            LWLockRelease(pgclone_state->lock);
+            slot_index++;
+            continue;
+        }
+
+        /* Build the row while holding the lock */
+        memset(nulls, 0, sizeof(nulls));
+
+        /* status string */
+        switch (job->status)
+        {
+            case PGCLONE_JOB_PENDING:   status_str = "pending";   break;
+            case PGCLONE_JOB_RUNNING:   status_str = "running";   break;
+            case PGCLONE_JOB_COMPLETED: status_str = "completed"; break;
+            case PGCLONE_JOB_FAILED:    status_str = "failed";    break;
+            case PGCLONE_JOB_CANCELLED: status_str = "cancelled"; break;
+            default:                    status_str = "unknown";    break;
+        }
+
+        /* op_type string */
+        switch (job->op_type)
+        {
+            case PGCLONE_OP_TABLE:    op_str = "table";    break;
+            case PGCLONE_OP_SCHEMA:   op_str = "schema";   break;
+            case PGCLONE_OP_DATABASE: op_str = "database"; break;
+            default:                  op_str = "unknown";   break;
+        }
+
+        /* elapsed */
+        if (job->start_time != 0)
+        {
+            if (job->end_time != 0)
+                elapsed_ms = (job->end_time - job->start_time) / 1000;
+            else
+                elapsed_ms = (GetCurrentTimestamp() - job->start_time) / 1000;
+        }
+
+        /* percentage */
+        if (job->total_tables > 0)
+            pct = (float8) job->completed_tables / (float8) job->total_tables * 100.0;
+
+        /* Fill datum array */
+        values[0]  = Int32GetDatum(job->job_id);
+        values[1]  = CStringGetTextDatum(status_str);
+        values[2]  = CStringGetTextDatum(op_str);
+        values[3]  = CStringGetTextDatum(job->schema_name);
+        values[4]  = CStringGetTextDatum(job->table_name);
+        values[5]  = CStringGetTextDatum(job->current_phase);
+        values[6]  = CStringGetTextDatum(job->current_table);
+        values[7]  = Int64GetDatum(job->total_tables);
+        values[8]  = Int64GetDatum(job->completed_tables);
+        values[9]  = Int64GetDatum(job->copied_rows);
+        values[10] = Int64GetDatum(job->copied_bytes);
+        values[11] = Int64GetDatum(elapsed_ms);
+
+        if (job->start_time != 0)
+            values[12] = TimestampTzGetDatum(job->start_time);
+        else
+            nulls[12] = true;
+
+        if (job->end_time != 0)
+            values[13] = TimestampTzGetDatum(job->end_time);
+        else
+            nulls[13] = true;
+
+        if (job->error_message[0] != '\0')
+            values[14] = CStringGetTextDatum(job->error_message);
+        else
+            nulls[14] = true;
+
+        values[15] = Float8GetDatum(pct);
+
+        LWLockRelease(pgclone_state->lock);
+
+        tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+
+        /* Advance to next slot for the next call */
+        funcctx->user_fctx = (void *)(intptr_t)(slot_index + 1);
+
+        SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+    }
+
+    SRF_RETURN_DONE(funcctx);
 }

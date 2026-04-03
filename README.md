@@ -218,7 +218,7 @@ SELECT pgclone_table(
 
 ```sql
 SELECT pgclone_version();
--- Returns: pgclone 2.0.1
+-- Returns: pgclone 2.1.0
 ```
 
 ### Clone into a new database (v2.0.1)
@@ -314,6 +314,44 @@ SELECT pgclone_resume(1);
 -- Returns: 2
 ```
 
+## Progress Tracking View (v2.1.0)
+
+Query live progress of all async clone jobs as a standard PostgreSQL view:
+
+```sql
+SELECT * FROM pgclone_jobs_view;
+```
+
+```
+ job_id | status  | op_type | schema_name | current_phase    | tables_total | tables_completed | rows_copied | elapsed_ms | pct_complete
+--------+---------+---------+-------------+------------------+--------------+------------------+-------------+------------+-------------
+      1 | running | schema  | sales       | copying data     |           12 |                5 |      450000 |       8500 |        41.67
+      2 | pending | table   | public      | starting         |            1 |                0 |           0 |          0 |         0.00
+      3 | completed| schema | analytics   | completed        |            8 |                8 |     1200000 |      25300 |       100.00
+```
+
+You can also filter and monitor specific jobs:
+
+```sql
+-- Only running jobs
+SELECT job_id, schema_name, current_table, pct_complete, elapsed_ms
+FROM pgclone_jobs_view
+WHERE status = 'running';
+
+-- Failed jobs with error messages
+SELECT job_id, schema_name, error_message
+FROM pgclone_jobs_view
+WHERE status = 'failed';
+```
+
+The underlying function `pgclone_progress_detail()` returns the same data as a table-returning function:
+
+```sql
+SELECT * FROM pgclone_progress_detail();
+```
+
+**Note:** Requires `shared_preload_libraries = 'pgclone'` in `postgresql.conf`.
+
 ## Conflict Resolution (v1.0.0)
 
 Control what happens when a target table already exists:
@@ -399,7 +437,7 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v2.0.1)
+## Current Limitations (v2.1.0)
 
 - Parallel cloning uses one bgworker per table — very large schemas may hit max_worker_processes limit
 - WHERE clause in data filtering is passed directly to SQL — use with trusted input only
@@ -416,14 +454,16 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v1.2.0: Clone materialized views and exclusion constraints~~ (done)
 - [x] ~~v2.0.0: True multi-worker parallel cloning~~ (done)
 - [x] ~~v2.0.1: CREATE database if database does not exist, from postgres DB - SELECT pgclone_database('source_db', 'target_db').~~ (done)
-- [ ] v2.1.0: Progress Tracking View
-- [ ] v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred
-- [ ] v2.1.2: Elapsed Time 
-- [ ] v3.0.0: Data Anonymization / Masking
-- [ ] v3.1.0: Auto-Discovery of Sensitive Data
-- [ ] v3.2.1: Applying Static Data Masking to cloned data 
-- [ ] v3.2.2: Applying Dynamic Data Masking to cloned data
-- [ ] v4.0.0: Copy-on-Write (CoW)  mode for local cloning SELECT pgclone_database_cow('source_db', 'target_db');
+- [x] ~~v2.1.0: Progress Tracking View~~ (done)
+- [ ] ~~v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred
+- [ ] ~~v2.1.2: Elapsed Time 
+- [ ] ~~v2.2.0: Worker pool for parallel cloning (fixed pool size instead of one bgworker per table)
+- [ ] ~~v2.2.1: Read-only transaction for WHERE clause execution (SQL injection protection)
+- [ ] ~~v3.0.0: Data Anonymization / Masking
+- [ ] ~~v3.1.0: Auto-Discovery of Sensitive Data
+- [ ] ~~v3.2.1: Applying Static Data Masking to cloned data 
+- [ ] ~~v3.2.2: Applying Dynamic Data Masking to cloned data
+- [ ] ~~v4.0.0: Copy-on-Write (CoW)  mode for local cloning SELECT pgclone_database_cow('source_db', 'target_db');
 
 
 ## License
