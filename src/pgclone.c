@@ -2030,6 +2030,24 @@ pgclone_table_async(PG_FUNCTION_ARGS)
         ereport(ERROR, (errmsg("pgclone: could not register background worker")));
     }
 
+    /* Wait for the worker to actually start */
+    {
+        BgwHandleStatus status;
+        pid_t           worker_pid;
+
+        status = WaitForBackgroundWorkerStartup(handle, &worker_pid);
+        if (status != BGWH_STARTED)
+        {
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            job->status = PGCLONE_JOB_FAILED;
+            strlcpy(job->error_message, "background worker failed to start", 256);
+            job->end_time = GetCurrentTimestamp();
+            LWLockRelease(pgclone_state->lock);
+            ereport(ERROR,
+                    (errmsg("pgclone: background worker failed to start (status=%d)", status)));
+        }
+    }
+
     PG_RETURN_INT32(job_id);
 }
 
@@ -2228,7 +2246,16 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
                 worker.bgw_notify_pid = MyProcPid;
 
                 if (RegisterDynamicBackgroundWorker(&worker, &handle))
-                    workers_launched++;
+                {
+                    BgwHandleStatus wstatus;
+                    pid_t           wpid;
+                    wstatus = WaitForBackgroundWorkerStartup(handle, &wpid);
+                    if (wstatus == BGWH_STARTED)
+                        workers_launched++;
+                    else
+                        ereport(WARNING,
+                                (errmsg("pgclone: worker for table %s failed to start", tname)));
+                }
                 else
                     ereport(WARNING,
                             (errmsg("pgclone: could not launch worker for table %s", tname)));
@@ -2312,6 +2339,24 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
             job->status = PGCLONE_JOB_FREE;
             LWLockRelease(pgclone_state->lock);
             ereport(ERROR, (errmsg("pgclone: could not register background worker")));
+        }
+
+        /* Wait for the worker to actually start */
+        {
+            BgwHandleStatus status;
+            pid_t           worker_pid;
+
+            status = WaitForBackgroundWorkerStartup(handle, &worker_pid);
+            if (status != BGWH_STARTED)
+            {
+                LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+                job->status = PGCLONE_JOB_FAILED;
+                strlcpy(job->error_message, "background worker failed to start", 256);
+                job->end_time = GetCurrentTimestamp();
+                LWLockRelease(pgclone_state->lock);
+                ereport(ERROR,
+                        (errmsg("pgclone: background worker failed to start (status=%d)", status)));
+            }
         }
 
         PG_RETURN_INT32(job_id);
@@ -2491,6 +2536,24 @@ pgclone_resume(PG_FUNCTION_ARGS)
         new_job->status = PGCLONE_JOB_FREE;
         LWLockRelease(pgclone_state->lock);
         ereport(ERROR, (errmsg("pgclone: could not register background worker")));
+    }
+
+    /* Wait for the worker to actually start */
+    {
+        BgwHandleStatus status;
+        pid_t           worker_pid;
+
+        status = WaitForBackgroundWorkerStartup(handle, &worker_pid);
+        if (status != BGWH_STARTED)
+        {
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            new_job->status = PGCLONE_JOB_FAILED;
+            strlcpy(new_job->error_message, "background worker failed to start", 256);
+            new_job->end_time = GetCurrentTimestamp();
+            LWLockRelease(pgclone_state->lock);
+            ereport(ERROR,
+                    (errmsg("pgclone: background worker failed to start (status=%d)", status)));
+        }
     }
 
     PG_RETURN_INT32(new_job_id);
