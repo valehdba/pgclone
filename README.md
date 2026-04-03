@@ -1,7 +1,7 @@
 # PgClone
 
 <p align="center">
-  <img src="logo.svg" alt="pgclone logo" width="280"/>
+  <img src="logo/pgclone_logo.svg" alt="pgclone logo" width="280"/>
 </p>
 
 <p align="center">
