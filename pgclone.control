@@ -1,6 +1,6 @@
 # pgclone extension
 comment = 'Clone PostgreSQL databases, schemas, tables with selective columns, data filtering, async, parallel cloning, materialized views, resume, and conflict resolution'
-default_version = '2.1.1'
+default_version = '2.1.2'
 module_pathname = '$libdir/pgclone'
 relocatable = false
 superuser = true

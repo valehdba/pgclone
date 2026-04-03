@@ -1897,7 +1897,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.1"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.2"));
 }
 
 /* ===============================================================
@@ -2577,8 +2577,9 @@ pgclone_jobs(PG_FUNCTION_ARGS)
  *   error_message       TEXT
  *   pct_complete        DOUBLE PRECISION
  *   progress_bar        TEXT
+ *   elapsed_time        TEXT        (human-readable: HH:MM:SS)
  * =============================================================== */
-#define PGCLONE_VIEW_COLS 17
+#define PGCLONE_VIEW_COLS 18
 
 PG_FUNCTION_INFO_V1(pgclone_progress_view);
 
@@ -2618,7 +2619,8 @@ pgclone_progress_view(PG_FUNCTION_ARGS)
         TupleDescInitEntry(tupdesc, 14, "end_time",         TIMESTAMPTZOID, -1, 0);
         TupleDescInitEntry(tupdesc, 15, "error_message",    TEXTOID,   -1, 0);
         TupleDescInitEntry(tupdesc, 16, "pct_complete",     FLOAT8OID, -1, 0);
-        TupleDescInitEntry(tupdesc, 17, "progress_bar",    TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc, 17, "progress_bar",         TEXTOID,   -1, 0);
+        TupleDescInitEntry(tupdesc, 18, "elapsed_time",         TEXTOID,   -1, 0);
 
         funcctx->tuple_desc = BlessTupleDesc(tupdesc);
         funcctx->user_fctx  = (void *)(intptr_t) 0;   /* slot_index */
@@ -2717,14 +2719,16 @@ pgclone_progress_view(PG_FUNCTION_ARGS)
 
         values[15] = Float8GetDatum(pct);
 
-        /* Build progress bar: [████████░░░░] 67% (450000 rows) */
+        /* Build progress bar with elapsed time */
         {
             char        bar[128];
             int         filled;
             int         empty;
             int         bi;
-            int         pi;     /* progress bar loop index */
+            int         pi;
             const int   bar_width = 20;
+            long        elapsed_sec;
+            char        elapsed_str[32];
 
             filled = (int)(pct / 100.0 * bar_width);
             if (filled > bar_width) filled = bar_width;
@@ -2749,12 +2753,25 @@ pgclone_progress_view(PG_FUNCTION_ARGS)
             bar[bi++] = ']';
             bar[bi] = '\0';
 
+            /* Format elapsed time as HH:MM:SS */
+            elapsed_sec = elapsed_ms / 1000;
+            snprintf(elapsed_str, sizeof(elapsed_str), "%02ld:%02ld:%02ld",
+                     elapsed_sec / 3600,
+                     (elapsed_sec % 3600) / 60,
+                     elapsed_sec % 60);
+
+            /* progress_bar column */
             {
-                char full_bar[256];
-                snprintf(full_bar, sizeof(full_bar), "%s %.1f%% (%ld rows)",
-                         bar, pct, (long) job->copied_rows);
+                char full_bar[512];
+                snprintf(full_bar, sizeof(full_bar),
+                         "%s %.1f%% | %ld rows | %s elapsed",
+                         bar, pct, (long) job->copied_rows,
+                         elapsed_str);
                 values[16] = CStringGetTextDatum(full_bar);
             }
+
+            /* elapsed_time column (HH:MM:SS) */
+            values[17] = CStringGetTextDatum(elapsed_str);
         }
 
         LWLockRelease(pgclone_state->lock);

@@ -218,7 +218,7 @@ SELECT pgclone_table(
 
 ```sql
 SELECT pgclone_version();
--- Returns: pgclone 2.1.1
+-- Returns: pgclone 2.1.2
 ```
 
 ### Clone into a new database (v2.0.1)
@@ -314,9 +314,9 @@ SELECT pgclone_resume(1);
 -- Returns: 2
 ```
 
-## Progress Tracking View (v2.1.0) with Progress Bar (v2.1.1)
+## Progress Tracking View (v2.1.0) with Progress Bar (v2.1.1) and Elapsed Time (v2.1.2)
 
-Query live progress of all async clone jobs as a standard PostgreSQL view with a visual progress bar:
+Query live progress of all async clone jobs as a standard PostgreSQL view with a visual progress bar and elapsed time:
 
 ```sql
 SELECT job_id, status, schema_name, progress_bar FROM pgclone_jobs_view;
@@ -324,10 +324,24 @@ SELECT job_id, status, schema_name, progress_bar FROM pgclone_jobs_view;
 
 ```
  job_id | status    | schema_name | progress_bar
---------+-----------+-------------+----------------------------------------------
-      1 | running   | sales       | [████████████░░░░░░░░] 60.0% (450000 rows)
-      2 | pending   | public      | [░░░░░░░░░░░░░░░░░░░░] 0.0% (0 rows)
-      3 | completed | analytics   | [████████████████████] 100.0% (1200000 rows)
+--------+-----------+-------------+------------------------------------------------------------
+      1 | running   | sales       | [████████████░░░░░░░░] 60.0% | 450000 rows | 00:08:30 elapsed
+      2 | pending   | public      | [░░░░░░░░░░░░░░░░░░░░] 0.0% | 0 rows | 00:00:00 elapsed
+      3 | completed | analytics   | [████████████████████] 100.0% | 1200000 rows | 00:25:18 elapsed
+```
+
+Separate column for elapsed time:
+
+```sql
+SELECT job_id, status, elapsed_time, pct_complete
+FROM pgclone_jobs_view
+WHERE status = 'running';
+```
+
+```
+ job_id | status  | elapsed_time | pct_complete
+--------+---------+--------------+-------------
+      1 | running | 00:08:30     |        60.0
 ```
 
 Full detail view:
@@ -445,7 +459,7 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v2.1.1)
+## Current Limitations (v2.1.2)
 
 - Parallel cloning uses one bgworker per table — very large schemas may hit max_worker_processes limit
 - WHERE clause in data filtering is passed directly to SQL — use with trusted input only
@@ -464,7 +478,7 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v2.0.1: CREATE database if database does not exist, from postgres DB - SELECT pgclone_database('source_db', 'target_db').~~ (done)
 - [x] ~~v2.1.0: Progress Tracking View~~ (done)
 - [x] ~~v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred~~ (done)
-- [ ] ~~v2.1.2: Elapsed Time 
+- [x] ~~v2.1.2: Elapsed Time~~ (done)
 - [ ] ~~v2.2.0: Worker pool for parallel cloning (fixed pool size instead of one bgworker per table)
 - [ ] ~~v2.2.1: Read-only transaction for WHERE clause execution (SQL injection protection)
 - [ ] ~~v3.0.0: Data Anonymization / Masking
