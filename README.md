@@ -218,7 +218,7 @@ SELECT pgclone_table(
 
 ```sql
 SELECT pgclone_version();
--- Returns: pgclone 2.1.0
+-- Returns: pgclone 2.1.1
 ```
 
 ### Clone into a new database (v2.0.1)
@@ -314,27 +314,33 @@ SELECT pgclone_resume(1);
 -- Returns: 2
 ```
 
-## Progress Tracking View (v2.1.0)
+## Progress Tracking View (v2.1.0) with Progress Bar (v2.1.1)
 
-Query live progress of all async clone jobs as a standard PostgreSQL view:
+Query live progress of all async clone jobs as a standard PostgreSQL view with a visual progress bar:
+
+```sql
+SELECT job_id, status, schema_name, progress_bar FROM pgclone_jobs_view;
+```
+
+```
+ job_id | status    | schema_name | progress_bar
+--------+-----------+-------------+----------------------------------------------
+      1 | running   | sales       | [████████████░░░░░░░░] 60.0% (450000 rows)
+      2 | pending   | public      | [░░░░░░░░░░░░░░░░░░░░] 0.0% (0 rows)
+      3 | completed | analytics   | [████████████████████] 100.0% (1200000 rows)
+```
+
+Full detail view:
 
 ```sql
 SELECT * FROM pgclone_jobs_view;
-```
-
-```
- job_id | status  | op_type | schema_name | current_phase    | tables_total | tables_completed | rows_copied | elapsed_ms | pct_complete
---------+---------+---------+-------------+------------------+--------------+------------------+-------------+------------+-------------
-      1 | running | schema  | sales       | copying data     |           12 |                5 |      450000 |       8500 |        41.67
-      2 | pending | table   | public      | starting         |            1 |                0 |           0 |          0 |         0.00
-      3 | completed| schema | analytics   | completed        |            8 |                8 |     1200000 |      25300 |       100.00
 ```
 
 You can also filter and monitor specific jobs:
 
 ```sql
 -- Only running jobs
-SELECT job_id, schema_name, current_table, pct_complete, elapsed_ms
+SELECT job_id, schema_name, current_table, progress_bar, elapsed_ms
 FROM pgclone_jobs_view
 WHERE status = 'running';
 
@@ -351,6 +357,8 @@ SELECT * FROM pgclone_progress_detail();
 ```
 
 **Note:** Requires `shared_preload_libraries = 'pgclone'` in `postgresql.conf`.
+
+**Tip:** Verbose per-table/per-row NOTICE messages have been moved to DEBUG1 level. To see them: `SET client_min_messages = debug1;`
 
 ## Conflict Resolution (v1.0.0)
 
@@ -437,7 +445,7 @@ postgresql://username:password@hostname:5432/database
 - The extension connects to remote hosts using `libpq` — ensure network
   connectivity and firewall rules allow the connection
 
-## Current Limitations (v2.1.0)
+## Current Limitations (v2.1.1)
 
 - Parallel cloning uses one bgworker per table — very large schemas may hit max_worker_processes limit
 - WHERE clause in data filtering is passed directly to SQL — use with trusted input only
@@ -455,7 +463,7 @@ postgresql://username:password@hostname:5432/database
 - [x] ~~v2.0.0: True multi-worker parallel cloning~~ (done)
 - [x] ~~v2.0.1: CREATE database if database does not exist, from postgres DB - SELECT pgclone_database('source_db', 'target_db').~~ (done)
 - [x] ~~v2.1.0: Progress Tracking View~~ (done)
-- [ ] ~~v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred
+- [x] ~~v2.1.1: Progress Bar instead of NOTICE: pclone XXX row transferred~~ (done)
 - [ ] ~~v2.1.2: Elapsed Time 
 - [ ] ~~v2.2.0: Worker pool for parallel cloning (fixed pool size instead of one bgworker per table)
 - [ ] ~~v2.2.1: Read-only transaction for WHERE clause execution (SQL injection protection)

@@ -481,9 +481,8 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
         if (row_count % 50000 == 0)
         {
             CHECK_FOR_INTERRUPTS();
-            ereport(NOTICE,
-                    (errmsg("pgclone: ... %ld rows transferred so far",
-                            (long) row_count)));
+            elog(DEBUG1, "pgclone: ... %ld rows transferred so far",
+                 (long) row_count);
         }
     }
 
@@ -1149,9 +1148,8 @@ pgclone_table(PG_FUNCTION_ARGS)
                                         schema_name, table_name, target_name,
                                         &opts);
 
-        ereport(NOTICE,
-                (errmsg("pgclone: copied %ld rows into %s.%s using COPY protocol",
-                        (long) row_count, schema_name, target_name)));
+        elog(DEBUG1, "pgclone: copied %ld rows into %s.%s using COPY protocol",
+             (long) row_count, schema_name, target_name);
     }
 
     /* ---- Step 4: Clone constraints if enabled ---- */
@@ -1161,9 +1159,8 @@ pgclone_table(PG_FUNCTION_ARGS)
                                               schema_name, table_name, target_name,
                                               &opts);
         if (con_count > 0)
-            ereport(NOTICE,
-                    (errmsg("pgclone: cloned %d constraints for %s.%s",
-                            con_count, schema_name, target_name)));
+            elog(DEBUG1, "pgclone: cloned %d constraints for %s.%s",
+                 con_count, schema_name, target_name);
     }
 
     /* ---- Step 5: Clone indexes if enabled ---- */
@@ -1173,9 +1170,8 @@ pgclone_table(PG_FUNCTION_ARGS)
                                           schema_name, table_name, target_name,
                                           &opts);
         if (idx_count > 0)
-            ereport(NOTICE,
-                    (errmsg("pgclone: cloned %d indexes for %s.%s",
-                            idx_count, schema_name, target_name)));
+            elog(DEBUG1, "pgclone: cloned %d indexes for %s.%s",
+                 idx_count, schema_name, target_name);
     }
 
     /* ---- Step 6: Clone triggers if enabled ---- */
@@ -1184,9 +1180,8 @@ pgclone_table(PG_FUNCTION_ARGS)
         int trig_count = pgclone_triggers(source_conn, local_conn,
                                             schema_name, table_name, target_name);
         if (trig_count > 0)
-            ereport(NOTICE,
-                    (errmsg("pgclone: cloned %d triggers for %s.%s",
-                            trig_count, schema_name, target_name)));
+            elog(DEBUG1, "pgclone: cloned %d triggers for %s.%s",
+                 trig_count, schema_name, target_name);
     }
 
     PQfinish(local_conn);
@@ -1275,9 +1270,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
     {
         pgclone_exec_conn(local_conn, PQgetvalue(res, i, 0));
     }
-    ereport(NOTICE,
-            (errmsg("pgclone: cloned %d functions from schema %s",
-                    PQntuples(res), schema_name)));
+    elog(DEBUG1, "pgclone: cloned %d functions from schema %s",
+         PQntuples(res), schema_name);
     PQclear(res);
 
     /* ---- Step 3: Clone sequences ---- */
@@ -1308,9 +1302,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
             strcmp(PQgetvalue(res, i, 6), "YES") == 0 ? "CYCLE" : "NO CYCLE");
         pgclone_exec_conn(local_conn, buf.data);
     }
-    ereport(NOTICE,
-            (errmsg("pgclone: cloned %d sequences from schema %s",
-                    PQntuples(res), schema_name)));
+    elog(DEBUG1, "pgclone: cloned %d sequences from schema %s",
+         PQntuples(res), schema_name);
     PQclear(res);
 
     PQfinish(local_conn);
@@ -1363,9 +1356,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
         pfree(opts_json.data);
     }
 
-    ereport(NOTICE,
-            (errmsg("pgclone: cloned %d tables from schema %s",
-                    ntables, schema_name)));
+    elog(DEBUG1, "pgclone: cloned %d tables from schema %s",
+         ntables, schema_name);
 
     /* ---- Step 5: Retry FK constraints if constraints enabled ---- */
     if (opts.include_constraints)
@@ -1416,9 +1408,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
         }
 
         if (fk_created > 0)
-            ereport(NOTICE,
-                    (errmsg("pgclone: FK retry pass: ensured %d foreign key constraints in schema %s",
-                            fk_created, schema_name)));
+            elog(DEBUG1, "pgclone: FK retry pass: ensured %d foreign key constraints in schema %s",
+                 fk_created, schema_name);
 
         PQfinish(lcl_retry);
         PQfinish(src_retry);
@@ -1448,9 +1439,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
                 PQgetvalue(res, i, 1));
             pgclone_exec_conn(lcl_views, buf.data);
         }
-        ereport(NOTICE,
-                (errmsg("pgclone: cloned %d views from schema %s",
-                        PQntuples(res), schema_name)));
+        elog(DEBUG1, "pgclone: cloned %d views from schema %s",
+             PQntuples(res), schema_name);
         PQclear(res);
 
         /* ---- Step 7: Clone materialized views ---- */
@@ -1516,9 +1506,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
                 }
             }
 
-            ereport(NOTICE,
-                    (errmsg("pgclone: cloned %d materialized views from schema %s",
-                            PQntuples(res), schema_name)));
+            elog(DEBUG1, "pgclone: cloned %d materialized views from schema %s",
+                 PQntuples(res), schema_name);
             PQclear(res);
         }
 
@@ -1593,9 +1582,8 @@ pgclone_functions(PG_FUNCTION_ARGS)
     PQfinish(local_conn);
     PQfinish(source_conn);
 
-    ereport(NOTICE,
-            (errmsg("pgclone: successfully cloned %d functions from %s",
-                    count, schema_name)));
+    elog(DEBUG1, "pgclone: successfully cloned %d functions from %s",
+         count, schema_name);
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
@@ -1657,9 +1645,8 @@ pgclone_database(PG_FUNCTION_ARGS)
         {
             Datum result;
 
-            ereport(NOTICE,
-                    (errmsg("pgclone: cloning schema %s (%d/%d)",
-                            schema_names[i], i + 1, nschemas)));
+            elog(DEBUG1, "pgclone: cloning schema %s (%d/%d)",
+                 schema_names[i], i + 1, nschemas);
 
             result = DirectFunctionCall4(pgclone_schema,
                         CStringGetTextDatum(source_conninfo),
@@ -1910,7 +1897,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.1"));
 }
 
 /* ===============================================================
@@ -2143,7 +2130,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         {
             PQclear(table_res);
             pfree(qbuf.data);
-            ereport(NOTICE, (errmsg("pgclone: no tables found in schema %s", schema_name)));
+            elog(DEBUG1, "pgclone: no tables found in schema %s", schema_name);
             PG_RETURN_INT32(0);
         }
 
@@ -2589,8 +2576,9 @@ pgclone_jobs(PG_FUNCTION_ARGS)
  *   end_time            TIMESTAMPTZ
  *   error_message       TEXT
  *   pct_complete        DOUBLE PRECISION
+ *   progress_bar        TEXT
  * =============================================================== */
-#define PGCLONE_VIEW_COLS 16
+#define PGCLONE_VIEW_COLS 17
 
 PG_FUNCTION_INFO_V1(pgclone_progress_view);
 
@@ -2630,6 +2618,7 @@ pgclone_progress_view(PG_FUNCTION_ARGS)
         TupleDescInitEntry(tupdesc, 14, "end_time",         TIMESTAMPTZOID, -1, 0);
         TupleDescInitEntry(tupdesc, 15, "error_message",    TEXTOID,   -1, 0);
         TupleDescInitEntry(tupdesc, 16, "pct_complete",     FLOAT8OID, -1, 0);
+        TupleDescInitEntry(tupdesc, 17, "progress_bar",    TEXTOID,   -1, 0);
 
         funcctx->tuple_desc = BlessTupleDesc(tupdesc);
         funcctx->user_fctx  = (void *)(intptr_t) 0;   /* slot_index */
@@ -2727,6 +2716,46 @@ pgclone_progress_view(PG_FUNCTION_ARGS)
             nulls[14] = true;
 
         values[15] = Float8GetDatum(pct);
+
+        /* Build progress bar: [████████░░░░] 67% (450000 rows) */
+        {
+            char        bar[128];
+            int         filled;
+            int         empty;
+            int         bi;
+            int         pi;     /* progress bar loop index */
+            const int   bar_width = 20;
+
+            filled = (int)(pct / 100.0 * bar_width);
+            if (filled > bar_width) filled = bar_width;
+            empty = bar_width - filled;
+
+            bi = 0;
+            bar[bi++] = '[';
+            for (pi = 0; pi < filled; pi++)
+            {
+                /* UTF-8 for █ (U+2588): 0xE2 0x96 0x88 */
+                bar[bi++] = (char)0xE2;
+                bar[bi++] = (char)0x96;
+                bar[bi++] = (char)0x88;
+            }
+            for (pi = 0; pi < empty; pi++)
+            {
+                /* UTF-8 for ░ (U+2591): 0xE2 0x96 0x91 */
+                bar[bi++] = (char)0xE2;
+                bar[bi++] = (char)0x96;
+                bar[bi++] = (char)0x91;
+            }
+            bar[bi++] = ']';
+            bar[bi] = '\0';
+
+            {
+                char full_bar[256];
+                snprintf(full_bar, sizeof(full_bar), "%s %.1f%% (%ld rows)",
+                         bar, pct, (long) job->copied_rows);
+                values[16] = CStringGetTextDatum(full_bar);
+            }
+        }
 
         LWLockRelease(pgclone_state->lock);
 
