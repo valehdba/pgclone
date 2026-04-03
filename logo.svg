@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="termBg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#0d0d1a"/>
+    </linearGradient>
+    <linearGradient id="cylGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#336791"/>
+      <stop offset="50%" style="stop-color:#264D73"/>
+      <stop offset="100%" style="stop-color:#1B3650"/>
+    </linearGradient>
+    <linearGradient id="cylTop" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90D9"/>
+      <stop offset="100%" style="stop-color:#336791"/>
+    </linearGradient>
+    <pattern id="scanlines" patternUnits="userSpaceOnUse" width="4" height="4">
+      <line x1="0" y1="0" x2="4" y2="0" stroke="#00ff88" stroke-width="0.3" opacity="0.03"/>
+    </pattern>
+    <filter id="neonGlow">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <filter id="strongGlow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="subtleGlow">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- DARK TERMINAL BACKGROUND -->
+  <rect x="24" y="24" width="464" height="464" rx="32" fill="url(#termBg)"/>
+  <rect x="24" y="24" width="464" height="464" rx="32" fill="none" stroke="#00ff88" stroke-width="1" opacity="0.15"/>
+  <rect x="24" y="24" width="464" height="464" rx="32" fill="url(#scanlines)"/>
+
+  <!-- TERMINAL DOTS -->
+  <circle cx="56" cy="52" r="6" fill="#ff5f56" opacity="0.8"/>
+  <circle cx="76" cy="52" r="6" fill="#ffbd2e" opacity="0.8"/>
+  <circle cx="96" cy="52" r="6" fill="#27c93f" opacity="0.8"/>
+  <text x="256" y="57" text-anchor="middle" font-family="'SF Mono','Fira Code','JetBrains Mono',monospace" font-size="12" fill="#555577" letter-spacing="1">psql — pgclone</text>
+
+  <!-- SOURCE DB -->
+  <g transform="translate(72,105)">
+    <path d="M0,28 L0,128 Q0,148 55,148 Q110,148 110,128 L110,28" fill="url(#cylGrad)"/>
+    <ellipse cx="55" cy="128" rx="55" ry="20" fill="#1B3650" stroke="#264D73" stroke-width="1"/>
+    <ellipse cx="55" cy="28" rx="55" ry="20" fill="url(#cylTop)" stroke="#4A90D9" stroke-width="1"/>
+    <ellipse cx="55" cy="28" rx="40" ry="13" fill="none" stroke="#5BA8F7" stroke-width="0.5" opacity="0.5"/>
+    <line x1="15" y1="55" x2="50" y2="55" stroke="#00ff88" stroke-width="1.5" opacity="0.5"/>
+    <line x1="55" y1="55" x2="95" y2="55" stroke="#00ff88" stroke-width="1.5" opacity="0.3"/>
+    <line x1="15" y1="68" x2="70" y2="68" stroke="#00ff88" stroke-width="1.5" opacity="0.4"/>
+    <line x1="75" y1="68" x2="95" y2="68" stroke="#00ff88" stroke-width="1.5" opacity="0.25"/>
+    <line x1="15" y1="81" x2="42" y2="81" stroke="#00ff88" stroke-width="1.5" opacity="0.5"/>
+    <line x1="47" y1="81" x2="95" y2="81" stroke="#00ff88" stroke-width="1.5" opacity="0.35"/>
+    <line x1="15" y1="94" x2="60" y2="94" stroke="#00ff88" stroke-width="1.5" opacity="0.45"/>
+    <line x1="65" y1="94" x2="95" y2="94" stroke="#00ff88" stroke-width="1.5" opacity="0.3"/>
+    <line x1="15" y1="107" x2="55" y2="107" stroke="#00ff88" stroke-width="1.5" opacity="0.4"/>
+    <line x1="60" y1="107" x2="85" y2="107" stroke="#00ff88" stroke-width="1.5" opacity="0.2"/>
+    <text x="55" y="168" text-anchor="middle" font-family="'SF Mono','Fira Code',monospace" font-size="11" fill="#4A90D9" letter-spacing="1" opacity="0.8">SOURCE</text>
+  </g>
+
+  <!-- TARGET DB -->
+  <g transform="translate(330,105)">
+    <path d="M0,28 L0,128 Q0,148 55,148 Q110,148 110,128 L110,28" fill="url(#cylGrad)"/>
+    <ellipse cx="55" cy="128" rx="55" ry="20" fill="#1B3650" stroke="#264D73" stroke-width="1"/>
+    <ellipse cx="55" cy="28" rx="55" ry="20" fill="url(#cylTop)" stroke="#4A90D9" stroke-width="1"/>
+    <ellipse cx="55" cy="28" rx="40" ry="13" fill="none" stroke="#5BA8F7" stroke-width="0.5" opacity="0.5"/>
+    <line x1="15" y1="55" x2="50" y2="55" stroke="#00ff88" stroke-width="1.5" opacity="0.5"/>
+    <line x1="55" y1="55" x2="95" y2="55" stroke="#00ff88" stroke-width="1.5" opacity="0.3"/>
+    <line x1="15" y1="68" x2="70" y2="68" stroke="#00ff88" stroke-width="1.5" opacity="0.4"/>
+    <line x1="75" y1="68" x2="95" y2="68" stroke="#00ff88" stroke-width="1.5" opacity="0.25"/>
+    <line x1="15" y1="81" x2="42" y2="81" stroke="#00ff88" stroke-width="1.5" opacity="0.5"/>
+    <line x1="47" y1="81" x2="95" y2="81" stroke="#00ff88" stroke-width="1.5" opacity="0.35"/>
+    <line x1="15" y1="94" x2="60" y2="94" stroke="#00ff88" stroke-width="1.5" opacity="0.3"/>
+    <line x1="65" y1="94" x2="95" y2="94" stroke="#00ff88" stroke-width="1.5" opacity="0.15"/>
+    <rect x="15" y="104" width="8" height="12" fill="#00ff88" opacity="0.7">
+      <animate attributeName="opacity" values="0.7;0;0.7" dur="1s" repeatCount="indefinite"/>
+    </rect>
+    <text x="55" y="168" text-anchor="middle" font-family="'SF Mono','Fira Code',monospace" font-size="11" fill="#00cc6a" letter-spacing="1" opacity="0.8">TARGET</text>
+  </g>
+
+  <!-- DATA STREAM ARROW -->
+  <g filter="url(#neonGlow)">
+    <line x1="192" y1="185" x2="318" y2="185" stroke="#00ff88" stroke-width="2" opacity="0.6"/>
+    <polygon points="318,175 338,185 318,195" fill="#00ff88" opacity="0.7"/>
+    <rect x="200" y="182" width="12" height="6" rx="1" fill="#00ff88" opacity="0.8">
+      <animate attributeName="x" values="195;325" dur="2s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.8;0.1" dur="2s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="210" y="182" width="8" height="6" rx="1" fill="#00cc6a" opacity="0.6">
+      <animate attributeName="x" values="195;325" dur="2.5s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.6;0.05" dur="2.5s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="220" y="182" width="14" height="6" rx="1" fill="#00ff88" opacity="0.7">
+      <animate attributeName="x" values="195;325" dur="1.7s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.7;0.1" dur="1.7s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- BINARY DECORATION -->
+  <g font-family="'SF Mono','Fira Code',monospace" font-size="9" fill="#00ff88" opacity="0.08">
+    <text x="40" y="320">01001000 01100101 01101100</text>
+    <text x="40" y="334">11010010 00110101 10101100</text>
+    <text x="280" y="320">01110000 01100111 01100011</text>
+    <text x="280" y="334">01101100 01101111 01101110</text>
+  </g>
+
+  <!-- PROMPT LINE -->
+  <g filter="url(#subtleGlow)">
+    <text x="48" y="370" font-family="'SF Mono','Fira Code','JetBrains Mono',monospace" font-size="13" fill="#555577">postgres=#</text>
+    <text x="145" y="370" font-family="'SF Mono','Fira Code','JetBrains Mono',monospace" font-size="13" fill="#00ff88" opacity="0.7">SELECT pgclone_database(...);</text>
+  </g>
+
+  <!-- MAIN TITLE -->
+  <g filter="url(#strongGlow)">
+    <text x="256" y="425" text-anchor="middle" font-family="'SF Mono','Fira Code','JetBrains Mono','Cascadia Code',monospace" font-size="64" font-weight="700" letter-spacing="-2">
+      <tspan fill="#4A90D9">pg</tspan><tspan fill="#00ff88">clone</tspan>
+    </text>
+  </g>
+
+  <!-- TAGLINE -->
+  <text x="256" y="455" text-anchor="middle" font-family="'SF Mono','Fira Code',monospace" font-size="12" fill="#555577" letter-spacing="4">POSTGRESQL CLONE EXTENSION</text>
+
+  <!-- CORNER BRACKETS -->
+  <path d="M448,80 L460,80 L460,92" fill="none" stroke="#00ff88" stroke-width="1" opacity="0.2"/>
+  <path d="M64,440 L52,440 L52,428" fill="none" stroke="#00ff88" stroke-width="1" opacity="0.2"/>
+  <path d="M448,440 L460,440 L460,428" fill="none" stroke="#00ff88" stroke-width="1" opacity="0.2"/>
+  <path d="M64,80 L52,80 L52,92" fill="none" stroke="#00ff88" stroke-width="1" opacity="0.2"/>
+</svg>
