@@ -1,8 +1,5 @@
 # PgClone
 
-<p align="center">
-  <img src="logo/pgclone_logo.svg" alt="pgclone logo" width="280"/>
-</p>
 
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
