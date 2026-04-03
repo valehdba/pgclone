@@ -70,6 +70,11 @@ CREATE EXTENSION pgclone;
 SELECT pgclone_version();
 ```
 
+Add to postgresql.conf and then restart database:
+```sql
+shared_preload_libraries = 'pgclone'
+```
+
 ## Usage
 
 ## Connection String Format
