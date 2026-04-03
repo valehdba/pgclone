@@ -1,4 +1,19 @@
 # PgClone
+
+<p align="center">
+  <img src="logo.svg" alt="pgclone logo" width="280"/>
+</p>
+
+<p align="center">
+  <a href="https://github.com/valehdba/pgclone/actions/workflows/ci.yml"><img src="https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/version-2.1.2-00ff88?style=flat-square&labelColor=1a1a2e" alt="Version">
+  <img src="https://img.shields.io/badge/PostgreSQL-14%20|%2015%20|%2016%20|%2017%20|%2018-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 14-18">
+  <img src="https://img.shields.io/badge/language-C-555555?style=flat-square&logo=c&logoColor=white" alt="C">
+  <img src="https://img.shields.io/badge/license-PostgreSQL-336791?style=flat-square" alt="License">
+  <img src="https://img.shields.io/github/stars/valehdba/pgclone?style=flat-square&color=ffbd2e&labelColor=1a1a2e" alt="Stars">
+  <img src="https://img.shields.io/github/issues/valehdba/pgclone?style=flat-square&color=ff5f56&labelColor=1a1a2e" alt="Issues">
+</p>
+
 ## What is PgClone?
 One of the most time-consuming operations in our daily workflow — especially when working with large datasets — is cloning a database. Whether it's refreshing a Staging environment, creating a clean database for automated tests in CI/CD pipelines, or giving developers an isolated environment with production-like data, we constantly need a reliable and fast clone operation.
 PgClone is a PostgreSQL extension written in C that lets you clone databases,
