@@ -106,10 +106,10 @@ shared_preload_libraries = 'pgclone'
 
 | Document | Description |
 |----------|-------------|
-| [Usage Guide](docs/USAGE.md) | All functions, parameters, and examples |
-| [Async Operations](docs/ASYNC.md) | Background workers, progress tracking, parallel cloning |
-| [Testing](docs/TESTING.md) | Test infrastructure, pgTAP, Docker, CI/CD |
-| [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, PG version compatibility |
+| [Usage Guide](USAGE.md) | All functions, parameters, and examples |
+| [Async Operations](ASYNC.md) | Background workers, progress tracking, parallel cloning |
+| [Testing](TESTING.md) | Test infrastructure, pgTAP, Docker, CI/CD |
+| [Architecture](ARCHITECTURE.md) | Codebase structure, design decisions, PG version compatibility |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 
 ## Roadmap
