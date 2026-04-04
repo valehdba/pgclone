@@ -2,6 +2,18 @@
 
 Async functions run clone operations in PostgreSQL background workers, allowing you to continue using your session while cloning proceeds in the background.
 
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [Async Table Clone](#async-table-clone)
+- [Async Schema Clone](#async-schema-clone)
+- [Parallel Cloning](#parallel-cloning-v200)
+- [Progress Tracking](#progress-tracking)
+- [Progress Tracking View](#progress-tracking-view-v210)
+- [Job Management](#job-management)
+- [Conflict Resolution in Async Mode](#conflict-resolution-in-async-mode)
+- [How It Works](#how-it-works)
+
 ## Prerequisites
 
 Add to `postgresql.conf` and restart PostgreSQL:
