@@ -315,7 +315,7 @@ pgclone_connect_local(void)
     port = GetConfigOption("port", false, false);
 
     initStringInfo(&conninfo);
-    appendStringInfo(&conninfo, "dbname=%s port=%s",
+    appendStringInfo(&conninfo, "host=localhost dbname=%s port=%s",
                      quote_literal_cstr(dbname),
                      port ? port : "5432");
 
@@ -1735,7 +1735,7 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 
     /* ---- Step 1: Connect to local "postgres" DB ---- */
     initStringInfo(&buf);
-    appendStringInfo(&buf, "dbname=%s port=%s",
+    appendStringInfo(&buf, "host=localhost dbname=%s port=%s",
                      quote_literal_cstr("postgres"),
                      port ? port : "5432");
 
@@ -1805,7 +1805,7 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 
     /* ---- Step 3: Connect to target database ---- */
     resetStringInfo(&buf);
-    appendStringInfo(&buf, "dbname=%s port=%s",
+    appendStringInfo(&buf, "host=localhost dbname=%s port=%s",
                      quote_literal_cstr(target_dbname),
                      port ? port : "5432");
 
