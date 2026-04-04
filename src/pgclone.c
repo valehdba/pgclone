@@ -2323,6 +2323,10 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
             /* Mark as pool worker with sentinel value */
             worker_job->parallel_workers = -1;
 
+            /* Register in pool's worker tracking array */
+            pgclone_state->pool.worker_job_ids[pgclone_state->pool.num_workers] = worker_job_id;
+            pgclone_state->pool.num_workers++;
+
             strlcpy(worker_job->source_conninfo, source_conninfo,
                     sizeof(worker_job->source_conninfo));
             strlcpy(worker_job->schema_name, schema_name, NAMEDATALEN);

@@ -128,6 +128,10 @@ typedef struct PgclonePoolQueue
     char            database_name[NAMEDATALEN];
     char            username[NAMEDATALEN];
 
+    /* Track which job_ids belong to this pool's workers */
+    int             num_workers;
+    int             worker_job_ids[PGCLONE_MAX_JOBS];
+
     PgclonePoolTask tasks[PGCLONE_MAX_POOL_TASKS];
 } PgclonePoolQueue;
 

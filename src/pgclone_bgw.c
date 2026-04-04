@@ -986,18 +986,11 @@ pgclone_pool_worker_main(Datum main_arg)
             bool all_done = true;
             int i;
 
-            for (i = 0; i < PGCLONE_MAX_JOBS; i++)
+            for (i = 0; i < pgclone_state->pool.num_workers; i++)
             {
-                PgcloneJob *j = &pgclone_state->jobs[i];
-                if (j->status == PGCLONE_JOB_FREE)
-                    continue;
-                if (j->job_id == parent->job_id)
-                    continue;
-                /* Check if this is a pool worker for our parent */
-                if (j->op_type == PGCLONE_OP_TABLE &&
-                    j->parallel_workers == -1 &&
-                    (j->status == PGCLONE_JOB_RUNNING ||
-                     j->status == PGCLONE_JOB_PENDING))
+                PgcloneJob *w = find_job(pgclone_state->pool.worker_job_ids[i]);
+                if (w && (w->status == PGCLONE_JOB_RUNNING ||
+                          w->status == PGCLONE_JOB_PENDING))
                 {
                     all_done = false;
                     break;
