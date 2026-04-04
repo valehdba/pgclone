@@ -2,6 +2,23 @@
 
 Complete reference for all pgclone functions and options.
 
+## Table of Contents
+
+- [Connection String Format](#connection-string-format)
+- [Security Notes](#security-notes)
+- [Table Cloning](#table-cloning)
+- [Schema Cloning](#schema-cloning)
+- [Database Cloning](#database-cloning)
+- [Controlling Indexes, Constraints, and Triggers](#controlling-indexes-constraints-and-triggers)
+- [Selective Column Cloning](#selective-column-cloning-v110)
+- [Data Filtering with WHERE](#data-filtering-with-where-v110)
+- [Conflict Resolution](#conflict-resolution-v100)
+- [Materialized Views](#materialized-views-v120)
+- [Exclusion Constraints](#exclusion-constraints-v120)
+- [JSON Options Reference](#json-options-reference)
+- [Function Reference](#function-reference)
+- [Current Limitations](#current-limitations)
+
 ## Connection String Format
 
 All pgclone functions accept a `source_conninfo` parameter using standard PostgreSQL connection strings:
