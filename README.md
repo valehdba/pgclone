@@ -102,6 +102,11 @@ For async operations, add to `postgresql.conf` and restart:
 shared_preload_libraries = 'pgclone'
 ```
 
+For async operations on the destination DB, add to `pg_hba.conf` and reload:
+```
+host    all             all             127.0.0.1/32            trust
+```
+
 ## Documentation
 
 | Document | Description |
