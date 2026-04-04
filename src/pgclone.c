@@ -2003,6 +2003,7 @@ pgclone_table_async(PG_FUNCTION_ARGS)
     job->op_type = PGCLONE_OP_TABLE;
     job->database_oid = MyDatabaseId;
     strlcpy(job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
+    strlcpy(job->username, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
 
     strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
     strlcpy(job->schema_name, schema_name, NAMEDATALEN);
@@ -2179,6 +2180,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         job->op_type = PGCLONE_OP_SCHEMA;
         job->database_oid = MyDatabaseId;
         strlcpy(job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
+    strlcpy(job->username, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
         job->total_tables = ntables;
         job->parallel_workers = opts.parallel_workers;
         job->start_time = GetCurrentTimestamp();
@@ -2227,6 +2229,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
                 child_job->op_type = PGCLONE_OP_TABLE;
                 child_job->database_oid = MyDatabaseId;
                 strlcpy(child_job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
+                strlcpy(child_job->username, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
                 child_job->include_data = include_data;
                 child_job->include_indexes = opts.include_indexes;
                 child_job->include_constraints = opts.include_constraints;
@@ -2327,6 +2330,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         job->op_type = PGCLONE_OP_SCHEMA;
         job->database_oid = MyDatabaseId;
         strlcpy(job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
+    strlcpy(job->username, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
 
         strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
         strlcpy(job->schema_name, schema_name, NAMEDATALEN);

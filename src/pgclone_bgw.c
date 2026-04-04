@@ -117,14 +117,15 @@ pgclone_shmem_init(void)
  * Helper: connect to local database in bgworker context
  * --------------------------------------------------------------- */
 static PGconn *
-bgw_connect_local(const char *dbname, const char *port)
+bgw_connect_local(const char *dbname, const char *port, const char *username)
 {
     PGconn         *conn;
     StringInfoData  conninfo;
 
     initStringInfo(&conninfo);
-    appendStringInfo(&conninfo, "dbname='%s' port=%s",
-                     dbname, port ? port : "5432");
+    appendStringInfo(&conninfo, "host=localhost dbname='%s' port=%s user=%s",
+                     dbname, port ? port : "5432",
+                     username && username[0] ? username : "postgres");
 
     conn = PQconnectdb(conninfo.data);
     pfree(conninfo.data);
@@ -595,7 +596,7 @@ pgclone_bgw_main(Datum main_arg)
         goto cleanup;
     }
 
-    local_conn = bgw_connect_local(dbname, port);
+    local_conn = bgw_connect_local(dbname, port, job->username);
     if (!local_conn)
     {
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);

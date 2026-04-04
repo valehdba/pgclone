@@ -90,6 +90,7 @@ typedef struct PgcloneJob
     /* Database for loopback connection */
     Oid             database_oid;
     char            database_name[NAMEDATALEN];
+    char            username[NAMEDATALEN];
 } PgcloneJob;
 
 /* Shared memory state */
