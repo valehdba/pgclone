@@ -310,14 +310,17 @@ pgclone_connect_local(void)
     StringInfoData  conninfo;
     const char     *dbname;
     const char     *port;
+    const char     *username;
 
     dbname = get_database_name(MyDatabaseId);
     port = GetConfigOption("port", false, false);
+    username = GetUserNameFromId(GetUserId(), false);
 
     initStringInfo(&conninfo);
-    appendStringInfo(&conninfo, "host=localhost dbname=%s port=%s",
+    appendStringInfo(&conninfo, "host=localhost dbname=%s port=%s user=%s",
                      quote_literal_cstr(dbname),
-                     port ? port : "5432");
+                     port ? port : "5432",
+                     username);
 
     conn = PQconnectdb(conninfo.data);
     pfree(conninfo.data);
@@ -1700,6 +1703,7 @@ pgclone_database_create(PG_FUNCTION_ARGS)
     PGresult   *res;
     StringInfoData buf;
     const char *port;
+    const char *username;
 
     /* Optional arg 2: include_data */
     if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
@@ -1732,12 +1736,14 @@ pgclone_database_create(PG_FUNCTION_ARGS)
     }
 
     port = GetConfigOption("port", false, false);
+    username = GetUserNameFromId(GetUserId(), false);
 
     /* ---- Step 1: Connect to local "postgres" DB ---- */
     initStringInfo(&buf);
-    appendStringInfo(&buf, "host=localhost dbname=%s port=%s",
+    appendStringInfo(&buf, "host=localhost dbname=%s port=%s user=%s",
                      quote_literal_cstr("postgres"),
-                     port ? port : "5432");
+                     port ? port : "5432",
+                     username);
 
     admin_conn = PQconnectdb(buf.data);
     if (PQstatus(admin_conn) != CONNECTION_OK)
@@ -1805,9 +1811,10 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 
     /* ---- Step 3: Connect to target database ---- */
     resetStringInfo(&buf);
-    appendStringInfo(&buf, "host=localhost dbname=%s port=%s",
+    appendStringInfo(&buf, "host=localhost dbname=%s port=%s user=%s",
                      quote_literal_cstr(target_dbname),
-                     port ? port : "5432");
+                     port ? port : "5432",
+                     username);
 
     target_conn = PQconnectdb(buf.data);
     if (PQstatus(target_conn) != CONNECTION_OK)
