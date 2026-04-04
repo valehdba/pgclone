@@ -123,7 +123,7 @@ bgw_connect_local(const char *dbname, const char *port, const char *username)
     StringInfoData  conninfo;
 
     initStringInfo(&conninfo);
-    appendStringInfo(&conninfo, "host=localhost dbname='%s' port=%s user=%s",
+    appendStringInfo(&conninfo, "host=127.0.0.1 dbname='%s' port=%s user=%s",
                      dbname, port ? port : "5432",
                      username && username[0] ? username : "postgres");
 
