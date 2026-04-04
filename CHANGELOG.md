@@ -2,6 +2,16 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [2.1.4]
+
+### Changed
+- Local loopback connections now use Unix domain sockets (from `unix_socket_directories` GUC) instead of TCP `127.0.0.1`
+- `pg_hba.conf` `trust` entry for `127.0.0.1` is no longer required for async operations — default `local all all peer` is sufficient
+- Falls back to TCP `127.0.0.1` automatically if Unix sockets are unavailable
+
+### Fixed
+- Security: removed unnecessary `trust` authentication requirement for background worker connections
+
 ## [2.1.3]
 
 ### Fixed
