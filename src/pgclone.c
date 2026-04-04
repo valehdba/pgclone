@@ -301,6 +301,44 @@ pgclone_exec_conn(PGconn *conn, const char *query)
 }
 
 /* ---------------------------------------------------------------
+ * Internal helper: append host parameter to conninfo.
+ * Prefers Unix domain socket (from unix_socket_directories GUC)
+ * over TCP 127.0.0.1. Unix sockets use 'local' pg_hba.conf lines
+ * with peer auth, eliminating the need for trust on 127.0.0.1.
+ * Falls back to TCP if no socket directory is configured.
+ * --------------------------------------------------------------- */
+static void
+pgclone_append_local_host(StringInfo conninfo)
+{
+    const char *socket_dir;
+
+    socket_dir = GetConfigOption("unix_socket_directories", false, false);
+
+    if (socket_dir && socket_dir[0])
+    {
+        /* Take only the first directory if comma-separated list */
+        char *first_dir = pstrdup(socket_dir);
+        char *comma = strchr(first_dir, ',');
+        if (comma)
+            *comma = '\0';
+
+        /* Trim trailing whitespace */
+        {
+            int len = strlen(first_dir);
+            while (len > 0 && first_dir[len - 1] == ' ')
+                first_dir[--len] = '\0';
+        }
+
+        appendStringInfo(conninfo, "host=%s", first_dir);
+        pfree(first_dir);
+    }
+    else
+    {
+        appendStringInfoString(conninfo, "host=127.0.0.1");
+    }
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: get a libpq connection to the LOCAL database.
  * --------------------------------------------------------------- */
 static PGconn *
@@ -317,7 +355,8 @@ pgclone_connect_local(void)
     username = GetUserNameFromId(GetUserId(), false);
 
     initStringInfo(&conninfo);
-    appendStringInfo(&conninfo, "host=127.0.0.1 dbname=%s port=%s user=%s",
+    pgclone_append_local_host(&conninfo);
+    appendStringInfo(&conninfo, " dbname=%s port=%s user=%s",
                      quote_literal_cstr(dbname),
                      port ? port : "5432",
                      username);
@@ -1740,7 +1779,8 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 
     /* ---- Step 1: Connect to local "postgres" DB ---- */
     initStringInfo(&buf);
-    appendStringInfo(&buf, "host=127.0.0.1 dbname=%s port=%s user=%s",
+    pgclone_append_local_host(&buf);
+    appendStringInfo(&buf, " dbname=%s port=%s user=%s",
                      quote_literal_cstr("postgres"),
                      port ? port : "5432",
                      username);
@@ -1811,7 +1851,8 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 
     /* ---- Step 3: Connect to target database ---- */
     resetStringInfo(&buf);
-    appendStringInfo(&buf, "host=127.0.0.1 dbname=%s port=%s user=%s",
+    pgclone_append_local_host(&buf);
+    appendStringInfo(&buf, " dbname=%s port=%s user=%s",
                      quote_literal_cstr(target_dbname),
                      port ? port : "5432",
                      username);

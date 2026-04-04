@@ -114,18 +114,46 @@ pgclone_shmem_init(void)
 /* find_job and find_free_slot are defined as static inline in pgclone_bgw.h */
 
 /* ---------------------------------------------------------------
- * Helper: connect to local database in bgworker context
+ * Helper: connect to local database in bgworker context.
+ * Prefers Unix domain socket over TCP 127.0.0.1.
  * --------------------------------------------------------------- */
 static PGconn *
 bgw_connect_local(const char *dbname, const char *port, const char *username)
 {
     PGconn         *conn;
     StringInfoData  conninfo;
+    const char     *socket_dir;
+
+    socket_dir = GetConfigOption("unix_socket_directories", false, false);
 
     initStringInfo(&conninfo);
-    appendStringInfo(&conninfo, "host=127.0.0.1 dbname='%s' port=%s user=%s",
-                     dbname, port ? port : "5432",
-                     username && username[0] ? username : "postgres");
+
+    if (socket_dir && socket_dir[0])
+    {
+        char *first_dir = pstrdup(socket_dir);
+        char *comma = strchr(first_dir, ',');
+        if (comma)
+            *comma = '\0';
+
+        /* Trim trailing whitespace */
+        {
+            int len = strlen(first_dir);
+            while (len > 0 && first_dir[len - 1] == ' ')
+                first_dir[--len] = '\0';
+        }
+
+        appendStringInfo(&conninfo, "host=%s dbname='%s' port=%s user=%s",
+                         first_dir,
+                         dbname, port ? port : "5432",
+                         username && username[0] ? username : "postgres");
+        pfree(first_dir);
+    }
+    else
+    {
+        appendStringInfo(&conninfo, "host=127.0.0.1 dbname='%s' port=%s user=%s",
+                         dbname, port ? port : "5432",
+                         username && username[0] ? username : "postgres");
+    }
 
     conn = PQconnectdb(conninfo.data);
     pfree(conninfo.data);
