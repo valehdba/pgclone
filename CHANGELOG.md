@@ -2,6 +2,21 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [2.1.3] — 2026-04
+
+### Fixed
+- Async bgworker: COPY pipeline error handling — failures now logged with `PQerrorMessage`, source COPY result consumed on error path to prevent connection leak
+- Async bgworker: `WaitForBackgroundWorkerStartup` added to all async functions — jobs no longer stuck in 'pending' state
+- `pgclone_schema_async` parallel mode: fixed hardcoded `jobs[0]` write that corrupted slot 0 in shared memory
+- `pgclone_schema_async` parallel mode: parent job now correctly transitions to COMPLETED after child workers finish
+
+### Added
+- `pgclone_clear_jobs()` function to free completed/cancelled job slots from shared memory
+- Async test suite (`test/test_async.sh`) covering `pgclone_table_async`, `pgclone_schema_async`, `pgclone_progress`, `pgclone_jobs_view`, `pgclone_clear_jobs`
+- `CONTRIBUTING.md` — development setup, code guidelines, PR process
+- `SECURITY.md` — vulnerability reporting, security considerations
+- Documentation restructured: `docs/USAGE.md`, `docs/ASYNC.md`, `docs/TESTING.md`, `docs/ARCHITECTURE.md`, `CHANGELOG.md`
+
 ## [2.1.2] — 2026-03
 
 ### Added

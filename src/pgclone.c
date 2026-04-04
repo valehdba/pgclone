@@ -1897,7 +1897,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.2"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.3"));
 }
 
 /* ===============================================================
