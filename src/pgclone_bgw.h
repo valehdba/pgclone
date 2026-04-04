@@ -15,6 +15,9 @@
 /* Maximum concurrent clone jobs */
 #define PGCLONE_MAX_JOBS      16
 
+/* Maximum tables in pool task queue */
+#define PGCLONE_MAX_POOL_TASKS  512
+
 /* Job status enum */
 typedef enum PgcloneJobStatus
 {
@@ -93,12 +96,48 @@ typedef struct PgcloneJob
     char            username[NAMEDATALEN];
 } PgcloneJob;
 
+/* Single task in the worker pool queue */
+typedef struct PgclonePoolTask
+{
+    char            table_name[NAMEDATALEN];
+    int             status;             /* 0=pending, 1=in_progress, 2=done, 3=failed */
+    int             claimed_by_job_id;  /* job_id of the worker that claimed this task */
+} PgclonePoolTask;
+
+/* Worker pool queue in shared memory */
+typedef struct PgclonePoolQueue
+{
+    bool            active;             /* true when a pool operation is running */
+    int             parent_job_id;
+    int             num_tasks;
+    int             next_task_idx;      /* next unclaimed task index */
+    int             completed_count;
+    int             failed_count;
+
+    /* Shared parameters for all pool workers */
+    char            source_conninfo[1024];
+    char            schema_name[NAMEDATALEN];
+    bool            include_data;
+    bool            include_indexes;
+    bool            include_constraints;
+    bool            include_triggers;
+    PgcloneConflictStrategy conflict_strategy;
+
+    /* Database context for workers */
+    Oid             database_oid;
+    char            database_name[NAMEDATALEN];
+    char            username[NAMEDATALEN];
+
+    PgclonePoolTask tasks[PGCLONE_MAX_POOL_TASKS];
+} PgclonePoolQueue;
+
 /* Shared memory state */
 typedef struct PgcloneSharedState
 {
     LWLock         *lock;
     int             next_job_id;
     PgcloneJob     jobs[PGCLONE_MAX_JOBS];
+    PgclonePoolQueue pool;
 } PgcloneSharedState;
 
 /* Global pointer to shared state */
@@ -107,8 +146,10 @@ extern PgcloneSharedState *pgclone_state;
 /* Function declarations */
 #if defined(__GNUC__) || defined(__clang__)
 extern __attribute__((visibility("default"))) void pgclone_bgw_main(Datum main_arg);
+extern __attribute__((visibility("default"))) void pgclone_pool_worker_main(Datum main_arg);
 #else
 extern PGDLLEXPORT void pgclone_bgw_main(Datum main_arg);
+extern PGDLLEXPORT void pgclone_pool_worker_main(Datum main_arg);
 #endif
 extern Size pgclone_shmem_size(void);
 extern void pgclone_shmem_init(void);

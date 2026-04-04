@@ -228,6 +228,61 @@ REMAINING=$(echo "$REMAINING" | tr -d '[:space:]')
 run_test "All completed jobs cleared from view" "[ '$REMAINING' = '0' ]"
 
 # ============================================================
+# TEST 8: Worker Pool — parallel schema clone with pool
+# ============================================================
+echo ""
+echo "---- TEST 8: Worker Pool (parallel schema clone) ----"
+
+# Drop test_schema so pool clone has a clean target
+psql -U postgres -d target_db -c "DROP SCHEMA IF EXISTS test_schema CASCADE;" 2>/dev/null || true
+
+JOB_ID8=$(psql -U postgres -d target_db -tAc "
+    SELECT pgclone_schema_async(
+        '${SOURCE_CONNINFO}',
+        'test_schema', true,
+        '{\"parallel\": 2}'
+    );
+")
+
+echo "  Pool parent Job ID: $JOB_ID8"
+
+run_test "Pool parent job_id returned" "[ -n '$JOB_ID8' ] && [ '$JOB_ID8' -gt 0 ]"
+
+# Wait for completion (pool workers + parent finalization)
+for i in $(seq 1 60); do
+    STATUS8=$(psql -U postgres -d target_db -tAc "
+        SELECT status FROM pgclone_jobs_view WHERE job_id = $JOB_ID8;
+    " 2>/dev/null || echo "unknown")
+    STATUS8=$(echo "$STATUS8" | tr -d '[:space:]')
+    if [ "$STATUS8" = "completed" ] || [ "$STATUS8" = "failed" ]; then
+        break
+    fi
+    sleep 1
+done
+
+run_test "Pool parent job completed" "[ '$STATUS8' = 'completed' ]"
+
+# Verify tables were cloned by pool workers
+POOL_CUST=$(psql -U postgres -d target_db -tAc "SELECT count(*)::integer FROM test_schema.customers;" 2>/dev/null || echo "0")
+POOL_CUST=$(echo "$POOL_CUST" | tr -d '[:space:]')
+run_test "Pool: test_schema.customers has 10 rows" "[ '$POOL_CUST' = '10' ]"
+
+POOL_ORD=$(psql -U postgres -d target_db -tAc "SELECT count(*)::integer FROM test_schema.orders;" 2>/dev/null || echo "0")
+POOL_ORD=$(echo "$POOL_ORD" | tr -d '[:space:]')
+run_test "Pool: test_schema.orders has 10 rows" "[ '$POOL_ORD' = '10' ]"
+
+# Verify pool workers show as separate jobs (type = table, parallel_workers = -1 sentinel)
+POOL_WORKERS=$(psql -U postgres -d target_db -tAc "
+    SELECT count(*) FROM pgclone_jobs_view
+    WHERE job_id > $JOB_ID8 AND operation = 'table';
+" 2>/dev/null || echo "0")
+POOL_WORKERS=$(echo "$POOL_WORKERS" | tr -d '[:space:]')
+run_test "Pool workers visible in jobs_view" "[ '$POOL_WORKERS' -ge 1 ]"
+
+# Clean up for final test
+psql -U postgres -d target_db -c "SELECT pgclone_clear_jobs();" 2>/dev/null || true
+
+# ============================================================
 # RESULTS
 # ============================================================
 echo ""

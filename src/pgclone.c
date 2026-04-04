@@ -1945,7 +1945,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.1.3"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.2.0"));
 }
 
 /* ===============================================================
@@ -2155,22 +2155,35 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
     if (opts.parallel_workers > 1)
     {
         /*
-         * PARALLEL MODE: Get table list, then launch N workers
-         * each handling a subset of tables.
+         * WORKER POOL MODE: Populate a shared task queue with the table
+         * list, then launch exactly N pool workers. Each worker grabs
+         * tasks from the queue until exhausted — no per-table bgworker.
          */
         PGconn     *source_conn;
         PGresult   *table_res;
         StringInfoData qbuf;
-        int         ntables, tables_per_worker, wi;
+        int         ntables, wi;
         int         parent_job_id;
         int         workers_launched = 0;
+        int         num_workers;
 
-        /* First create schema + sequences + functions via loopback */
+        /* Ensure no other pool operation is running */
+        LWLockAcquire(pgclone_state->lock, LW_SHARED);
+        if (pgclone_state->pool.active)
+        {
+            LWLockRelease(pgclone_state->lock);
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_IN_USE),
+                     errmsg("pgclone: another pool operation is already running"),
+                     errhint("Wait for the current parallel clone to finish or cancel it")));
+        }
+        LWLockRelease(pgclone_state->lock);
+
+        /* Create schema + sequences via loopback */
         {
             PGconn     *local_conn = pgclone_connect_local();
-            PGresult   *func_res;
-            StringInfoData fbuf;
 
+            StringInfoData fbuf;
             initStringInfo(&fbuf);
             appendStringInfo(&fbuf, "CREATE SCHEMA IF NOT EXISTS %s",
                              quote_identifier(schema_name));
@@ -2202,7 +2215,17 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
             PG_RETURN_INT32(0);
         }
 
-        /* Allocate parent job for tracking */
+        if (ntables > PGCLONE_MAX_POOL_TASKS)
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("pgclone: schema has %d tables, max pool queue is %d",
+                            ntables, PGCLONE_MAX_POOL_TASKS)));
+
+        /* Cap workers to table count */
+        num_workers = (opts.parallel_workers > ntables)
+            ? ntables : opts.parallel_workers;
+
+        /* Populate pool queue and parent job under a single lock */
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
 
         job = find_free_slot();
@@ -2221,128 +2244,146 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         job->op_type = PGCLONE_OP_SCHEMA;
         job->database_oid = MyDatabaseId;
         strlcpy(job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
-    strlcpy(job->username, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
+        strlcpy(job->username, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
         job->total_tables = ntables;
-        job->parallel_workers = opts.parallel_workers;
+        job->parallel_workers = num_workers;
         job->start_time = GetCurrentTimestamp();
         strlcpy(job->source_conninfo, source_conninfo, sizeof(job->source_conninfo));
         strlcpy(job->schema_name, schema_name, NAMEDATALEN);
-        strlcpy(job->current_phase, "launching parallel workers", 64);
+        strlcpy(job->current_phase, "launching worker pool", 64);
 
-        LWLockRelease(pgclone_state->lock);
+        /* Fill the pool queue */
+        memset(&pgclone_state->pool, 0, sizeof(PgclonePoolQueue));
+        pgclone_state->pool.active = true;
+        pgclone_state->pool.parent_job_id = parent_job_id;
+        pgclone_state->pool.num_tasks = ntables;
+        pgclone_state->pool.next_task_idx = 0;
+        pgclone_state->pool.completed_count = 0;
+        pgclone_state->pool.failed_count = 0;
 
-        /* Launch workers — each gets a subset of tables */
-        tables_per_worker = (ntables + opts.parallel_workers - 1) / opts.parallel_workers;
+        strlcpy(pgclone_state->pool.source_conninfo, source_conninfo,
+                sizeof(pgclone_state->pool.source_conninfo));
+        strlcpy(pgclone_state->pool.schema_name, schema_name, NAMEDATALEN);
+        pgclone_state->pool.include_data = include_data;
+        pgclone_state->pool.include_indexes = opts.include_indexes;
+        pgclone_state->pool.include_constraints = opts.include_constraints;
+        pgclone_state->pool.include_triggers = opts.include_triggers;
+        pgclone_state->pool.conflict_strategy = conflict;
+        pgclone_state->pool.database_oid = MyDatabaseId;
+        strlcpy(pgclone_state->pool.database_name,
+                get_database_name(MyDatabaseId), NAMEDATALEN);
+        strlcpy(pgclone_state->pool.username,
+                GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
 
-        for (wi = 0; wi < opts.parallel_workers && wi * tables_per_worker < ntables; wi++)
         {
-            int start_idx = wi * tables_per_worker;
-            int end_idx = start_idx + tables_per_worker;
             int ti;
-            BackgroundWorker worker;
-            BackgroundWorkerHandle *handle;
-            PgcloneJob *child_job;
-            int child_job_id;
-
-            if (end_idx > ntables)
-                end_idx = ntables;
-
-            /* For each table in this worker's range, create a table-level job */
-            for (ti = start_idx; ti < end_idx; ti++)
+            for (ti = 0; ti < ntables; ti++)
             {
-                const char *tname = PQgetvalue(table_res, ti, 0);
-
-                LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
-
-                child_job = find_free_slot();
-                if (!child_job)
-                {
-                    LWLockRelease(pgclone_state->lock);
-                    ereport(WARNING,
-                            (errmsg("pgclone: no free job slot for table %s, skipping", tname)));
-                    continue;
-                }
-
-                child_job_id = pgclone_state->next_job_id++;
-                memset(child_job, 0, sizeof(PgcloneJob));
-                child_job->job_id = child_job_id;
-                child_job->status = PGCLONE_JOB_PENDING;
-                child_job->op_type = PGCLONE_OP_TABLE;
-                child_job->database_oid = MyDatabaseId;
-                strlcpy(child_job->database_name, get_database_name(MyDatabaseId), NAMEDATALEN);
-                strlcpy(child_job->username, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
-                child_job->include_data = include_data;
-                child_job->include_indexes = opts.include_indexes;
-                child_job->include_constraints = opts.include_constraints;
-                child_job->include_triggers = opts.include_triggers;
-                child_job->conflict_strategy = conflict;
-                child_job->resumable = true;
-
-                strlcpy(child_job->source_conninfo, source_conninfo, sizeof(child_job->source_conninfo));
-                strlcpy(child_job->schema_name, schema_name, NAMEDATALEN);
-                strlcpy(child_job->table_name, tname, NAMEDATALEN);
-                strlcpy(child_job->target_name, tname, NAMEDATALEN);
-
-                LWLockRelease(pgclone_state->lock);
-
-                /* Launch bgworker for this table */
-                memset(&worker, 0, sizeof(BackgroundWorker));
-                snprintf(worker.bgw_name, BGW_MAXLEN,
-                         "pgclone: %s.%s (parallel job %d, worker %d)",
-                         schema_name, tname, parent_job_id, wi);
-                snprintf(worker.bgw_type, BGW_MAXLEN, "pgclone worker");
-                worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-                worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-                worker.bgw_restart_time = BGW_NEVER_RESTART;
-                snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgclone");
-                snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgclone_bgw_main");
-                worker.bgw_main_arg = Int32GetDatum(child_job_id);
-                worker.bgw_notify_pid = MyProcPid;
-
-                if (RegisterDynamicBackgroundWorker(&worker, &handle))
-                {
-                    BgwHandleStatus wstatus;
-                    pid_t           wpid;
-                    wstatus = WaitForBackgroundWorkerStartup(handle, &wpid);
-                    if (wstatus == BGWH_STARTED)
-                        workers_launched++;
-                    else
-                        ereport(WARNING,
-                                (errmsg("pgclone: worker for table %s failed to start", tname)));
-                }
-                else
-                    ereport(WARNING,
-                            (errmsg("pgclone: could not launch worker for table %s", tname)));
+                strlcpy(pgclone_state->pool.tasks[ti].table_name,
+                        PQgetvalue(table_res, ti, 0), NAMEDATALEN);
+                pgclone_state->pool.tasks[ti].status = 0; /* pending */
+                pgclone_state->pool.tasks[ti].claimed_by_job_id = 0;
             }
         }
+
+        LWLockRelease(pgclone_state->lock);
 
         PQclear(table_res);
         pfree(qbuf.data);
 
-        /* Update parent job — track workers launched and mark completed */
+        /* Launch exactly N pool workers */
+        for (wi = 0; wi < num_workers; wi++)
+        {
+            BackgroundWorker worker;
+            BackgroundWorkerHandle *handle;
+            PgcloneJob *worker_job;
+            int worker_job_id;
+
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+
+            worker_job = find_free_slot();
+            if (!worker_job)
+            {
+                LWLockRelease(pgclone_state->lock);
+                ereport(WARNING,
+                        (errmsg("pgclone: no free job slot for pool worker %d", wi)));
+                break;
+            }
+
+            worker_job_id = pgclone_state->next_job_id++;
+            memset(worker_job, 0, sizeof(PgcloneJob));
+            worker_job->job_id = worker_job_id;
+            worker_job->status = PGCLONE_JOB_PENDING;
+            worker_job->op_type = PGCLONE_OP_TABLE;
+            worker_job->database_oid = MyDatabaseId;
+            strlcpy(worker_job->database_name,
+                    get_database_name(MyDatabaseId), NAMEDATALEN);
+            strlcpy(worker_job->username,
+                    GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
+            /* Mark as pool worker with sentinel value */
+            worker_job->parallel_workers = -1;
+
+            strlcpy(worker_job->source_conninfo, source_conninfo,
+                    sizeof(worker_job->source_conninfo));
+            strlcpy(worker_job->schema_name, schema_name, NAMEDATALEN);
+
+            worker_job->include_data = include_data;
+            worker_job->include_indexes = opts.include_indexes;
+            worker_job->include_constraints = opts.include_constraints;
+            worker_job->include_triggers = opts.include_triggers;
+            worker_job->conflict_strategy = conflict;
+
+            LWLockRelease(pgclone_state->lock);
+
+            memset(&worker, 0, sizeof(BackgroundWorker));
+            snprintf(worker.bgw_name, BGW_MAXLEN,
+                     "pgclone: pool worker %d/%d (parent %d)",
+                     wi + 1, num_workers, parent_job_id);
+            snprintf(worker.bgw_type, BGW_MAXLEN, "pgclone pool worker");
+            worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+            worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+            worker.bgw_restart_time = BGW_NEVER_RESTART;
+            snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgclone");
+            snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgclone_pool_worker_main");
+            worker.bgw_main_arg = Int32GetDatum(worker_job_id);
+            worker.bgw_notify_pid = MyProcPid;
+
+            if (RegisterDynamicBackgroundWorker(&worker, &handle))
+            {
+                BgwHandleStatus wstatus;
+                pid_t           wpid;
+                wstatus = WaitForBackgroundWorkerStartup(handle, &wpid);
+                if (wstatus == BGWH_STARTED)
+                    workers_launched++;
+                else
+                    ereport(WARNING,
+                            (errmsg("pgclone: pool worker %d failed to start", wi)));
+            }
+            else
+                ereport(WARNING,
+                        (errmsg("pgclone: could not register pool worker %d", wi)));
+        }
+
+        /* Update parent job with worker count */
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
         {
             PgcloneJob *pj = find_job(parent_job_id);
             if (pj)
             {
                 snprintf(pj->current_phase, 64,
-                         "%d parallel workers for %d tables", workers_launched, ntables);
-                pj->total_tables = ntables;
-                /*
-                 * Parent job transitions to COMPLETED since all child workers
-                 * are launched. Individual child jobs track their own status.
-                 */
-                if (workers_launched > 0)
-                    pj->status = PGCLONE_JOB_COMPLETED;
-                else
+                         "%d pool workers for %d tables", workers_launched, ntables);
+                if (workers_launched == 0)
+                {
                     pj->status = PGCLONE_JOB_FAILED;
-                pj->end_time = GetCurrentTimestamp();
+                    pj->end_time = GetCurrentTimestamp();
+                    pgclone_state->pool.active = false;
+                }
             }
         }
         LWLockRelease(pgclone_state->lock);
 
         ereport(NOTICE,
-                (errmsg("pgclone: launched %d parallel workers for %d tables in schema %s (parent job %d)",
+                (errmsg("pgclone: launched %d pool workers for %d tables in schema %s (job %d)",
                         workers_launched, ntables, schema_name, parent_job_id)));
 
         PG_RETURN_INT32(parent_job_id);

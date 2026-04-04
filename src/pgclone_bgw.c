@@ -787,3 +787,242 @@ cleanup:
 
     proc_exit(0);
 }
+
+/* ===============================================================
+ * Pool worker main function
+ *
+ * Each pool worker grabs tasks from the shared queue one at a time.
+ * The job_id passed via bgw_main_arg is this worker's own tracking
+ * job in the jobs[] array; the pool queue holds the task list.
+ * =============================================================== */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("default")))
+#endif
+void
+pgclone_pool_worker_main(Datum main_arg)
+{
+    int             job_id = DatumGetInt32(main_arg);
+    PgcloneJob     *job;
+    PGconn         *source_conn = NULL;
+    PGconn         *local_conn = NULL;
+    const char     *port;
+    const char     *dbname;
+
+    /* Signal handlers */
+#if PG_VERSION_NUM >= 170000
+    pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+#else
+    pqsignal(SIGTERM, die);
+#endif
+    BackgroundWorkerUnblockSignals();
+
+    if (!pgclone_state)
+    {
+        elog(ERROR, "pgclone pool worker: shared memory not initialized");
+        return;
+    }
+
+    /* Find our job and mark as running */
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+    job = find_job(job_id);
+    if (!job || job->status != PGCLONE_JOB_PENDING)
+    {
+        LWLockRelease(pgclone_state->lock);
+        elog(ERROR, "pgclone pool worker: job %d not found or not pending", job_id);
+        return;
+    }
+    job->status = PGCLONE_JOB_RUNNING;
+    job->worker_pid = MyProcPid;
+    job->start_time = GetCurrentTimestamp();
+    LWLockRelease(pgclone_state->lock);
+
+    /* Initialize database connection */
+    BackgroundWorkerInitializeConnectionByOid(job->database_oid, InvalidOid, 0);
+
+    dbname = job->database_name;
+    port = GetConfigOption("port", false, false);
+
+    /* Connect to source and local once — reuse for all tasks */
+    source_conn = PQconnectdb(pgclone_state->pool.source_conninfo);
+    if (PQstatus(source_conn) != CONNECTION_OK)
+    {
+        elog(WARNING, "pgclone pool worker: source connection failed: %s",
+             PQerrorMessage(source_conn));
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        job->status = PGCLONE_JOB_FAILED;
+        strlcpy(job->error_message, "could not connect to source", 256);
+        job->end_time = GetCurrentTimestamp();
+        LWLockRelease(pgclone_state->lock);
+        goto pool_cleanup;
+    }
+
+    local_conn = bgw_connect_local(dbname, port, job->username);
+    if (!local_conn)
+    {
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        job->status = PGCLONE_JOB_FAILED;
+        strlcpy(job->error_message, "could not connect to local database", 256);
+        job->end_time = GetCurrentTimestamp();
+        LWLockRelease(pgclone_state->lock);
+        goto pool_cleanup;
+    }
+
+    /* Main loop: grab tasks from pool queue until exhausted */
+    for (;;)
+    {
+        int             task_idx;
+        char            table_name[NAMEDATALEN];
+
+        CHECK_FOR_INTERRUPTS();
+
+        /* Check for cancellation */
+        LWLockAcquire(pgclone_state->lock, LW_SHARED);
+        if (job->status == PGCLONE_JOB_CANCELLED)
+        {
+            LWLockRelease(pgclone_state->lock);
+            break;
+        }
+        LWLockRelease(pgclone_state->lock);
+
+        /* Atomically claim next task */
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+
+        if (pgclone_state->pool.next_task_idx >= pgclone_state->pool.num_tasks)
+        {
+            /* No more tasks */
+            LWLockRelease(pgclone_state->lock);
+            break;
+        }
+
+        task_idx = pgclone_state->pool.next_task_idx++;
+        pgclone_state->pool.tasks[task_idx].status = 1; /* in_progress */
+        pgclone_state->pool.tasks[task_idx].claimed_by_job_id = job_id;
+        strlcpy(table_name, pgclone_state->pool.tasks[task_idx].table_name, NAMEDATALEN);
+
+        /* Update worker job progress */
+        strlcpy(job->current_table, table_name, NAMEDATALEN);
+        strlcpy(job->current_phase, "cloning table", 64);
+
+        LWLockRelease(pgclone_state->lock);
+
+        elog(DEBUG1, "pgclone pool worker %d: claiming task %d (%s)",
+             job_id, task_idx, table_name);
+
+        /* Populate job fields needed by bgw_clone_one_table */
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        strlcpy(job->table_name, table_name, NAMEDATALEN);
+        strlcpy(job->target_name, table_name, NAMEDATALEN);
+        strlcpy(job->source_conninfo,
+                pgclone_state->pool.source_conninfo,
+                sizeof(job->source_conninfo));
+        strlcpy(job->schema_name,
+                pgclone_state->pool.schema_name, NAMEDATALEN);
+        job->include_data = pgclone_state->pool.include_data;
+        job->include_indexes = pgclone_state->pool.include_indexes;
+        job->include_constraints = pgclone_state->pool.include_constraints;
+        job->include_triggers = pgclone_state->pool.include_triggers;
+        job->conflict_strategy = pgclone_state->pool.conflict_strategy;
+        job->copied_rows = 0;
+        LWLockRelease(pgclone_state->lock);
+
+        /* Clone the table */
+        if (bgw_clone_one_table(source_conn, local_conn, job, table_name))
+        {
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            pgclone_state->pool.tasks[task_idx].status = 2; /* done */
+            pgclone_state->pool.completed_count++;
+            job->completed_tables++;
+
+            /* Update parent job aggregate progress */
+            {
+                PgcloneJob *parent = find_job(pgclone_state->pool.parent_job_id);
+                if (parent)
+                {
+                    parent->completed_tables = pgclone_state->pool.completed_count;
+                    snprintf(parent->current_phase, 64, "%d/%d tables done",
+                             pgclone_state->pool.completed_count,
+                             pgclone_state->pool.num_tasks);
+                }
+            }
+            LWLockRelease(pgclone_state->lock);
+        }
+        else
+        {
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            pgclone_state->pool.tasks[task_idx].status = 3; /* failed */
+            pgclone_state->pool.failed_count++;
+
+            /* Still update parent progress */
+            {
+                PgcloneJob *parent = find_job(pgclone_state->pool.parent_job_id);
+                if (parent)
+                {
+                    parent->completed_tables = pgclone_state->pool.completed_count;
+                    snprintf(parent->current_phase, 64, "%d/%d tables done (%d failed)",
+                             pgclone_state->pool.completed_count,
+                             pgclone_state->pool.num_tasks,
+                             pgclone_state->pool.failed_count);
+                }
+            }
+            LWLockRelease(pgclone_state->lock);
+
+            elog(WARNING, "pgclone pool worker %d: failed to clone table %s, continuing...",
+                 job_id, table_name);
+        }
+    }
+
+    /* Mark this worker job as completed */
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+    if (job->status == PGCLONE_JOB_RUNNING)
+        job->status = PGCLONE_JOB_COMPLETED;
+    job->end_time = GetCurrentTimestamp();
+    strlcpy(job->current_phase, "completed", 64);
+
+    /* Check if all pool workers are done — if so, finalize parent */
+    {
+        PgcloneJob *parent = find_job(pgclone_state->pool.parent_job_id);
+        if (parent && parent->status == PGCLONE_JOB_RUNNING)
+        {
+            bool all_done = true;
+            int i;
+
+            for (i = 0; i < PGCLONE_MAX_JOBS; i++)
+            {
+                PgcloneJob *j = &pgclone_state->jobs[i];
+                if (j->status == PGCLONE_JOB_FREE)
+                    continue;
+                if (j->job_id == parent->job_id)
+                    continue;
+                /* Check if this is a pool worker for our parent */
+                if (j->op_type == PGCLONE_OP_TABLE &&
+                    j->parallel_workers == -1 &&
+                    (j->status == PGCLONE_JOB_RUNNING ||
+                     j->status == PGCLONE_JOB_PENDING))
+                {
+                    all_done = false;
+                    break;
+                }
+            }
+
+            if (all_done)
+            {
+                parent->status = (pgclone_state->pool.failed_count > 0)
+                    ? PGCLONE_JOB_FAILED : PGCLONE_JOB_COMPLETED;
+                parent->end_time = GetCurrentTimestamp();
+                snprintf(parent->current_phase, 64, "completed (%d/%d ok)",
+                         pgclone_state->pool.completed_count,
+                         pgclone_state->pool.num_tasks);
+                pgclone_state->pool.active = false;
+            }
+        }
+    }
+    LWLockRelease(pgclone_state->lock);
+
+pool_cleanup:
+    if (source_conn)
+        PQfinish(source_conn);
+    if (local_conn)
+        PQfinish(local_conn);
+
+    proc_exit(0);
+}

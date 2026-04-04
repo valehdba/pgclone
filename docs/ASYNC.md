@@ -53,12 +53,12 @@ SELECT pgclone_schema_async(
 
 ---
 
-## Parallel Cloning (v2.0.0)
+## Parallel Cloning (v2.2.0 — Worker Pool)
 
-Clone tables in parallel using multiple background workers. Each table gets its own background worker:
+Clone tables in parallel using a fixed-size worker pool. Instead of spawning one background worker per table (which could exhaust `max_worker_processes`), pgclone launches exactly N workers that pull tasks from a shared queue:
 
 ```sql
--- Clone schema with 4 parallel workers
+-- Clone schema with 4 pool workers
 SELECT pgclone_schema_async(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
@@ -72,6 +72,30 @@ SELECT pgclone_schema_async(
     '{"parallel": 8, "conflict": "replace", "triggers": false}'
 );
 ```
+
+### How the Worker Pool Works
+
+1. The parent process queries the source for the table list and populates a shared-memory task queue.
+2. Exactly N background workers are launched (where N = `"parallel"` value, capped at table count).
+3. Each worker grabs the next unclaimed table from the queue, clones it, then grabs the next — until the queue is empty.
+4. Faster workers automatically handle more tables (dynamic load balancing).
+5. The parent job tracks aggregate progress across all workers.
+
+### Benefits over v2.0.0
+
+| Aspect | v2.0.0 (per-table workers) | v2.2.0 (worker pool) |
+|--------|---------------------------|---------------------|
+| 100 tables, parallel=4 | 100 bgworkers | **4 bgworkers** |
+| DB connections | 200 (100×2) | **8** (4×2) |
+| Job slots used | 101 (1 parent + 100 child) | **5** (1 parent + 4 pool) |
+| max_worker_processes needed | ≥100 | **≥4** |
+| Load balancing | Static (pre-assigned) | **Dynamic** (work-stealing) |
+
+### Limitations
+
+- Maximum 512 tables per pool operation (`PGCLONE_MAX_POOL_TASKS`).
+- Only one pool operation can run at a time per database cluster.
+- Pool workers are visible in `pgclone_jobs_view` as individual table-type jobs.
 
 ---
 

@@ -2,6 +2,26 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [2.2.0]
+
+### Changed
+- **Worker Pool Architecture**: Parallel cloning (`"parallel": N`) now uses a fixed-size worker pool instead of spawning one background worker per table
+  - Exactly N workers are launched, each pulling tasks from a shared queue
+  - Dynamic load balancing: faster workers automatically handle more tables
+  - Resource usage reduced from O(tables) to O(N) for bgworkers and DB connections
+  - No longer risk exhausting `max_worker_processes` on large schemas
+
+### Added
+- `PgclonePoolQueue` struct in shared memory for task queue management
+- `pgclone_pool_worker_main()` background worker entry point
+- Pool worker test in `test/test_async.sh` (TEST 8)
+- `PGCLONE_MAX_POOL_TASKS` limit (512 tables per pool operation)
+- Guard against concurrent pool operations
+
+### Removed
+- Per-table background worker launch in parallel mode (replaced by pool)
+- Per-table job slot allocation in parallel mode (pool workers share fewer slots)
+
 ## [2.1.4]
 
 ### Changed

@@ -327,5 +327,6 @@ Exclusion constraints are fully supported and cloned automatically alongside PRI
 
 ## Current Limitations
 
-- Parallel cloning uses one bgworker per table — very large schemas may hit `max_worker_processes` limit.
+- Maximum 512 tables per parallel pool operation.
+- Only one pool-based parallel operation can run at a time per cluster.
 - `WHERE` clause in data filtering is passed directly to SQL — use with trusted input only.
