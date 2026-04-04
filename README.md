@@ -120,17 +120,20 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v0.2.0: Indexes, constraints, triggers
 - [x] v0.3.0: Async background workers with progress tracking
 - [x] v1.0.0: Resume support and conflict resolution
-- [x] v1.1.0: Selective column cloning and data filtering
-- [x] v1.2.0: Materialized views and exclusion constraints
+    - [x] v1.1.0: Selective column cloning and data filtering
+    - [x] v1.2.0: Materialized views and exclusion constraints
 - [x] v2.0.0: True multi-worker parallel cloning
-- [x] v2.0.1: `pgclone_database_create()` — create + clone database
-- [x] v2.1.0: Progress tracking view (`pgclone_jobs_view`)
-- [x] v2.1.1: Visual progress bar
-- [x] v2.1.3: Elapsed time tracking
-- [x] v2.1.4: Unix domain socket auth (no more pg_hba.conf trust requirement)
-- [ ] v2.2.0: Worker pool (fixed pool size instead of one bgworker per table)
-- [ ] v2.2.1: Read-only transaction for WHERE clause (SQL injection protection)
+    - [x] v2.0.1: `pgclone_database_create()` — create + clone database
+    - [x] v2.1.0: Progress tracking view (`pgclone_jobs_view`)
+    - [x] v2.1.1: Visual progress bar
+    - [x] v2.1.3: Elapsed time tracking
+    - [x] v2.1.4: Unix domain socket auth (no more pg_hba.conf trust requirement)
+    - [ ] v2.2.0: Worker pool (fixed pool size instead of one bgworker per table)
+    - [ ] v2.2.1: Read-only transaction for WHERE clause (SQL injection protection)
 - [ ] v3.0.0: Data anonymization / masking
+    - [ ] v3.1.0: Auto-Discovery of Sensitive Data
+    - [ ] v3.2.0 Applying Static Data Masking to cloned data 
+    - [ ] v3.3.0 Applying Dynamic Data Masking to cloned data  
 - [ ] v4.0.0: Copy-on-Write (CoW) mode for local cloning
 
 ## License
