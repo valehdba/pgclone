@@ -1,4 +1,4 @@
-/* pgclone--2.1.2.sql */
+/* pgclone--2.1.3.sql */
 \echo Use "CREATE EXTENSION pgclone" to load this file. \quit
 
 -- SYNCHRONOUS
