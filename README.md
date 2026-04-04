@@ -102,10 +102,7 @@ For async operations, add to `postgresql.conf` and restart:
 shared_preload_libraries = 'pgclone'
 ```
 
-For async operations on the destination DB, add to `pg_hba.conf` and reload:
-```
-host    all             all             127.0.0.1/32            trust
-```
+pgclone uses Unix domain sockets for local loopback connections, so the default `local all all peer` line in `pg_hba.conf` is sufficient — no `trust` entry needed. If Unix sockets are unavailable, pgclone falls back to TCP `127.0.0.1` and appropriate `pg_hba.conf` configuration is required.
 
 ## Documentation
 
