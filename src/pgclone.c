@@ -35,6 +35,33 @@ PG_MODULE_MAGIC;
  * --------------------------------------------------------------- */
 #define PGCLONE_MAX_COLUMNS   64
 #define PGCLONE_MAX_WHERE     2048
+#define PGCLONE_MAX_MASKS     64
+
+/* Mask strategy types */
+typedef enum PgcloneMaskType
+{
+    PGCLONE_MASK_NONE = 0,
+    PGCLONE_MASK_EMAIL,         /* a***@domain.com */
+    PGCLONE_MASK_NAME,          /* XXXX */
+    PGCLONE_MASK_PHONE,         /* ***-***-1234 */
+    PGCLONE_MASK_PARTIAL,       /* Jo***on — keep first/last N chars */
+    PGCLONE_MASK_HASH,          /* SHA256 — deterministic for referential integrity */
+    PGCLONE_MASK_NULL,          /* replace with NULL */
+    PGCLONE_MASK_RANDOM_INT,    /* random integer in [min, max] */
+    PGCLONE_MASK_CONSTANT       /* fixed replacement value */
+} PgcloneMaskType;
+
+/* Per-column masking rule */
+typedef struct MaskRule
+{
+    char              column[NAMEDATALEN];
+    PgcloneMaskType   type;
+    int               partial_prefix;  /* chars to keep at start (PARTIAL) */
+    int               partial_suffix;  /* chars to keep at end (PARTIAL) */
+    int               range_min;       /* RANDOM_INT min */
+    int               range_max;       /* RANDOM_INT max */
+    char              constant_val[256]; /* CONSTANT replacement */
+} MaskRule;
 
 typedef struct CloneOptions
 {
@@ -52,9 +79,13 @@ typedef struct CloneOptions
 
     /* Parallel cloning: number of workers (0 = sequential) */
     int  parallel_workers;
+
+    /* Data masking rules: column-level anonymization */
+    int  num_masks;
+    MaskRule masks[PGCLONE_MAX_MASKS];
 } CloneOptions;
 
-/* Default: everything enabled, no column/where filter */
+/* Default: everything enabled, no column/where/mask filter */
 static CloneOptions
 pgclone_default_options(void)
 {
@@ -67,6 +98,7 @@ pgclone_default_options(void)
     opts.num_columns         = 0;
     opts.where_clause[0]     = '\0';
     opts.parallel_workers    = 0;
+    opts.num_masks           = 0;
     return opts;
 }
 
@@ -205,7 +237,327 @@ pgclone_parse_options(const char *json_str)
         }
     }
 
+    /* Parse "mask": {"col": "type", "col": {"type":"partial", ...}} */
+    p = strstr(json_str, "\"mask\"");
+    if (p != NULL)
+    {
+        const char *brace = strchr(p, '{');
+        if (brace != NULL)
+        {
+            /* Skip to the inner object brace (the one after "mask":) */
+            const char *cur = brace + 1;
+            int brace_depth = 1;
+            const char *mask_end = cur;
+
+            /* Find matching closing brace */
+            while (*mask_end && brace_depth > 0)
+            {
+                if (*mask_end == '{') brace_depth++;
+                else if (*mask_end == '}') brace_depth--;
+                if (brace_depth > 0) mask_end++;
+            }
+
+            /* Parse key-value pairs inside the mask object */
+            while (cur < mask_end && opts.num_masks < PGCLONE_MAX_MASKS)
+            {
+                const char *key_start, *key_end;
+                const char *val_start;
+                MaskRule *rule = &opts.masks[opts.num_masks];
+
+                memset(rule, 0, sizeof(MaskRule));
+                rule->partial_prefix = 1;
+                rule->partial_suffix = 1;
+
+                /* Find key (column name) */
+                key_start = strchr(cur, '"');
+                if (!key_start || key_start >= mask_end) break;
+                key_start++;
+                key_end = strchr(key_start, '"');
+                if (!key_end || key_end >= mask_end) break;
+
+                {
+                    int klen = key_end - key_start;
+                    if (klen > 0 && klen < NAMEDATALEN)
+                    {
+                        memcpy(rule->column, key_start, klen);
+                        rule->column[klen] = '\0';
+                    }
+                }
+
+                /* Skip to colon */
+                cur = key_end + 1;
+                while (cur < mask_end && *cur != ':') cur++;
+                if (cur >= mask_end) break;
+                cur++; /* skip ':' */
+
+                /* Skip whitespace */
+                while (cur < mask_end && (*cur == ' ' || *cur == '\t' || *cur == '\n')) cur++;
+
+                if (*cur == '"')
+                {
+                    /* Simple string value: "email", "name", "hash", etc. */
+                    val_start = cur + 1;
+                    {
+                        const char *val_end = strchr(val_start, '"');
+                        if (val_end && val_end < mask_end)
+                        {
+                            char val_buf[64];
+                            int vlen = val_end - val_start;
+                            if (vlen > 0 && vlen < (int)sizeof(val_buf))
+                            {
+                                memcpy(val_buf, val_start, vlen);
+                                val_buf[vlen] = '\0';
+
+                                if (strcmp(val_buf, "email") == 0)
+                                    rule->type = PGCLONE_MASK_EMAIL;
+                                else if (strcmp(val_buf, "name") == 0)
+                                    rule->type = PGCLONE_MASK_NAME;
+                                else if (strcmp(val_buf, "phone") == 0)
+                                    rule->type = PGCLONE_MASK_PHONE;
+                                else if (strcmp(val_buf, "partial") == 0)
+                                    rule->type = PGCLONE_MASK_PARTIAL;
+                                else if (strcmp(val_buf, "hash") == 0)
+                                    rule->type = PGCLONE_MASK_HASH;
+                                else if (strcmp(val_buf, "null") == 0)
+                                    rule->type = PGCLONE_MASK_NULL;
+                                else
+                                    ereport(WARNING,
+                                            (errmsg("pgclone: unknown mask type \"%s\" for column \"%s\", skipping",
+                                                    val_buf, rule->column)));
+                            }
+                            cur = val_end + 1;
+                        }
+                    }
+                }
+                else if (*cur == '{')
+                {
+                    /* Object value: {"type":"partial", "prefix":2, "suffix":3} */
+                    const char *obj_end = strchr(cur, '}');
+                    if (obj_end && obj_end <= mask_end)
+                    {
+                        const char *type_p = strstr(cur, "\"type\"");
+                        if (type_p && type_p < obj_end)
+                        {
+                            const char *tq = strchr(type_p + 6, '"');
+                            if (tq && tq < obj_end)
+                            {
+                                const char *tq2 = strchr(tq + 1, '"');
+                                if (tq2 && tq2 < obj_end)
+                                {
+                                    char tbuf[64];
+                                    int tlen = tq2 - tq - 1;
+                                    if (tlen > 0 && tlen < (int)sizeof(tbuf))
+                                    {
+                                        memcpy(tbuf, tq + 1, tlen);
+                                        tbuf[tlen] = '\0';
+
+                                        if (strcmp(tbuf, "partial") == 0)
+                                            rule->type = PGCLONE_MASK_PARTIAL;
+                                        else if (strcmp(tbuf, "random_int") == 0)
+                                            rule->type = PGCLONE_MASK_RANDOM_INT;
+                                        else if (strcmp(tbuf, "constant") == 0)
+                                            rule->type = PGCLONE_MASK_CONSTANT;
+                                        else if (strcmp(tbuf, "email") == 0)
+                                            rule->type = PGCLONE_MASK_EMAIL;
+                                        else if (strcmp(tbuf, "name") == 0)
+                                            rule->type = PGCLONE_MASK_NAME;
+                                        else if (strcmp(tbuf, "phone") == 0)
+                                            rule->type = PGCLONE_MASK_PHONE;
+                                        else if (strcmp(tbuf, "hash") == 0)
+                                            rule->type = PGCLONE_MASK_HASH;
+                                        else if (strcmp(tbuf, "null") == 0)
+                                            rule->type = PGCLONE_MASK_NULL;
+                                    }
+                                }
+                            }
+                        }
+
+                        /* Parse numeric params: prefix, suffix, min, max */
+                        {
+                            const char *pp;
+                            pp = strstr(cur, "\"prefix\"");
+                            if (pp && pp < obj_end)
+                            {
+                                const char *c = strchr(pp + 8, ':');
+                                if (c && c < obj_end)
+                                    rule->partial_prefix = atoi(c + 1);
+                            }
+                            pp = strstr(cur, "\"suffix\"");
+                            if (pp && pp < obj_end)
+                            {
+                                const char *c = strchr(pp + 8, ':');
+                                if (c && c < obj_end)
+                                    rule->partial_suffix = atoi(c + 1);
+                            }
+                            pp = strstr(cur, "\"min\"");
+                            if (pp && pp < obj_end)
+                            {
+                                const char *c = strchr(pp + 5, ':');
+                                if (c && c < obj_end)
+                                    rule->range_min = atoi(c + 1);
+                            }
+                            pp = strstr(cur, "\"max\"");
+                            if (pp && pp < obj_end)
+                            {
+                                const char *c = strchr(pp + 5, ':');
+                                if (c && c < obj_end)
+                                    rule->range_max = atoi(c + 1);
+                            }
+
+                            /* Parse "value": "..." for constant type */
+                            pp = strstr(cur, "\"value\"");
+                            if (pp && pp < obj_end)
+                            {
+                                const char *vq = strchr(pp + 7, '"');
+                                if (vq && vq < obj_end)
+                                {
+                                    const char *vq2 = strchr(vq + 1, '"');
+                                    if (vq2 && vq2 <= obj_end)
+                                    {
+                                        int vlen = vq2 - vq - 1;
+                                        if (vlen > 0 && vlen < (int)sizeof(rule->constant_val))
+                                        {
+                                            memcpy(rule->constant_val, vq + 1, vlen);
+                                            rule->constant_val[vlen] = '\0';
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        cur = obj_end + 1;
+                    }
+                }
+
+                if (rule->type != PGCLONE_MASK_NONE)
+                    opts.num_masks++;
+
+                /* Advance past comma if present */
+                while (cur < mask_end && (*cur == ',' || *cur == ' ' || *cur == '\n' || *cur == '\t'))
+                    cur++;
+            }
+        }
+    }
+
     return opts;
+}
+
+/* ---------------------------------------------------------------
+ * Build a SQL expression that applies a masking strategy to a column.
+ *
+ * The expression is pure SQL executed server-side on the source,
+ * so masking happens before data enters the COPY stream — no
+ * row-by-row processing overhead.
+ *
+ * All expressions use pgcrypto-free SQL: md5() is built-in,
+ * string functions are available on all PG 14+.
+ * --------------------------------------------------------------- */
+static void
+pgclone_build_mask_expr(StringInfo buf, const char *col_ident,
+                        const MaskRule *rule)
+{
+    switch (rule->type)
+    {
+        case PGCLONE_MASK_EMAIL:
+            /*
+             * Preserves domain, masks local part:
+             *   "alice@example.com" -> "a***@example.com"
+             * NULL-safe via COALESCE.
+             */
+            appendStringInfo(buf,
+                "CASE WHEN %s IS NULL THEN NULL "
+                "WHEN position('@' in %s::text) > 0 THEN "
+                "  left(%s::text, 1) || '***@' || split_part(%s::text, '@', 2) "
+                "ELSE '***' END",
+                col_ident, col_ident, col_ident, col_ident);
+            break;
+
+        case PGCLONE_MASK_NAME:
+            /* Replace with fixed string, preserving NULL */
+            appendStringInfo(buf,
+                "CASE WHEN %s IS NULL THEN NULL ELSE 'XXXX' END",
+                col_ident);
+            break;
+
+        case PGCLONE_MASK_PHONE:
+            /*
+             * Keep last 4 characters, mask rest:
+             *   "+1-555-123-4567" -> "***-4567"
+             */
+            appendStringInfo(buf,
+                "CASE WHEN %s IS NULL THEN NULL "
+                "WHEN length(%s::text) > 4 THEN '***-' || right(%s::text, 4) "
+                "ELSE '****' END",
+                col_ident, col_ident, col_ident);
+            break;
+
+        case PGCLONE_MASK_PARTIAL:
+            /*
+             * Keep first N and last M chars, mask middle:
+             *   prefix=2, suffix=3: "Johnson" -> "Jo***son"
+             */
+            appendStringInfo(buf,
+                "CASE WHEN %s IS NULL THEN NULL "
+                "WHEN length(%s::text) <= %d THEN repeat('*', length(%s::text)) "
+                "ELSE left(%s::text, %d) || '***' || right(%s::text, %d) END",
+                col_ident,
+                col_ident, rule->partial_prefix + rule->partial_suffix,
+                col_ident,
+                col_ident, rule->partial_prefix,
+                col_ident, rule->partial_suffix);
+            break;
+
+        case PGCLONE_MASK_HASH:
+            /*
+             * Deterministic MD5 hash — same input always produces same output.
+             * Useful for columns that need referential integrity across tables
+             * (e.g., hash(email) in table A matches hash(email) in table B).
+             */
+            appendStringInfo(buf,
+                "CASE WHEN %s IS NULL THEN NULL "
+                "ELSE md5(%s::text) END",
+                col_ident, col_ident);
+            break;
+
+        case PGCLONE_MASK_NULL:
+            appendStringInfo(buf, "NULL");
+            break;
+
+        case PGCLONE_MASK_RANDOM_INT:
+            appendStringInfo(buf,
+                "floor(random() * (%d - %d + 1) + %d)::integer",
+                rule->range_max, rule->range_min, rule->range_min);
+            break;
+
+        case PGCLONE_MASK_CONSTANT:
+            appendStringInfo(buf, "%s",
+                             quote_literal_cstr(rule->constant_val));
+            break;
+
+        case PGCLONE_MASK_NONE:
+            /* Should not reach here, but emit column as-is */
+            appendStringInfoString(buf, col_ident);
+            break;
+    }
+}
+
+/* ---------------------------------------------------------------
+ * Find a mask rule for a given column name, or NULL if none.
+ * --------------------------------------------------------------- */
+static const MaskRule *
+pgclone_find_mask_rule(const CloneOptions *opts, const char *col_name)
+{
+    int i;
+
+    if (opts == NULL || opts->num_masks == 0)
+        return NULL;
+
+    for (i = 0; i < opts->num_masks; i++)
+    {
+        if (strcmp(opts->masks[i].column, col_name) == 0)
+            return &opts->masks[i];
+    }
+    return NULL;
 }
 
 /* ---------------------------------------------------------------
@@ -472,9 +824,10 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     int64           row_count = 0;
     bool            use_query_copy;
 
-    /* Determine if we need query-based COPY (for columns/WHERE) */
+    /* Determine if we need query-based COPY (for columns/WHERE/masks) */
     use_query_copy = (opts != NULL &&
-                      (opts->num_columns > 0 || opts->where_clause[0] != '\0'));
+                      (opts->num_columns > 0 || opts->where_clause[0] != '\0' ||
+                       opts->num_masks > 0));
 
     /* Validate and sandbox WHERE clause if present */
     if (opts != NULL && opts->where_clause[0] != '\0')
@@ -509,15 +862,86 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
         appendStringInfoString(&select_cmd, "SELECT ");
 
-        if (opts->num_columns > 0)
+        if (opts->num_masks > 0 && opts->num_columns == 0)
         {
+            /*
+             * Masking without explicit column list: query source catalog
+             * for all column names so we can apply mask expressions to
+             * specific columns while passing others through unchanged.
+             */
+            StringInfoData col_query;
+            PGresult *col_res;
+            int ncols, ci;
+
+            initStringInfo(&col_query);
+            appendStringInfo(&col_query,
+                "SELECT a.attname "
+                "FROM pg_catalog.pg_attribute a "
+                "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relname = %s "
+                "AND a.attnum > 0 AND NOT a.attisdropped "
+                "ORDER BY a.attnum",
+                quote_literal_cstr(schema_name),
+                quote_literal_cstr(source_table));
+
+            col_res = PQexec(source_conn, col_query.data);
+            pfree(col_query.data);
+
+            if (PQresultStatus(col_res) != PGRES_TUPLES_OK)
+            {
+                char *col_errmsg = pstrdup(PQerrorMessage(source_conn));
+                PQclear(col_res);
+                ereport(ERROR,
+                        (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                         errmsg("pgclone: could not fetch column list for masking: %s",
+                                col_errmsg)));
+            }
+
+            ncols = PQntuples(col_res);
+            for (ci = 0; ci < ncols; ci++)
+            {
+                const char *col_name = PQgetvalue(col_res, ci, 0);
+                const char *col_ident = quote_identifier(col_name);
+                const MaskRule *rule = pgclone_find_mask_rule(opts, col_name);
+
+                if (ci > 0)
+                    appendStringInfoString(&select_cmd, ", ");
+
+                if (rule != NULL)
+                {
+                    pgclone_build_mask_expr(&select_cmd, col_ident, rule);
+                    /* Alias to original column name so COPY IN matches */
+                    appendStringInfo(&select_cmd, " AS %s", col_ident);
+                }
+                else
+                {
+                    appendStringInfoString(&select_cmd, col_ident);
+                }
+            }
+            PQclear(col_res);
+        }
+        else if (opts->num_columns > 0)
+        {
+            /* Explicit column list — apply masks to matching columns */
             int ci;
             for (ci = 0; ci < opts->num_columns; ci++)
             {
+                const char *col_ident = quote_identifier(opts->columns[ci]);
+                const MaskRule *rule = pgclone_find_mask_rule(opts, opts->columns[ci]);
+
                 if (ci > 0)
                     appendStringInfoString(&select_cmd, ", ");
-                appendStringInfo(&select_cmd, "%s",
-                                 quote_identifier(opts->columns[ci]));
+
+                if (rule != NULL)
+                {
+                    pgclone_build_mask_expr(&select_cmd, col_ident, rule);
+                    appendStringInfo(&select_cmd, " AS %s", col_ident);
+                }
+                else
+                {
+                    appendStringInfoString(&select_cmd, col_ident);
+                }
             }
         }
         else
@@ -534,6 +958,8 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
         appendStringInfo(&cmd, "COPY (%s) TO STDOUT WITH (FORMAT text)",
                          select_cmd.data);
+
+        elog(DEBUG1, "pgclone: masked COPY command: %s", select_cmd.data);
         pfree(select_cmd.data);
     }
     else
@@ -2049,7 +2475,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.2.1"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.0.0"));
 }
 
 /* ===============================================================

@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(37);
+SELECT plan(52);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -245,6 +245,148 @@ SELECT lives_ok(
         'test_schema', 'customers', 'no_false_positive',
         '{\"where\": \"created_at IS NOT NULL\"}'),
     'WHERE with created_at does not false-positive on CREATE keyword'
+);
+
+-- ============================================================
+-- TEST GROUP 13: Data masking — email mask
+-- ============================================================
+
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_masked_email',
+        '{"mask": {"email": "email"}}'),
+    'pgclone_table with email mask'
+);
+
+SELECT has_table('test_schema', 'employees_masked_email', 'masked email table created');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_masked_email',
+    ARRAY[5],
+    'masked email table has 5 rows'
+);
+
+-- Verify emails are masked: local part replaced, domain preserved
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_email
+      WHERE email LIKE 'a%@%' AND email NOT LIKE 'alice@%'$$,
+    ARRAY[1],
+    'alice email is masked (starts with a but not full address)'
+);
+
+-- No original email should survive
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_email
+      WHERE email = 'alice@example.com'$$,
+    ARRAY[0],
+    'original alice email not present in masked table'
+);
+
+-- ============================================================
+-- TEST GROUP 14: Data masking — name mask
+-- ============================================================
+
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_masked_name',
+        '{"mask": {"full_name": "name"}}'),
+    'pgclone_table with name mask'
+);
+
+-- All names should be XXXX
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_name
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[5],
+    'all names masked to XXXX'
+);
+
+-- ============================================================
+-- TEST GROUP 15: Data masking — null mask
+-- ============================================================
+
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_masked_null',
+        '{"mask": {"ssn": "null"}}'),
+    'pgclone_table with null mask on ssn'
+);
+
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_null
+      WHERE ssn IS NULL$$,
+    ARRAY[5],
+    'all SSNs nullified'
+);
+
+-- ============================================================
+-- TEST GROUP 16: Data masking — hash mask (deterministic)
+-- ============================================================
+
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_masked_hash',
+        '{"mask": {"email": "hash"}}'),
+    'pgclone_table with hash mask on email'
+);
+
+-- Hashed emails should be 32-char hex strings (md5)
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_hash
+      WHERE length(email) = 32 AND email ~ '^[a-f0-9]+$'$$,
+    ARRAY[5],
+    'all emails are md5 hashes (32 hex chars)'
+);
+
+-- ============================================================
+-- TEST GROUP 17: Data masking — constant mask
+-- ============================================================
+
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_masked_const',
+        '{"mask": {"notes": {"type": "constant", "value": "REDACTED"}}}'),
+    'pgclone_table with constant mask on notes'
+);
+
+-- Non-null notes should be REDACTED (NULL notes stay NULL is acceptable too)
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_const
+      WHERE notes = 'REDACTED'$$,
+    ARRAY[5],
+    'all notes replaced with REDACTED'
+);
+
+-- ============================================================
+-- TEST GROUP 18: Data masking — combined masks + WHERE
+-- ============================================================
+
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_masked_combo',
+        '{"mask": {"email": "email", "full_name": "name", "ssn": "null"}, "where": "salary > 60000"}'),
+    'pgclone_table with combined masks and WHERE filter'
+);
+
+-- WHERE salary > 60000 should give 4 rows (Alice=95k, Bob=82k, Charlie=67k, Diana=120k)
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_masked_combo',
+    ARRAY[4],
+    'combo masked table has 4 rows (salary > 60000)'
+);
+
+-- Names should be masked
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_combo
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[4],
+    'all names in combo table masked to XXXX'
 );
 
 SELECT * FROM finish();

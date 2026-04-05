@@ -7,11 +7,12 @@ This document describes the internal architecture of pgclone, covering the codeb
 ```
 pgclone/
 ├── src/
-│   ├── pgclone.c          # Main extension (~3000 lines)
+│   ├── pgclone.c          # Main extension (~3500 lines)
 │   │                      #   - Table, schema, database clone functions
 │   │                      #   - DDL generation (indexes, constraints, triggers, views)
 │   │                      #   - COPY protocol data transfer
 │   │                      #   - Selective column / WHERE filter logic
+│   │                      #   - Data masking / anonymization engine
 │   │                      #   - _PG_init(), shmem hooks, version function
 │   ├── pgclone_bgw.c      # Background worker (~1000 lines)
 │   │                      #   - bgw_main entry point
@@ -27,7 +28,7 @@ pgclone/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
 │   ├── fixtures/seed.sql  # Test data
-│   ├── pgclone_test.sql   # 33 pgTAP tests
+│   ├── pgclone_test.sql   # 52 pgTAP tests
 │   ├── run_tests.sh       # Test orchestrator
 │   ├── run_all.sh         # Multi-version runner
 │   ├── test_async.sh      # Async test suite (8 tests incl. worker pool)
@@ -67,6 +68,29 @@ Data is transferred using PostgreSQL's COPY protocol, which is significantly fas
 4. Finalize with `PQputCopyEnd`
 
 This avoids parsing and re-serializing individual rows.
+
+### Data Masking Architecture (v3.0.0)
+
+Data masking is implemented as **server-side SQL expressions** injected into the COPY query's SELECT list. Instead of `COPY table TO STDOUT`, pgclone generates:
+
+```sql
+COPY (SELECT id,
+             CASE WHEN email IS NULL THEN NULL
+                  WHEN position('@' in email::text) > 0
+                  THEN left(email::text, 1) || '***@' || split_part(email::text, '@', 2)
+                  ELSE '***' END AS email,
+             'XXXX' AS full_name,
+             NULL AS ssn
+      FROM schema.table) TO STDOUT
+```
+
+This approach has three key benefits:
+
+1. **Zero overhead** — masking happens inside PostgreSQL's query executor on the source, data flows through COPY already masked. No row-by-row C processing.
+2. **No dependencies** — all mask expressions use built-in PostgreSQL functions (`left()`, `right()`, `md5()`, `split_part()`, `random()`). No pgcrypto or external libraries.
+3. **Composable** — masks work with existing `columns`, `where`, `indexes`, `constraints`, and `triggers` options without special handling.
+
+When masks are specified without an explicit column list, pgclone queries `pg_catalog.pg_attribute` on the source to discover column names, then applies mask expressions to matching columns while passing others through unmodified.
 
 ---
 
