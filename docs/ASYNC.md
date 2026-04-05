@@ -224,7 +224,7 @@ SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
 2. The background worker starts in a separate process, connects to both source and target databases using `libpq`, and performs the clone operation.
 3. Progress is tracked in shared memory (`pgclone_state`), which is allocated via `shmem_request_hook` (PG 15+) or `RequestAddinShmemSpace` (PG 14).
 4. The `pgclone_jobs_view` reads shared memory to display real-time progress.
-5. For parallel cloning, the parent worker spawns child workers — one per table — and monitors their completion.
+5. For parallel cloning (v2.2.0+), the parent process populates a shared-memory task queue and launches exactly N pool workers. Each worker pulls tasks from the queue until it's empty — providing dynamic load balancing with O(N) resource usage.
 
 **Tip:** Verbose per-table/per-row NOTICE messages have been moved to DEBUG1 level. To see them:
 

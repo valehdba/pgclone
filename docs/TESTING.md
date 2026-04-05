@@ -30,13 +30,16 @@ Located in `test/test_database_create.sh` — verifies `pgclone_database_create(
 
 ### 3. Async Tests
 
-Located in `test/test_async.sh` — covers background worker operations:
+Located in `test/test_async.sh` — covers background worker operations (8 tests):
 
-- `pgclone_table_async` — basic async table clone
-- `pgclone_table_async` — with target rename
-- `pgclone_schema_async` — full schema async clone
-- `pgclone_progress` / `pgclone_jobs` / `pgclone_jobs_view` — progress tracking
-- `pgclone_clear_jobs` — cleanup
+- TEST 1: `pgclone_table_async` — basic async table clone
+- TEST 2: `pgclone_table_async` — with different target name
+- TEST 3: `pgclone_schema_async` — sequential mode
+- TEST 4: `pgclone_progress` — check progress JSON
+- TEST 5: `pgclone_jobs` — list all jobs
+- TEST 6: `pgclone_jobs_view` — progress tracking view
+- TEST 7: `pgclone_clear_jobs` — cleanup completed/failed jobs
+- TEST 8: Worker Pool — parallel schema clone with pool workers (v2.2.0)
 
 ---
 

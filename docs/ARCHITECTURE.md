@@ -7,21 +7,22 @@ This document describes the internal architecture of pgclone, covering the codeb
 ```
 pgclone/
 ├── src/
-│   ├── pgclone.c          # Main extension (~3800 lines)
+│   ├── pgclone.c          # Main extension (~3000 lines)
 │   │                      #   - Table, schema, database clone functions
 │   │                      #   - DDL generation (indexes, constraints, triggers, views)
 │   │                      #   - COPY protocol data transfer
 │   │                      #   - Selective column / WHERE filter logic
 │   │                      #   - _PG_init(), shmem hooks, version function
-│   ├── pgclone_bgw.c      # Background worker (~800 lines)
+│   ├── pgclone_bgw.c      # Background worker (~1000 lines)
 │   │                      #   - bgw_main entry point
 │   │                      #   - Async table/schema clone workers
-│   │                      #   - Parallel worker spawning
+│   │                      #   - Worker pool (pgclone_pool_worker_main)
 │   │                      #   - Shared memory progress updates
 │   └── pgclone_bgw.h      # Shared definitions
 │                          #   - Job state struct, status enums
 │                          #   - Shared memory layout (pgclone_state)
-│                          #   - MAX_JOBS, progress fields
+│                          #   - Pool queue struct (PgclonePoolQueue)
+│                          #   - MAX_JOBS, MAX_POOL_TASKS, progress fields
 ├── sql/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
@@ -29,13 +30,18 @@ pgclone/
 │   ├── pgclone_test.sql   # 33 pgTAP tests
 │   ├── run_tests.sh       # Test orchestrator
 │   ├── run_all.sh         # Multi-version runner
-│   ├── test_async.sh      # Async test suite
+│   ├── test_async.sh      # Async test suite (8 tests incl. worker pool)
 │   └── test_database_create.sh
+├── .github/workflows/ci.yml  # GitHub Actions CI (PG 14–18 matrix)
 ├── Dockerfile             # Multi-version build container
 ├── docker-compose.yml     # Source + test containers (PG 14–18)
 ├── Makefile               # PGXS-based build
 ├── pgclone.control        # Extension metadata
-└── META.json              # PGXN metadata
+├── META.json              # PGXN metadata
+├── pre_deploy_checks.sh   # Pre-release validation (22 checks)
+├── CHANGELOG.md           # Version history
+├── CONTRIBUTING.md        # Contributor guide
+└── SECURITY.md            # Security policy
 ```
 
 ## Core Design Decisions
@@ -163,13 +169,21 @@ PostgreSQL 17 removed the `die` signal handler, replacing it with `SignalHandler
 
 3. **Execution:** The worker calls the same core clone functions used by sync operations, with periodic updates to shared memory (rows copied, current table, elapsed time).
 
-4. **Parallel mode:** For `pgclone_schema_async` with `"parallel": N`, the parent worker:
+4. **Worker Pool mode (v2.2.0):** For `pgclone_schema_async` with `"parallel": N`, the parent process:
    - Queries the source for the list of tables
-   - Spawns N child workers (one per table)
-   - Monitors child workers via shared memory
-   - Updates aggregate progress
+   - Populates a shared-memory task queue (`PgclonePoolQueue`)
+   - Launches exactly N pool workers via `pgclone_pool_worker_main()`
+   - Each worker grabs the next unclaimed task from the queue, clones it, then grabs the next — until the queue is empty
+   - Dynamic load balancing: faster workers automatically handle more tables
+   - Resource usage is O(N) instead of O(tables) for bgworkers and DB connections
 
 5. **Completion:** Worker sets status to COMPLETED or FAILED, disconnects from databases, and exits.
+
+---
+
+## Local Loopback Connections (v2.1.4+)
+
+pgclone uses loopback libpq connections for DDL execution on the target database. Since v2.1.4, these connections prefer Unix domain sockets (read from the `unix_socket_directories` GUC) over TCP `127.0.0.1`. This means the default `local all all peer` line in `pg_hba.conf` is sufficient — no `trust` entry is needed. If Unix sockets are unavailable, pgclone falls back to TCP `127.0.0.1` automatically.
 
 ---
 
