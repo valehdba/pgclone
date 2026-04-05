@@ -38,7 +38,7 @@ postgresql://username:password@hostname:5432/database
 - This extension requires **superuser** privileges to install and use.
 - Connection strings may contain passwords — consider using `.pgpass` files or the `PGPASSFILE` environment variable instead.
 - The extension connects to remote hosts using `libpq` — ensure network connectivity and firewall rules allow the connection.
-- **WHERE clause protection (v2.2.1):** The `"where"` filter option is validated against DDL/DML keywords and semicolons, and runs inside a `READ ONLY` transaction on the source. A 5-minute `statement_timeout` limits query execution time.
+- **WHERE clause protection (v2.2.1):** The `"where"` filter option is validated against DDL/DML keywords and semicolons, and runs inside a `READ ONLY` transaction on the source.
 
 ---
 
@@ -330,4 +330,4 @@ Exclusion constraints are fully supported and cloned automatically alongside PRI
 
 - Maximum 512 tables per parallel pool operation.
 - Only one pool-based parallel operation can run at a time per cluster.
-- `WHERE` clause in data filtering is validated against SQL injection patterns and executed inside a read-only transaction on the source. DDL/DML keywords and semicolons are rejected. A 5-minute statement timeout prevents DoS via expensive subqueries.
+- `WHERE` clause in data filtering is validated against SQL injection patterns and executed inside a read-only transaction on the source. DDL/DML keywords and semicolons are rejected.

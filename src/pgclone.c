@@ -496,13 +496,6 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
                             tx_errmsg)));
         }
         PQclear(txres);
-
-        /* Limit query execution time to prevent DoS via expensive subqueries */
-        txres = PQexec(source_conn, "SET LOCAL statement_timeout = '300s'");
-        if (PQresultStatus(txres) != PGRES_COMMAND_OK)
-            elog(DEBUG1, "pgclone: could not set statement_timeout: %s",
-                 PQerrorMessage(source_conn));
-        PQclear(txres);
     }
 
     /* Start COPY OUT on source */
