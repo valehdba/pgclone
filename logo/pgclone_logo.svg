@@ -55,29 +55,34 @@
     <ellipse cx="60" cy="120" rx="60" ry="12" fill="none" stroke="#90D4FF" stroke-width="1" opacity="0.5"/>
     <ellipse cx="60" cy="170" rx="60" ry="22" fill="#3A7BC8"/>
     <ellipse cx="60" cy="170" rx="60" ry="22" fill="none" stroke="#4A9DE0" stroke-width="1.5"/>
-    <rect x="20" y="45" width="30" height="4" rx="2" fill="#C8EAFF" opacity="0.7"/>
-    <rect x="55" y="45" width="45" height="4" rx="2" fill="#C8EAFF" opacity="0.5"/>
-    <rect x="20" y="55" width="50" height="4" rx="2" fill="#C8EAFF" opacity="0.6"/>
-    <rect x="75" y="55" width="20" height="4" rx="2" fill="#C8EAFF" opacity="0.4"/>
-    <rect x="20" y="95" width="40" height="4" rx="2" fill="#C8EAFF" opacity="0.7"/>
-    <rect x="65" y="95" width="35" height="4" rx="2" fill="#C8EAFF" opacity="0.5"/>
-    <rect x="20" y="105" width="25" height="4" rx="2" fill="#C8EAFF" opacity="0.6"/>
-    <rect x="50" y="105" width="45" height="4" rx="2" fill="#C8EAFF" opacity="0.4"/>
-    <rect x="20" y="135" width="35" height="4" rx="2" fill="#C8EAFF" opacity="0.5"/>
-    <rect x="60" y="135" width="40" height="4" rx="2" fill="#C8EAFF" opacity="0.3"/>
+    <rect x="20" y="45" width="30" height="4" rx="2" fill="#C0E8FF" opacity="0.5"/>
+    <rect x="55" y="45" width="45" height="4" rx="2" fill="#C0E8FF" opacity="0.3"/>
+    <rect x="20" y="55" width="50" height="4" rx="2" fill="#C0E8FF" opacity="0.4"/>
+    <rect x="75" y="55" width="20" height="4" rx="2" fill="#C0E8FF" opacity="0.3"/>
+    <rect x="20" y="95" width="40" height="4" rx="2" fill="#C0E8FF" opacity="0.5"/>
+    <rect x="65" y="95" width="35" height="4" rx="2" fill="#C0E8FF" opacity="0.3"/>
+    <rect x="20" y="105" width="25" height="4" rx="2" fill="#C0E8FF" opacity="0.4"/>
+    <rect x="50" y="105" width="45" height="4" rx="2" fill="#C0E8FF" opacity="0.3"/>
+    <rect x="20" y="135" width="35" height="4" rx="2" fill="#C0E8FF" opacity="0.5"/>
+    <rect x="60" y="135" width="40" height="4" rx="2" fill="#C0E8FF" opacity="0.3"/>
+    <rect x="20" y="145" width="55" height="4" rx="2" fill="#C0E8FF" opacity="0.4"/>
   </g>
 
   <!-- === CLONE ARROW (Center) === -->
   <g filter="url(#glow)">
-    <rect x="225" y="210" width="65" height="12" rx="6" fill="url(#arrowGrad)"/>
-    <polygon points="290,195 320,216 290,237" fill="url(#arrowGrad)"/>
-    <circle cx="240" cy="210" r="3" fill="#F7C948" opacity="0.8">
-      <animate attributeName="cx" values="230;310" dur="1.5s" repeatCount="indefinite"/>
+    <line x1="235" y1="216" x2="290" y2="216" stroke="url(#arrowGrad)" stroke-width="4" stroke-linecap="round"/>
+    <polygon points="290,208 306,216 290,224" fill="#F7C948"/>
+    <circle cx="245" cy="210" r="2" fill="#FFDC73" opacity="0.8">
+      <animate attributeName="cx" values="235;315" dur="1.5s" repeatCount="indefinite"/>
       <animate attributeName="opacity" values="0.8;0" dur="1.5s" repeatCount="indefinite"/>
     </circle>
-    <circle cx="235" cy="222" r="2.5" fill="#F5A623" opacity="0.6">
-      <animate attributeName="cx" values="225;305" dur="1.8s" repeatCount="indefinite"/>
-      <animate attributeName="opacity" values="0.6;0" dur="1.8s" repeatCount="indefinite"/>
+    <circle cx="255" cy="216" r="2" fill="#FFDC73" opacity="0.6">
+      <animate attributeName="cx" values="235;315" dur="1.2s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.6;0" dur="1.2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="245" cy="222" r="2" fill="#FFDC73" opacity="0.7">
+      <animate attributeName="cx" values="235;315" dur="1.8s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.7;0" dur="1.8s" repeatCount="indefinite"/>
     </circle>
     <circle cx="245" cy="216" r="2" fill="#FFDC73" opacity="0.7">
       <animate attributeName="cx" values="235;315" dur="1.3s" repeatCount="indefinite"/>
@@ -107,6 +112,6 @@
   <!-- === Version badge === -->
   <g transform="translate(358, 360)">
     <rect x="0" y="0" width="52" height="20" rx="10" fill="#F5A623" opacity="0.9"/>
-    <text x="26" y="14" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#fff">v2.1.2</text>
+    <text x="26" y="14" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="600" fill="#fff">v2.2.0</text>
   </g>
 </svg>
