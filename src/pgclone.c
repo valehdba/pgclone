@@ -378,11 +378,86 @@ pgclone_connect_local(void)
 }
 
 /* ---------------------------------------------------------------
+ * Validate WHERE clause against SQL injection patterns.
+ *
+ * Rejects semicolons (statement chaining) and DDL/DML keywords
+ * that have no place in a read-only filter expression.
+ * This is a defense-in-depth layer — the source connection also
+ * runs inside a READ ONLY transaction.
+ * --------------------------------------------------------------- */
+static void
+pgclone_validate_where_clause(const char *where_clause)
+{
+    /* Forbidden patterns: case-insensitive whole-word matches */
+    static const char *forbidden[] = {
+        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+        "TRUNCATE", "GRANT", "REVOKE", "COPY", "EXECUTE",
+        "CALL", "DO", "SET", "RESET", "LOAD",
+        NULL
+    };
+    const char *p;
+    int         i;
+    size_t      len = strlen(where_clause);
+    char       *upper;
+
+    /* Reject semicolons — no statement chaining */
+    if (strchr(where_clause, ';') != NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: WHERE clause must not contain semicolons"),
+                 errhint("Remove ';' from the WHERE clause.")));
+
+    /* Build uppercase copy for keyword matching */
+    upper = palloc(len + 1);
+    for (p = where_clause; *p; p++)
+        upper[p - where_clause] = (*p >= 'a' && *p <= 'z')
+                                  ? (*p - 32) : *p;
+    upper[len] = '\0';
+
+    for (i = 0; forbidden[i] != NULL; i++)
+    {
+        const char *found = upper;
+        size_t      klen = strlen(forbidden[i]);
+
+        while ((found = strstr(found, forbidden[i])) != NULL)
+        {
+            /* Check word boundaries: must not be part of a larger identifier */
+            bool start_ok = (found == upper) ||
+                            !((*(found - 1) >= 'A' && *(found - 1) <= 'Z') ||
+                              (*(found - 1) >= 'a' && *(found - 1) <= 'z') ||
+                              (*(found - 1) >= '0' && *(found - 1) <= '9') ||
+                              *(found - 1) == '_');
+            bool end_ok   = (found[klen] == '\0') ||
+                            !((found[klen] >= 'A' && found[klen] <= 'Z') ||
+                              (found[klen] >= 'a' && found[klen] <= 'z') ||
+                              (found[klen] >= '0' && found[klen] <= '9') ||
+                              found[klen] == '_');
+
+            if (start_ok && end_ok)
+            {
+                pfree(upper);
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("pgclone: WHERE clause contains forbidden keyword: %s",
+                                forbidden[i]),
+                         errhint("The WHERE clause must be a read-only filter expression.")));
+            }
+            found += klen;
+        }
+    }
+
+    pfree(upper);
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: stream data from source to target using COPY.
  *
  * When columns or where_clause are provided, uses
  * COPY (SELECT cols FROM table WHERE filter) TO STDOUT
  * instead of COPY table TO STDOUT.
+ *
+ * If a WHERE clause is present, the source query runs inside a
+ * READ ONLY transaction to prevent any side effects from injected SQL.
  * --------------------------------------------------------------- */
 static int64
 pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
@@ -400,6 +475,35 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     /* Determine if we need query-based COPY (for columns/WHERE) */
     use_query_copy = (opts != NULL &&
                       (opts->num_columns > 0 || opts->where_clause[0] != '\0'));
+
+    /* Validate and sandbox WHERE clause if present */
+    if (opts != NULL && opts->where_clause[0] != '\0')
+    {
+        PGresult *txres;
+
+        pgclone_validate_where_clause(opts->where_clause);
+
+        /* Wrap source query in READ ONLY transaction — prevents any
+         * side effects even if validation is bypassed */
+        txres = PQexec(source_conn, "BEGIN TRANSACTION READ ONLY");
+        if (PQresultStatus(txres) != PGRES_COMMAND_OK)
+        {
+            char *tx_errmsg = pstrdup(PQerrorMessage(source_conn));
+            PQclear(txres);
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgclone: could not start read-only transaction on source: %s",
+                            tx_errmsg)));
+        }
+        PQclear(txres);
+
+        /* Limit query execution time to prevent DoS via expensive subqueries */
+        txres = PQexec(source_conn, "SET LOCAL statement_timeout = '300s'");
+        if (PQresultStatus(txres) != PGRES_COMMAND_OK)
+            elog(DEBUG1, "pgclone: could not set statement_timeout: %s",
+                 PQerrorMessage(source_conn));
+        PQclear(txres);
+    }
 
     /* Start COPY OUT on source */
     initStringInfo(&cmd);
@@ -560,6 +664,13 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
     row_count = atol(PQcmdTuples(res));
     PQclear(res);
+
+    /* Close read-only transaction if WHERE clause was used */
+    if (opts != NULL && opts->where_clause[0] != '\0')
+    {
+        PGresult *txres = PQexec(source_conn, "COMMIT");
+        PQclear(txres);
+    }
 
     return row_count;
 }
@@ -1945,7 +2056,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.2.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 2.2.1"));
 }
 
 /* ===============================================================

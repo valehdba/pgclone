@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(33);
+SELECT plan(37);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -199,6 +199,52 @@ SELECT results_eq(
     'SELECT count(*)::integer FROM test_schema.active_only',
     ARRAY[7],
     'active_only has 7 rows (only active customers)'
+);
+
+-- ============================================================
+-- TEST GROUP 12: WHERE clause SQL injection protection
+-- ============================================================
+
+-- Test: semicolon in WHERE clause must be rejected
+SELECT throws_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'customers', 'inject_test1',
+        '{\"where\": \"1=1; DROP TABLE customers; --\"}'),
+    'P0001',
+    'pgclone: WHERE clause must not contain semicolons',
+    'semicolon in WHERE clause is rejected'
+);
+
+-- Test: DROP keyword in WHERE clause must be rejected
+SELECT throws_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'customers', 'inject_test2',
+        '{\"where\": \"1=1 OR DROP TABLE customers\"}'),
+    'P0001',
+    'pgclone: WHERE clause contains forbidden keyword: DROP',
+    'DROP keyword in WHERE clause is rejected'
+);
+
+-- Test: INSERT keyword in WHERE clause must be rejected
+SELECT throws_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'customers', 'inject_test3',
+        '{\"where\": \"1=1 OR INSERT INTO customers VALUES(999)\"}'),
+    'P0001',
+    'pgclone: WHERE clause contains forbidden keyword: INSERT',
+    'INSERT keyword in WHERE clause is rejected'
+);
+
+-- Test: valid WHERE with column named 'created_at' must NOT trigger false positive on CREATE
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'customers', 'no_false_positive',
+        '{\"where\": \"created_at IS NOT NULL\"}'),
+    'WHERE with created_at does not false-positive on CREATE keyword'
 );
 
 SELECT * FROM finish();

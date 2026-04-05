@@ -2,6 +2,16 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [2.2.1]
+
+### Added
+- **WHERE clause SQL injection protection**: Two-layer defense against malicious input in the `"where"` JSON option
+  - Layer 1: Keyword validation rejects DDL/DML keywords (`DROP`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `TRUNCATE`, etc.) and semicolons before the query is sent
+  - Layer 2: Source connection runs inside `BEGIN TRANSACTION READ ONLY` when a WHERE clause is present — PostgreSQL itself blocks any write operations even if validation is bypassed
+  - `SET LOCAL statement_timeout = '300s'` prevents DoS via expensive subqueries in the WHERE clause
+  - Word-boundary-aware matching avoids false positives on column names like `created_at`, `update_count`, `drop_rate`
+- 4 new pgTAP tests (37 total): semicolon rejection, DROP keyword rejection, INSERT keyword rejection, false-positive safety with `created_at` column
+
 ## [2.2.0]
 
 ### Changed
