@@ -161,3 +161,22 @@ CREATE TABLE public.simple_test (
 
 INSERT INTO public.simple_test (value, num) VALUES
     ('hello', 1), ('world', 2), ('foo', 3), ('bar', 4), ('baz', 5);
+
+-- ---- Table with sensitive data for masking tests ----
+CREATE TABLE test_schema.employees (
+    id          SERIAL PRIMARY KEY,
+    full_name   VARCHAR(100) NOT NULL,
+    email       VARCHAR(255) NOT NULL,
+    phone       VARCHAR(20),
+    salary      INTEGER NOT NULL,
+    ssn         VARCHAR(11),
+    notes       TEXT,
+    created_at  TIMESTAMP DEFAULT now()
+);
+
+INSERT INTO test_schema.employees (full_name, email, phone, salary, ssn, notes) VALUES
+    ('Alice Johnson',  'alice@example.com',    '+1-555-123-4567', 95000, '123-45-6789', 'Senior engineer'),
+    ('Bob Smith',      'bob@company.org',      '+1-555-987-6543', 82000, '234-56-7890', 'Team lead'),
+    ('Charlie Brown',  'charlie@example.com',  '+1-555-111-2222', 67000, '345-67-8901', NULL),
+    ('Diana Prince',   'diana@wonder.net',     '+1-555-333-4444', 120000, '456-78-9012', 'Director'),
+    ('Eve Wilson',     'eve@example.com',      NULL,              55000, '567-89-0123', 'Intern');

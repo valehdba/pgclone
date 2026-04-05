@@ -3,7 +3,7 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2.1-orange)](https://github.com/valehdba/pgclone/releases/tag/v2.2.1)
+[![Version](https://img.shields.io/badge/version-3.0.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v3.0.0)
 
 A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 
@@ -11,6 +11,7 @@ A PostgreSQL extension that clones databases, schemas, tables, and functions bet
 
 - **Clone anything** — tables, schemas, functions, entire databases
 - **Fast data transfer** — uses PostgreSQL COPY protocol
+- **Data masking** — anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
 - **Async operations** — background workers with progress tracking and visual progress bar
 - **Parallel cloning** — multiple background workers for concurrent table cloning
 - **Selective cloning** — filter columns and rows with `columns` and `WHERE` options
@@ -130,10 +131,10 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
     - [x] v2.1.4: Unix domain socket auth (no more pg_hba.conf trust requirement)
     - [x] v2.2.0: Worker pool (fixed pool size instead of one bgworker per table)
     - [x] v2.2.1: Read-only transaction for WHERE clause (SQL injection protection)
-- [ ] v3.0.0: Data anonymization / masking
+- [x] v3.0.0: Data anonymization / masking
     - [ ] v3.1.0: Auto-Discovery of Sensitive Data
-    - [ ] v3.2.0 Applying Static Data Masking to cloned data 
-    - [ ] v3.3.0 Applying Dynamic Data Masking to cloned data  
+    - [ ] v3.2.0: Applying Static Data Masking to cloned data
+    - [ ] v3.3.0: Applying Dynamic Data Masking to cloned data
 - [ ] v4.0.0: Copy-on-Write (CoW) mode for local cloning
 
 ## License

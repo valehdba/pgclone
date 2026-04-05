@@ -2,6 +2,32 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [3.0.0]
+
+### Added
+- **Data Masking / Anonymization**: Column-level data masking applied during cloning via the `"mask"` JSON option
+  - 8 masking strategies: `email`, `name`, `phone`, `partial`, `hash`, `null`, `random_int`, `constant`
+  - `email`: preserves domain, masks local part (`alice@example.com` → `a***@example.com`)
+  - `name`: replaces with `XXXX`
+  - `phone`: keeps last 4 digits (`+1-555-123-4567` → `***-4567`)
+  - `partial`: configurable prefix/suffix retention (`Johnson` → `Jo***on` with prefix=2, suffix=2)
+  - `hash`: deterministic MD5 hash — preserves referential integrity across tables
+  - `null`: replaces with NULL
+  - `random_int`: random integer in configurable `[min, max]` range
+  - `constant`: fixed replacement value
+  - All strategies are NULL-safe (NULL inputs produce NULL outputs, except `constant` and `random_int`)
+- Masking is applied server-side as SQL expressions inside `COPY (SELECT ...) TO STDOUT` — no row-by-row processing overhead
+- Fully composable with existing `columns`, `where`, `indexes`, `constraints`, `triggers` options
+- `MaskRule` struct and `pgclone_build_mask_expr()` internal functions for extensible mask strategy architecture
+- 15 new pgTAP tests (52 total): email masking, name masking, null masking, hash masking, constant masking, combined masks with WHERE filter
+- `test_schema.employees` test fixture table with realistic sensitive data (names, emails, phones, salaries, SSNs)
+
+### Changed
+- `CloneOptions` struct extended with `masks[]` array and `num_masks` counter
+- `pgclone_parse_options()` handles `"mask"` JSON key with both simple string values (`"email"`) and object values (`{"type":"partial", "prefix":2, "suffix":3}`)
+- `pgclone_copy_data()` queries source catalog for column names when masks are active (without explicit column list) to apply per-column mask expressions
+- Version bumped to 3.0.0
+
 ## [2.2.1]
 
 ### Added

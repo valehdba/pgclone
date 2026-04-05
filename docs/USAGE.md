@@ -15,6 +15,7 @@ Complete reference for all pgclone functions and options.
 - [Conflict Resolution](#conflict-resolution-v100)
 - [Materialized Views](#materialized-views-v120)
 - [Exclusion Constraints](#exclusion-constraints-v120)
+- [Data Masking](#data-masking-v300)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -285,6 +286,82 @@ Exclusion constraints are fully supported and cloned automatically alongside PRI
 
 ---
 
+## Data Masking (v3.0.0)
+
+Clone tables with column-level data anonymization. Masking is applied server-side as SQL expressions during the COPY stream — no row-by-row overhead.
+
+### Simple Mask Types
+
+```sql
+-- Mask email addresses: alice@example.com → a***@example.com
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"email": "email"}}');
+
+-- Replace names with XXXX
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"full_name": "name"}}');
+
+-- Keep last 4 digits of phone: +1-555-123-4567 → ***-4567
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"phone": "phone"}}');
+
+-- Deterministic MD5 hash (preserves referential integrity across tables)
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"email": "hash"}}');
+
+-- Replace with NULL
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"ssn": "null"}}');
+```
+
+### Parameterized Mask Types
+
+```sql
+-- Partial masking: keep first 2 and last 3 chars
+-- "Johnson" → "Jo***son"
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"last_name": {"type": "partial", "prefix": 2, "suffix": 3}}}');
+
+-- Random integer in range
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"salary": {"type": "random_int", "min": 30000, "max": 150000}}}');
+
+-- Fixed replacement value
+SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+    '{"mask": {"notes": {"type": "constant", "value": "REDACTED"}}}');
+```
+
+### Multiple Masks + Other Options
+
+Masks compose with `columns`, `where`, and all other options:
+
+```sql
+SELECT pgclone_table(conn, 'hr', 'employees', true, 'employees_dev',
+    '{"mask": {"email": "email", "full_name": "name", "ssn": "null", "salary": {"type": "random_int", "min": 40000, "max": 200000}}, "where": "status = ''active''"}');
+```
+
+### Mask Strategy Reference
+
+| Strategy | Output | NULL handling |
+|----------|--------|---------------|
+| `email` | `a***@domain.com` | Preserves NULL |
+| `name` | `XXXX` | Preserves NULL |
+| `phone` | `***-4567` | Preserves NULL |
+| `partial` | `Jo***son` (configurable prefix/suffix) | Preserves NULL |
+| `hash` | `5d41402abc4b2a76b9719d911017c592` (MD5) | Preserves NULL |
+| `null` | `NULL` | Always NULL |
+| `random_int` | Random in `[min, max]` | Ignores NULL (always produces value) |
+| `constant` | Fixed value | Ignores NULL (always produces value) |
+
+### Notes
+
+- Masking is applied on the **source** side inside `COPY (SELECT ...) TO STDOUT`, so masked data never enters the local database unmasked.
+- The `hash` strategy uses PostgreSQL's built-in `md5()` function — no pgcrypto dependency required. Same input always produces the same hash, so you can maintain referential integrity by hashing the same column across multiple tables.
+- Columns not listed in the `mask` object pass through unmodified.
+- When combined with `columns`, only the listed columns are cloned; masks apply to those that match.
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -297,6 +374,7 @@ Exclusion constraints are fully supported and cloned automatically alongside PRI
 | `where` | string | none | Row filter condition |
 | `conflict` | string | `"error"` | Conflict strategy: error, skip, replace, rename |
 | `parallel` | int | 1 | Number of parallel workers (async only) |
+| `mask` | object | none | Column masking rules: `{"col": "type"}` or `{"col": {"type":"...", ...}}` |
 
 ---
 
