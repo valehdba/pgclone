@@ -320,6 +320,17 @@ pgclone_parse_options(const char *json_str)
                                     rule->type = PGCLONE_MASK_HASH;
                                 else if (strcmp(val_buf, "null") == 0)
                                     rule->type = PGCLONE_MASK_NULL;
+                                else if (strcmp(val_buf, "random_int") == 0)
+                                    rule->type = PGCLONE_MASK_RANDOM_INT;
+                                else if (strcmp(val_buf, "constant") == 0)
+                                {
+                                    rule->type = PGCLONE_MASK_CONSTANT;
+                                    /* Simple string "constant" has no value — default to empty.
+                                     * Use object form for custom value: {"type":"constant","value":"X"} */
+                                    if (rule->constant_val[0] == '\0')
+                                        strlcpy(rule->constant_val, "REDACTED",
+                                                sizeof(rule->constant_val));
+                                }
                                 else
                                     ereport(WARNING,
                                             (errmsg("pgclone: unknown mask type \"%s\" for column \"%s\", skipping",
@@ -524,9 +535,26 @@ pgclone_build_mask_expr(StringInfo buf, const char *col_ident,
             break;
 
         case PGCLONE_MASK_RANDOM_INT:
-            appendStringInfo(buf,
-                "floor(random() * (%d - %d + 1) + %d)::integer",
-                rule->range_max, rule->range_min, rule->range_min);
+            {
+                int rmin = rule->range_min;
+                int rmax = rule->range_max;
+
+                /* Default range if not specified (both zero from memset) */
+                if (rmin == 0 && rmax == 0)
+                    rmax = 99999;
+
+                /* Swap if inverted */
+                if (rmin > rmax)
+                {
+                    int tmp = rmin;
+                    rmin = rmax;
+                    rmax = tmp;
+                }
+
+                appendStringInfo(buf,
+                    "floor(random() * (%d - %d + 1) + %d)::integer",
+                    rmax, rmin, rmin);
+            }
             break;
 
         case PGCLONE_MASK_CONSTANT:
@@ -2723,16 +2751,17 @@ pgclone_mask_in_place(PG_FUNCTION_ARGS)
     PGresult       *res;
     StringInfoData  update_cmd;
     StringInfoData  result;
+    StringInfoData  wrapped;
     CloneOptions    opts;
-    char            wrapped_json[4096];
     int             i;
     bool            first_set = true;
     int64           rows_affected;
 
     /* Wrap the mask JSON in a full options object for parsing */
-    snprintf(wrapped_json, sizeof(wrapped_json),
-             "{\"mask\": %s}", mask_json);
-    opts = pgclone_parse_options(wrapped_json);
+    initStringInfo(&wrapped);
+    appendStringInfo(&wrapped, "{\"mask\": %s}", mask_json);
+    opts = pgclone_parse_options(wrapped.data);
+    pfree(wrapped.data);
 
     if (opts.num_masks == 0)
         ereport(ERROR,
