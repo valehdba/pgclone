@@ -2824,6 +2824,254 @@ pgclone_mask_in_place(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
+ * FUNCTION: pgclone_create_masking_policy(schema, table, mask_json,
+ *                                         privileged_role)
+ *
+ * Creates a dynamic masking policy on a local table:
+ *   1. Queries pg_attribute for all columns
+ *   2. Creates a view (table_masked) with mask expressions applied
+ *   3. Revokes SELECT on base table from PUBLIC
+ *   4. Grants SELECT on masked view to PUBLIC
+ *   5. Grants SELECT on base table to the privileged role
+ *
+ * Unprivileged users see masked data through the view.
+ * The privileged role sees raw data directly from the table.
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgclone_create_masking_policy);
+
+Datum
+pgclone_create_masking_policy(PG_FUNCTION_ARGS)
+{
+    text       *schema_t    = PG_GETARG_TEXT_PP(0);
+    text       *tablename_t = PG_GETARG_TEXT_PP(1);
+    text       *mask_json_t = PG_GETARG_TEXT_PP(2);
+    text       *role_t      = PG_GETARG_TEXT_PP(3);
+
+    char       *schema_name = text_to_cstring(schema_t);
+    char       *table_name  = text_to_cstring(tablename_t);
+    char       *mask_json   = text_to_cstring(mask_json_t);
+    char       *priv_role   = text_to_cstring(role_t);
+
+    PGconn         *local_conn;
+    PGresult       *col_res;
+    StringInfoData  wrapped;
+    StringInfoData  col_query;
+    StringInfoData  view_cmd;
+    StringInfoData  result;
+    CloneOptions    opts;
+    int             ncols, ci;
+    char            view_name[NAMEDATALEN * 2];
+
+    /* Parse mask rules */
+    initStringInfo(&wrapped);
+    appendStringInfo(&wrapped, "{\"mask\": %s}", mask_json);
+    opts = pgclone_parse_options(wrapped.data);
+    pfree(wrapped.data);
+
+    if (opts.num_masks == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: no valid mask rules in JSON"),
+                 errhint("Provide mask rules like: {\"email\": \"email\", \"name\": \"name\"}")));
+
+    /* Build view name: table_masked */
+    snprintf(view_name, sizeof(view_name), "%s_masked", table_name);
+
+    local_conn = pgclone_connect_local();
+
+    /* Query local catalog for column names */
+    initStringInfo(&col_query);
+    appendStringInfo(&col_query,
+        "SELECT a.attname "
+        "FROM pg_catalog.pg_attribute a "
+        "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s "
+        "AND a.attnum > 0 AND NOT a.attisdropped "
+        "ORDER BY a.attnum",
+        quote_literal_cstr(schema_name),
+        quote_literal_cstr(table_name));
+
+    col_res = PQexec(local_conn, col_query.data);
+    pfree(col_query.data);
+
+    if (PQresultStatus(col_res) != PGRES_TUPLES_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(local_conn));
+        PQclear(col_res);
+        PQfinish(local_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not fetch column list: %s", errmsg_str)));
+    }
+
+    ncols = PQntuples(col_res);
+    if (ncols == 0)
+    {
+        PQclear(col_res);
+        PQfinish(local_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_TABLE),
+                 errmsg("pgclone: table \"%s.%s\" not found or has no columns",
+                        schema_name, table_name)));
+    }
+
+    /* Build: CREATE OR REPLACE VIEW schema.table_masked AS
+     *        SELECT mask(col1) AS col1, col2, ... FROM schema.table */
+    initStringInfo(&view_cmd);
+    appendStringInfo(&view_cmd,
+        "CREATE OR REPLACE VIEW %s.%s AS SELECT ",
+        quote_identifier(schema_name),
+        quote_identifier(view_name));
+
+    for (ci = 0; ci < ncols; ci++)
+    {
+        const char *col_name = PQgetvalue(col_res, ci, 0);
+        const char *col_ident = quote_identifier(col_name);
+        const MaskRule *rule = pgclone_find_mask_rule(&opts, col_name);
+
+        if (ci > 0)
+            appendStringInfoString(&view_cmd, ", ");
+
+        if (rule != NULL)
+        {
+            pgclone_build_mask_expr(&view_cmd, col_ident, rule);
+            appendStringInfo(&view_cmd, " AS %s", col_ident);
+        }
+        else
+        {
+            appendStringInfoString(&view_cmd, col_ident);
+        }
+    }
+
+    appendStringInfo(&view_cmd, " FROM %s.%s",
+                     quote_identifier(schema_name),
+                     quote_identifier(table_name));
+
+    PQclear(col_res);
+
+    /* Step 1: Create the masked view */
+    if (!pgclone_exec_conn(local_conn, view_cmd.data))
+    {
+        PQfinish(local_conn);
+        pfree(view_cmd.data);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: failed to create masked view \"%s.%s\"",
+                        schema_name, view_name)));
+    }
+    pfree(view_cmd.data);
+
+    /* Step 2: Revoke direct table access from PUBLIC */
+    {
+        StringInfoData revoke_cmd;
+        initStringInfo(&revoke_cmd);
+        appendStringInfo(&revoke_cmd, "REVOKE SELECT ON %s.%s FROM PUBLIC",
+                         quote_identifier(schema_name),
+                         quote_identifier(table_name));
+        pgclone_exec_conn(local_conn, revoke_cmd.data);
+        pfree(revoke_cmd.data);
+    }
+
+    /* Step 3: Grant view access to PUBLIC */
+    {
+        StringInfoData grant_cmd;
+        initStringInfo(&grant_cmd);
+        appendStringInfo(&grant_cmd, "GRANT SELECT ON %s.%s TO PUBLIC",
+                         quote_identifier(schema_name),
+                         quote_identifier(view_name));
+        pgclone_exec_conn(local_conn, grant_cmd.data);
+        pfree(grant_cmd.data);
+    }
+
+    /* Step 4: Grant base table access to privileged role */
+    {
+        StringInfoData grant_priv;
+        initStringInfo(&grant_priv);
+        appendStringInfo(&grant_priv, "GRANT SELECT ON %s.%s TO %s",
+                         quote_identifier(schema_name),
+                         quote_identifier(table_name),
+                         quote_identifier(priv_role));
+        pgclone_exec_conn(local_conn, grant_priv.data);
+        pfree(grant_priv.data);
+    }
+
+    PQfinish(local_conn);
+
+    initStringInfo(&result);
+    appendStringInfo(&result,
+                     "OK: masking policy created on %s.%s "
+                     "(view: %s.%s, privileged role: %s, %d masked columns)",
+                     schema_name, table_name,
+                     schema_name, view_name,
+                     priv_role, opts.num_masks);
+
+    PG_RETURN_TEXT_P(cstring_to_text(result.data));
+}
+
+/* ===============================================================
+ * FUNCTION: pgclone_drop_masking_policy(schema, table)
+ *
+ * Removes a dynamic masking policy:
+ *   1. Drops the masked view (table_masked)
+ *   2. Re-grants SELECT on base table to PUBLIC
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgclone_drop_masking_policy);
+
+Datum
+pgclone_drop_masking_policy(PG_FUNCTION_ARGS)
+{
+    text       *schema_t    = PG_GETARG_TEXT_PP(0);
+    text       *tablename_t = PG_GETARG_TEXT_PP(1);
+
+    char       *schema_name = text_to_cstring(schema_t);
+    char       *table_name  = text_to_cstring(tablename_t);
+
+    PGconn         *local_conn;
+    StringInfoData  cmd;
+    StringInfoData  result;
+    char            view_name[NAMEDATALEN * 2];
+
+    snprintf(view_name, sizeof(view_name), "%s_masked", table_name);
+
+    local_conn = pgclone_connect_local();
+
+    /* Drop the masked view */
+    initStringInfo(&cmd);
+    appendStringInfo(&cmd, "DROP VIEW IF EXISTS %s.%s",
+                     quote_identifier(schema_name),
+                     quote_identifier(view_name));
+
+    if (!pgclone_exec_conn(local_conn, cmd.data))
+    {
+        PQfinish(local_conn);
+        pfree(cmd.data);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: failed to drop masked view \"%s.%s\"",
+                        schema_name, view_name)));
+    }
+
+    /* Re-grant SELECT on base table to PUBLIC */
+    resetStringInfo(&cmd);
+    appendStringInfo(&cmd, "GRANT SELECT ON %s.%s TO PUBLIC",
+                     quote_identifier(schema_name),
+                     quote_identifier(table_name));
+    pgclone_exec_conn(local_conn, cmd.data);
+
+    pfree(cmd.data);
+    PQfinish(local_conn);
+
+    initStringInfo(&result);
+    appendStringInfo(&result,
+                     "OK: masking policy removed from %s.%s (view %s.%s dropped)",
+                     schema_name, table_name,
+                     schema_name, view_name);
+
+    PG_RETURN_TEXT_P(cstring_to_text(result.data));
+}
+
+/* ===============================================================
  * FUNCTION: pgclone_version()
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgclone_version);
@@ -2831,7 +3079,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.2.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.3.0"));
 }
 
 /* ===============================================================

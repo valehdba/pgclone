@@ -2,6 +2,19 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [3.3.0]
+
+### Added
+- **Dynamic Data Masking via Views**: Role-based masking policies that preserve original data while presenting masked views to unprivileged users
+  - `pgclone_create_masking_policy(schema, table, mask_json, privileged_role)`: creates a masked view (`table_masked`), revokes base table SELECT from PUBLIC, grants view access to PUBLIC, grants direct table access to the privileged role
+  - `pgclone_drop_masking_policy(schema, table)`: drops the masked view and restores base table access to PUBLIC
+  - Uses the same `pgclone_build_mask_expr()` engine as clone-time and static masking — all 8 strategies work
+  - Queries local `pg_attribute` for column names, applies mask expressions to matching columns
+- 7 new pgTAP tests (73 total): policy creation, view existence, masked data verification, privileged role bypass, policy drop, view cleanup
+
+### Changed
+- Version bumped to 3.3.0
+
 ## [3.2.0]
 
 ### Added

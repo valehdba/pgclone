@@ -18,6 +18,7 @@ Complete reference for all pgclone functions and options.
 - [Data Masking](#data-masking-v300)
 - [Auto-Discovery of Sensitive Data](#auto-discovery-of-sensitive-data-v310)
 - [Static Data Masking](#static-data-masking-v320)
+- [Dynamic Data Masking](#dynamic-data-masking-v330)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -408,6 +409,75 @@ All 8 mask strategies work: `email`, `name`, `phone`, `partial`, `hash`, `null`,
 
 ---
 
+## Dynamic Data Masking (v3.3.0)
+
+Create role-based masking policies that **preserve original data** while presenting masked views to unprivileged users. Unlike static masking (which modifies data in-place), dynamic masking keeps the base table intact.
+
+### Create a masking policy
+
+```sql
+SELECT pgclone_create_masking_policy(
+    'public', 'employees',
+    '{"email": "email", "full_name": "name", "ssn": "null"}',
+    'data_admin'   -- this role can see unmasked data
+);
+```
+
+This does four things:
+
+1. Creates a view `public.employees_masked` with mask expressions applied
+2. Revokes `SELECT` on `public.employees` from `PUBLIC`
+3. Grants `SELECT` on `public.employees_masked` to `PUBLIC`
+4. Grants `SELECT` on `public.employees` to `data_admin`
+
+After this, regular users query `employees_masked` and see anonymized data. The `data_admin` role can still query `employees` directly to see raw data.
+
+### Drop a masking policy
+
+```sql
+SELECT pgclone_drop_masking_policy('public', 'employees');
+```
+
+This drops the `employees_masked` view and re-grants `SELECT` on the base table to `PUBLIC`.
+
+### Typical workflow
+
+```sql
+-- 1. Clone production data
+SELECT pgclone_table(conn, 'public', 'employees', true);
+
+-- 2. Discover sensitive columns
+SELECT pgclone_discover_sensitive(conn, 'public');
+
+-- 3. Apply dynamic masking policy
+SELECT pgclone_create_masking_policy(
+    'public', 'employees',
+    '{"email": "email", "full_name": "name", "salary": {"type": "random_int", "min": 40000, "max": 200000}, "ssn": "null"}',
+    'dba_team'
+);
+
+-- Regular users see masked data:
+-- SELECT * FROM public.employees_masked;
+--  id | full_name | email             | salary | ssn
+-- ----+-----------+-------------------+--------+------
+--   1 | XXXX      | a***@example.com  | 87432  | NULL
+
+-- dba_team role sees raw data:
+-- SELECT * FROM public.employees;
+--  id | full_name     | email             | salary | ssn
+-- ----+---------------+-------------------+--------+-------------
+--   1 | Alice Johnson | alice@example.com | 95000  | 123-45-6789
+```
+
+### Notes
+
+- The masked view name is always `<table_name>_masked`. If a view with that name already exists, it is replaced (`CREATE OR REPLACE VIEW`).
+- All 8 mask strategies from clone-time masking work in dynamic masking.
+- The view is a standard PostgreSQL view — it can be queried, joined, and used in subqueries like any other view.
+- Dropping the masking policy does not affect the base table data.
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -442,6 +512,8 @@ All 8 mask strategies work: `email`, `name`, `phone`, `partial`, `hash`, `null`,
 | `pgclone_database_create(conninfo, target_db, include_data, options)` | text | Create new DB and clone with options |
 | `pgclone_discover_sensitive(conninfo, schema)` | text | Scan source for sensitive columns, return mask suggestions as JSON |
 | `pgclone_mask_in_place(schema, table, mask_json)` | text | Apply masking to existing local table via UPDATE |
+| `pgclone_create_masking_policy(schema, table, mask_json, role)` | text | Create dynamic masking view + role-based access |
+| `pgclone_drop_masking_policy(schema, table)` | text | Drop masking view + restore base table access |
 | `pgclone_table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone_schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone_progress(job_id)` | json | Job progress as JSON |
