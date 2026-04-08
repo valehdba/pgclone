@@ -2,14 +2,14 @@
    "name": "pgclone",
    "abstract": "Clone PostgreSQL databases, schemas, tables between staging, test, dev and prod environments",
    "description": "PostgreSQL extension for easily cloning your DB, Schemas, Tables and more between environments",
-   "version": "3.2.0",
+   "version": "3.3.0",
    "maintainer": "Valeh Agayev <valeh.agayev@gmail.com>",
    "license": "postgresql",
    "provides": {
       "pgclone": {
          "abstract": "Clone PostgreSQL databases, schemas, and tables across environments",
-         "file": "sql/pgclone--3.2.0.sql",
-         "version": "3.2.0"
+         "file": "sql/pgclone--3.3.0.sql",
+         "version": "3.3.0"
       }
    },
    "prereqs": {
