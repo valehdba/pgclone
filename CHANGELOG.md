@@ -19,7 +19,7 @@ All notable changes to pgclone are documented in this file.
 - Masking is applied server-side as SQL expressions inside `COPY (SELECT ...) TO STDOUT` — no row-by-row processing overhead
 - Fully composable with existing `columns`, `where`, `indexes`, `constraints`, `triggers` options
 - `MaskRule` struct and `pgclone_build_mask_expr()` internal functions for extensible mask strategy architecture
-- 15 new pgTAP tests (52 total): email masking, name masking, null masking, hash masking, constant masking, combined masks with WHERE filter
+- 15 new pgTAP tests (53 total): email masking, name masking, null masking, hash masking, constant masking, combined masks with WHERE filter
 - `test_schema.employees` test fixture table with realistic sensitive data (names, emails, phones, salaries, SSNs)
 
 ### Changed
