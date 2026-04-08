@@ -12,6 +12,8 @@ A PostgreSQL extension that clones databases, schemas, tables, and functions bet
 - **Clone anything** — tables, schemas, functions, entire databases
 - **Fast data transfer** — uses PostgreSQL COPY protocol
 - **Data masking** — anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
+- **Auto-discovery** — scan source schemas for sensitive columns and get suggested mask rules
+- **Static & dynamic masking** — mask existing tables in-place, or create role-based masked views
 - **Async operations** — background workers with progress tracking and visual progress bar
 - **Parallel cloning** — multiple background workers for concurrent table cloning
 - **Selective cloning** — filter columns and rows with `columns` and `WHERE` options
@@ -109,9 +111,9 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 
 | Document | Description |
 |----------|-------------|
-| [Usage Guide](docs/USAGE.md) | All functions, parameters, and examples |
+| [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, and examples |
 | [Async Operations](docs/ASYNC.md) | Background workers, progress tracking, parallel cloning |
-| [Testing](docs/TESTING.md) | Test infrastructure, pgTAP, Docker, CI/CD |
+| [Testing](docs/TESTING.md) | Test infrastructure, 73 pgTAP tests, Docker, CI/CD |
 | [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, PG version compatibility |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 

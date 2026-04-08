@@ -171,7 +171,7 @@ The test fixture (`test/fixtures/seed.sql`) creates:
 Add to `test/pgclone_test.sql`, increment the plan count:
 
 ```sql
-SELECT plan(34);  -- was 33
+SELECT plan(74);  -- increment after adding your test
 
 -- Your new test
 SELECT lives_ok(

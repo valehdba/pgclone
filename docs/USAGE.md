@@ -529,3 +529,4 @@ SELECT pgclone_create_masking_policy(
 - Maximum 512 tables per parallel pool operation.
 - Only one pool-based parallel operation can run at a time per cluster.
 - `WHERE` clause in data filtering is validated against SQL injection patterns and executed inside a read-only transaction on the source. DDL/DML keywords and semicolons are rejected.
+- Data masking (`"mask"` option) is currently supported in synchronous clone functions only. Async background workers do not yet pass mask rules.
