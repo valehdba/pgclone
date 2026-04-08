@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(52);
+SELECT plan(53);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
