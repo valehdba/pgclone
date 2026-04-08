@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
 [![Version](https://img.shields.io/badge/version-2.2.1-orange)](https://github.com/valehdba/pgclone/releases/tag/v2.2.1)
 
-A PostgreSQL extension written in C that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
+A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 
 ## Key Features
 
