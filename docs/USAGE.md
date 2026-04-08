@@ -16,6 +16,8 @@ Complete reference for all pgclone functions and options.
 - [Materialized Views](#materialized-views-v120)
 - [Exclusion Constraints](#exclusion-constraints-v120)
 - [Data Masking](#data-masking-v300)
+- [Auto-Discovery of Sensitive Data](#auto-discovery-of-sensitive-data-v310)
+- [Static Data Masking](#static-data-masking-v320)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -362,6 +364,50 @@ SELECT pgclone_table(conn, 'hr', 'employees', true, 'employees_dev',
 
 ---
 
+## Auto-Discovery of Sensitive Data (v3.1.0)
+
+Automatically scan a source schema for columns that look like sensitive data:
+
+```sql
+SELECT pgclone_discover_sensitive(
+    'host=source-server dbname=mydb user=postgres',
+    'public'
+);
+```
+
+Returns JSON grouped by table with suggested mask strategies:
+
+```json
+{"employees": {"email": "email", "full_name": "name", "phone": "phone", "salary": "random_int", "ssn": "null"}, "users": {"password": "hash", "api_key": "hash"}}
+```
+
+The output can be used directly as the `"mask"` option value in a clone call. Detected patterns include: email, name (first/last/full), phone/mobile, SSN/national ID, salary/income, password/token/api_key, address/street, date of birth, credit card, and IP address.
+
+---
+
+## Static Data Masking (v3.2.0)
+
+Apply masking to an already-cloned local table without needing the source connection:
+
+```sql
+-- Mask an existing table in place
+SELECT pgclone_mask_in_place(
+    'public', 'employees',
+    '{"email": "email", "full_name": "name", "ssn": "null"}'
+);
+-- Returns: OK: masked 1000 rows in public.employees (3 columns)
+```
+
+The mask JSON uses the same format as clone-time masking. This is useful for:
+
+- Masking tables that were cloned without masking
+- Applying different mask strategies after initial clone
+- Sanitizing existing development/staging databases
+
+All 8 mask strategies work: `email`, `name`, `phone`, `partial`, `hash`, `null`, `random_int`, `constant`.
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -394,6 +440,8 @@ SELECT pgclone_table(conn, 'hr', 'employees', true, 'employees_dev',
 | `pgclone_database(conninfo, include_data, options)` | text | Clone database with options |
 | `pgclone_database_create(conninfo, target_db)` | text | Create new DB and clone |
 | `pgclone_database_create(conninfo, target_db, include_data, options)` | text | Create new DB and clone with options |
+| `pgclone_discover_sensitive(conninfo, schema)` | text | Scan source for sensitive columns, return mask suggestions as JSON |
+| `pgclone_mask_in_place(schema, table, mask_json)` | text | Apply masking to existing local table via UPDATE |
 | `pgclone_table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone_schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone_progress(job_id)` | json | Job progress as JSON |

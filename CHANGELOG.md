@@ -2,6 +2,32 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [3.2.0]
+
+### Added
+- **Static Data Masking on Local Tables**: `pgclone_mask_in_place(schema, table, mask_json)` applies masking to already-cloned tables via UPDATE statements — no source connection needed
+  - Uses the same mask JSON format as clone-time masking: `{"email": "email", "name": "name", "ssn": "null"}`
+  - Reuses `pgclone_build_mask_expr()` for consistent masking between clone-time and post-clone paths
+  - Wraps user-provided JSON into clone options format for unified parsing
+  - Returns summary: `OK: masked N rows in schema.table (M columns)`
+- 7 new pgTAP tests (66 total): clone-then-mask workflow, verify original data removed, names/SSNs masked, row count preserved
+
+### Changed
+- Version bumped to 3.2.0
+
+## [3.1.0]
+
+### Added
+- **Auto-Discovery of Sensitive Data**: `pgclone_discover_sensitive(conninfo, schema_name)` scans the source catalog for columns matching ~40 sensitive data patterns and returns suggested mask rules as JSON
+  - Pattern categories: email, name, phone, SSN/national ID, financial (salary/income), secrets/credentials (password/token/api_key), address, date of birth, credit card, IP address
+  - Case-insensitive matching with LIKE-style wildcards against column names
+  - Output is a JSON object grouped by table, ready to paste into the `"mask"` option: `{"employees": {"email": "email", "salary": "random_int", "ssn": "null"}}`
+  - Scans regular tables and partitioned tables (relkind `r` and `p`)
+- 6 new pgTAP tests (59 total): discovery function runs, detects email/full_name/phone/salary/ssn columns
+
+### Changed
+- Version bumped to 3.1.0
+
 ## [3.0.0]
 
 ### Added

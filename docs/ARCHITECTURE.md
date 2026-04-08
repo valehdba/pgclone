@@ -7,12 +7,14 @@ This document describes the internal architecture of pgclone, covering the codeb
 ```
 pgclone/
 ├── src/
-│   ├── pgclone.c          # Main extension (~3500 lines)
+│   ├── pgclone.c          # Main extension (~3800 lines)
 │   │                      #   - Table, schema, database clone functions
 │   │                      #   - DDL generation (indexes, constraints, triggers, views)
 │   │                      #   - COPY protocol data transfer
 │   │                      #   - Selective column / WHERE filter logic
 │   │                      #   - Data masking / anonymization engine
+│   │                      #   - Auto-discovery of sensitive data
+│   │                      #   - Static mask-in-place via UPDATE
 │   │                      #   - _PG_init(), shmem hooks, version function
 │   ├── pgclone_bgw.c      # Background worker (~1000 lines)
 │   │                      #   - bgw_main entry point
@@ -28,7 +30,7 @@ pgclone/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
 │   ├── fixtures/seed.sql  # Test data
-│   ├── pgclone_test.sql   # 52 pgTAP tests
+│   ├── pgclone_test.sql   # 66 pgTAP tests
 │   ├── run_tests.sh       # Test orchestrator
 │   ├── run_all.sh         # Multi-version runner
 │   ├── test_async.sh      # Async test suite (8 tests incl. worker pool)

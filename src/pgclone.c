@@ -2468,6 +2468,333 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
+ * FUNCTION: pgclone_discover_sensitive(conninfo, schema_name)
+ *
+ * Scans the source catalog for columns whose names match common
+ * sensitive data patterns and returns a JSON "mask" object with
+ * suggested masking strategies, ready to use in clone options.
+ *
+ * Pattern matching is case-insensitive against column names.
+ * Only user columns (attnum > 0, not dropped) are inspected.
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgclone_discover_sensitive);
+
+Datum
+pgclone_discover_sensitive(PG_FUNCTION_ARGS)
+{
+    text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
+    text       *schema_t          = PG_GETARG_TEXT_PP(1);
+    char       *source_conninfo   = text_to_cstring(source_conninfo_t);
+    char       *schema_name       = text_to_cstring(schema_t);
+
+    PGconn         *source_conn;
+    PGresult       *res;
+    StringInfoData  query;
+    StringInfoData  result;
+    int             nrows, i;
+    bool            first_table = true;
+
+    /*
+     * Pattern rules: column name patterns mapped to mask strategies.
+     * Patterns use SQL LIKE (case-insensitive via lower()).
+     * Order matters: first match wins per column.
+     */
+    static const struct {
+        const char *pattern;    /* SQL LIKE pattern */
+        const char *strategy;   /* mask type name */
+    } rules[] = {
+        /* Email patterns */
+        {"%email%",         "email"},
+        {"%e_mail%",        "email"},
+        /* Name patterns */
+        {"%first_name%",    "name"},
+        {"%last_name%",     "name"},
+        {"%full_name%",     "name"},
+        {"%firstname%",     "name"},
+        {"%lastname%",      "name"},
+        {"%fullname%",      "name"},
+        {"%_name",          "name"},      /* ends with _name but not column_name-like */
+        /* Phone patterns */
+        {"%phone%",         "phone"},
+        {"%mobile%",        "phone"},
+        {"%telephone%",     "phone"},
+        {"%fax%",           "phone"},
+        /* SSN / National ID */
+        {"%ssn%",           "null"},
+        {"%social_security%","null"},
+        {"%national_id%",   "null"},
+        {"%tax_id%",        "null"},
+        {"%taxpayer%",      "null"},
+        /* Financial */
+        {"%salary%",        "random_int"},
+        {"%income%",        "random_int"},
+        {"%wage%",          "random_int"},
+        {"%compensation%",  "random_int"},
+        /* Secrets / credentials */
+        {"%password%",      "hash"},
+        {"%passwd%",        "hash"},
+        {"%secret%",        "hash"},
+        {"%token%",         "hash"},
+        {"%api_key%",       "hash"},
+        {"%apikey%",        "hash"},
+        /* Address */
+        {"%address%",       "constant"},
+        {"%street%",        "constant"},
+        {"%zip%",           "partial"},
+        {"%zipcode%",       "partial"},
+        {"%postal%",        "partial"},
+        /* Date of birth */
+        {"%birth%",         "null"},
+        {"%dob%",           "null"},
+        {"%date_of_birth%", "null"},
+        /* Credit card */
+        {"%card_number%",   "null"},
+        {"%credit_card%",   "null"},
+        {"%ccn%",           "null"},
+        {"%cvv%",           "null"},
+        /* IP / location */
+        {"%ip_address%",    "hash"},
+        {"%ipaddress%",     "hash"},
+        {NULL, NULL}
+    };
+
+    source_conn = pgclone_connect(source_conninfo);
+
+    /*
+     * Query all user tables and their columns in the given schema.
+     * We fetch table_name + column_name pairs, then match patterns in C.
+     */
+    initStringInfo(&query);
+    appendStringInfo(&query,
+        "SELECT c.relname AS table_name, "
+        "       a.attname AS column_name "
+        "FROM pg_catalog.pg_class c "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
+        "WHERE n.nspname = %s "
+        "AND c.relkind IN ('r', 'p') "   /* regular tables + partitioned */
+        "AND a.attnum > 0 AND NOT a.attisdropped "
+        "ORDER BY c.relname, a.attnum",
+        quote_literal_cstr(schema_name));
+
+    res = pgclone_exec(source_conn, query.data);
+    pfree(query.data);
+
+    nrows = PQntuples(res);
+
+    /*
+     * Build JSON result grouped by table:
+     * {
+     *   "table1": {"col1": "email", "col2": "name"},
+     *   "table2": {"col3": "phone"}
+     * }
+     */
+    initStringInfo(&result);
+    appendStringInfoChar(&result, '{');
+
+    {
+        char current_table[NAMEDATALEN];
+        bool first_col_in_table = true;
+        int  matched_in_table = 0;
+
+        current_table[0] = '\0';
+
+        for (i = 0; i < nrows; i++)
+        {
+            const char *tbl = PQgetvalue(res, i, 0);
+            const char *col = PQgetvalue(res, i, 1);
+            const char *matched_strategy = NULL;
+            int         ri;
+            char        col_lower[NAMEDATALEN];
+            int         cl;
+
+            /* Lowercase the column name for matching */
+            for (cl = 0; col[cl] && cl < NAMEDATALEN - 1; cl++)
+                col_lower[cl] = (col[cl] >= 'A' && col[cl] <= 'Z')
+                                ? (col[cl] + 32) : col[cl];
+            col_lower[cl] = '\0';
+
+            /* Match against pattern rules */
+            for (ri = 0; rules[ri].pattern != NULL; ri++)
+            {
+                const char *pat = rules[ri].pattern;
+                bool match = false;
+
+                /*
+                 * Simple LIKE matching in C:
+                 * Only supports leading/trailing '%' wildcards.
+                 */
+                if (pat[0] == '%' && pat[strlen(pat) - 1] == '%')
+                {
+                    /* %substring% — contains */
+                    char substr[128];
+                    int plen = strlen(pat) - 2;
+                    if (plen > 0 && plen < (int)sizeof(substr))
+                    {
+                        memcpy(substr, pat + 1, plen);
+                        substr[plen] = '\0';
+                        match = (strstr(col_lower, substr) != NULL);
+                    }
+                }
+                else if (pat[0] == '%')
+                {
+                    /* %suffix — ends with */
+                    const char *suffix = pat + 1;
+                    int slen = strlen(suffix);
+                    int clen = strlen(col_lower);
+                    if (clen >= slen)
+                        match = (strcmp(col_lower + clen - slen, suffix) == 0);
+                }
+
+                if (match)
+                {
+                    matched_strategy = rules[ri].strategy;
+                    break;
+                }
+            }
+
+            if (matched_strategy == NULL)
+                continue;
+
+            /* New table? Close previous table's object and open new one. */
+            if (strcmp(tbl, current_table) != 0)
+            {
+                if (matched_in_table > 0)
+                    appendStringInfoChar(&result, '}');
+
+                if (!first_table)
+                    appendStringInfoString(&result, ", ");
+
+                appendStringInfo(&result, "\"%s\": {", tbl);
+                strlcpy(current_table, tbl, NAMEDATALEN);
+                first_table = false;
+                first_col_in_table = true;
+                matched_in_table = 0;
+            }
+
+            if (!first_col_in_table)
+                appendStringInfoString(&result, ", ");
+
+            appendStringInfo(&result, "\"%s\": \"%s\"",
+                             col, matched_strategy);
+            first_col_in_table = false;
+            matched_in_table++;
+        }
+
+        /* Close last table object if any */
+        if (matched_in_table > 0)
+            appendStringInfoChar(&result, '}');
+    }
+
+    appendStringInfoChar(&result, '}');
+
+    PQclear(res);
+    PQfinish(source_conn);
+
+    PG_RETURN_TEXT_P(cstring_to_text(result.data));
+}
+
+/* ===============================================================
+ * FUNCTION: pgclone_mask_in_place(schema_name, table_name, mask_json)
+ *
+ * Applies data masking to an existing LOCAL table using UPDATE.
+ * No source connection needed — works on already-cloned data.
+ *
+ * Uses a loopback libpq connection to execute:
+ *   UPDATE schema.table SET col1 = mask_expr(col1), col2 = ...
+ *
+ * The mask_json is the same format as the "mask" option in clone:
+ *   {"email": "email", "name": "name", "ssn": "null"}
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgclone_mask_in_place);
+
+Datum
+pgclone_mask_in_place(PG_FUNCTION_ARGS)
+{
+    text       *schema_t    = PG_GETARG_TEXT_PP(0);
+    text       *tablename_t = PG_GETARG_TEXT_PP(1);
+    text       *mask_json_t = PG_GETARG_TEXT_PP(2);
+
+    char       *schema_name = text_to_cstring(schema_t);
+    char       *table_name  = text_to_cstring(tablename_t);
+    char       *mask_json   = text_to_cstring(mask_json_t);
+
+    PGconn         *local_conn;
+    PGresult       *res;
+    StringInfoData  update_cmd;
+    StringInfoData  result;
+    CloneOptions    opts;
+    char            wrapped_json[4096];
+    int             i;
+    bool            first_set = true;
+    int64           rows_affected;
+
+    /* Wrap the mask JSON in a full options object for parsing */
+    snprintf(wrapped_json, sizeof(wrapped_json),
+             "{\"mask\": %s}", mask_json);
+    opts = pgclone_parse_options(wrapped_json);
+
+    if (opts.num_masks == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: no valid mask rules in JSON"),
+                 errhint("Provide mask rules like: {\"email\": \"email\", \"name\": \"name\"}")));
+
+    /* Build UPDATE statement */
+    initStringInfo(&update_cmd);
+    appendStringInfo(&update_cmd, "UPDATE %s.%s SET ",
+                     quote_identifier(schema_name),
+                     quote_identifier(table_name));
+
+    for (i = 0; i < opts.num_masks; i++)
+    {
+        const MaskRule *rule = &opts.masks[i];
+        const char *col_ident = quote_identifier(rule->column);
+        StringInfoData expr;
+
+        if (!first_set)
+            appendStringInfoString(&update_cmd, ", ");
+
+        initStringInfo(&expr);
+        pgclone_build_mask_expr(&expr, col_ident, rule);
+
+        appendStringInfo(&update_cmd, "%s = %s", col_ident, expr.data);
+        pfree(expr.data);
+        first_set = false;
+    }
+
+    local_conn = pgclone_connect_local();
+
+    res = PQexec(local_conn, update_cmd.data);
+
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(local_conn));
+        PQclear(res);
+        PQfinish(local_conn);
+        pfree(update_cmd.data);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: mask_in_place UPDATE failed: %s", errmsg_str)));
+    }
+
+    rows_affected = atol(PQcmdTuples(res));
+    PQclear(res);
+    PQfinish(local_conn);
+
+    initStringInfo(&result);
+    appendStringInfo(&result,
+                     "OK: masked %ld rows in %s.%s (%d columns)",
+                     (long) rows_affected,
+                     schema_name, table_name,
+                     opts.num_masks);
+
+    pfree(update_cmd.data);
+
+    PG_RETURN_TEXT_P(cstring_to_text(result.data));
+}
+
+/* ===============================================================
  * FUNCTION: pgclone_version()
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgclone_version);
@@ -2475,7 +2802,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.0.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.2.0"));
 }
 
 /* ===============================================================

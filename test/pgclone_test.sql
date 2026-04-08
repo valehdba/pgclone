@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(53);
+SELECT plan(66);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -387,6 +387,114 @@ SELECT results_eq(
       WHERE full_name = 'XXXX'$$,
     ARRAY[4],
     'all names in combo table masked to XXXX'
+);
+
+-- ============================================================
+-- TEST GROUP 19: Auto-discovery of sensitive data
+-- ============================================================
+
+-- Discover sensitive columns in test_schema (from source)
+SELECT lives_ok(
+    format('SELECT pgclone_discover_sensitive(%L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema'),
+    'pgclone_discover_sensitive runs without error'
+);
+
+-- Result should contain JSON with employees table detected columns
+-- The employees table has: full_name, email, phone, salary, ssn
+SELECT ok(
+    (SELECT pgclone_discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%email%'),
+    'discover detects email column'
+);
+
+SELECT ok(
+    (SELECT pgclone_discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%full_name%'),
+    'discover detects full_name column'
+);
+
+SELECT ok(
+    (SELECT pgclone_discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%phone%'),
+    'discover detects phone column'
+);
+
+SELECT ok(
+    (SELECT pgclone_discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%salary%'),
+    'discover detects salary column'
+);
+
+SELECT ok(
+    (SELECT pgclone_discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%ssn%'),
+    'discover detects ssn column'
+);
+
+-- ============================================================
+-- TEST GROUP 20: Static masking on cloned data (mask_in_place)
+-- ============================================================
+
+-- First: clone employees table without masking
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_inplace'),
+    'clone employees table for in-place masking'
+);
+
+-- Verify original data is present before masking
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE email = 'alice@example.com'$$,
+    ARRAY[1],
+    'original alice email present before mask_in_place'
+);
+
+-- Apply in-place masking
+SELECT lives_ok(
+    $$SELECT pgclone_mask_in_place(
+        'test_schema', 'employees_inplace',
+        '{"email": "email", "full_name": "name", "ssn": "null"}')$$,
+    'pgclone_mask_in_place runs without error'
+);
+
+-- Verify emails are masked
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE email = 'alice@example.com'$$,
+    ARRAY[0],
+    'original alice email removed after mask_in_place'
+);
+
+-- Verify names are masked
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[5],
+    'all names masked to XXXX after mask_in_place'
+);
+
+-- Verify SSNs are nullified
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE ssn IS NULL$$,
+    ARRAY[5],
+    'all SSNs nullified after mask_in_place'
+);
+
+-- Row count should be unchanged
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_inplace',
+    ARRAY[5],
+    'row count unchanged after mask_in_place'
 );
 
 SELECT * FROM finish();
