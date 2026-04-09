@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(79);
+SELECT plan(84);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -588,6 +588,56 @@ SELECT ok(
 SELECT ok(
     (SELECT rolcreatedb FROM pg_roles WHERE rolname = 'test_admin'),
     'test_admin has CREATEDB attribute'
+);
+
+-- ============================================================
+-- TEST GROUP 23: Clone verification (pgclone_verify)
+-- ============================================================
+
+-- Verify against source for test_schema (already cloned in group 5)
+SELECT lives_ok(
+    format('SELECT * FROM pgclone_verify(%L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema'),
+    'pgclone_verify with schema filter runs without error'
+);
+
+-- Verify result has expected columns (5 columns)
+SELECT results_eq(
+    format($$SELECT count(*)::integer FROM pgclone_verify(%L, %L)$$,
+        current_setting('app.source_conninfo'),
+        'test_schema'),
+    $$SELECT count(*)::integer FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'test_schema' AND c.relkind IN ('r', 'p')$$,
+    'verify returns one row per source table in schema'
+);
+
+-- Verify all-schemas overload works
+SELECT lives_ok(
+    format('SELECT * FROM pgclone_verify(%L)',
+        current_setting('app.source_conninfo')),
+    'pgclone_verify without schema filter runs without error'
+);
+
+-- Verify that the customers table shows a match (cloned in group 5)
+SELECT results_eq(
+    format($$SELECT match FROM pgclone_verify(%L, %L)
+             WHERE table_name = 'customers' LIMIT 1$$,
+        current_setting('app.source_conninfo'),
+        'test_schema'),
+    ARRAY['✓'::text],
+    'customers table shows match after clone'
+);
+
+-- Verify simple_test also matches (cloned in group 2)
+SELECT results_eq(
+    format($$SELECT match FROM pgclone_verify(%L, %L)
+             WHERE table_name = 'simple_test' LIMIT 1$$,
+        current_setting('app.source_conninfo'),
+        'public'),
+    ARRAY['✓'::text],
+    'simple_test table shows match after clone'
 );
 
 SELECT * FROM finish();

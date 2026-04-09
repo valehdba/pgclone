@@ -20,6 +20,7 @@ Complete reference for all pgclone functions and options.
 - [Static Data Masking](#static-data-masking-v320)
 - [Dynamic Data Masking](#dynamic-data-masking-v330)
 - [Clone Roles and Permissions](#clone-roles-and-permissions-v340)
+- [Clone Verification](#clone-verification-v350)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -554,6 +555,54 @@ SELECT pgclone_clone_roles(
 
 ---
 
+## Clone Verification (v3.5.0)
+
+Compare row counts between source and target databases to verify clone completeness.
+
+### Verify a specific schema
+
+```sql
+SELECT * FROM pgclone_verify(
+    'host=source-server dbname=prod user=postgres',
+    'app_schema'
+);
+```
+
+```
+ schema_name |  table_name  | source_rows | target_rows | match
+-------------+--------------+-------------+-------------+--------------
+ app_schema  | customers    |       15230 |       15230 | ✓
+ app_schema  | orders       |      148920 |      148920 | ✓
+ app_schema  | payments     |       98100 |       97855 | ✗
+ app_schema  | audit_log    |     1204500 |           0 | ✗ (missing)
+```
+
+### Verify all schemas
+
+```sql
+SELECT * FROM pgclone_verify(
+    'host=source-server dbname=prod user=postgres'
+);
+```
+
+Returns one row per table across all user schemas.
+
+### Match indicators
+
+| Indicator | Meaning |
+|-----------|---------|
+| `✓` | Row counts are equal |
+| `✗` | Row counts differ |
+| `✗ (missing)` | Table exists on source but not on target |
+
+### Notes
+
+- Row counts use `pg_class.reltuples` for fast approximate counts — no full table scans. Run `ANALYZE` on both source and target for accurate results.
+- Works with regular and partitioned tables.
+- Useful after `pgclone_schema()` or `pgclone_database()` to confirm all data was transferred.
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -592,6 +641,8 @@ SELECT pgclone_clone_roles(
 | `pgclone_drop_masking_policy(schema, table)` | text | Drop masking view + restore base table access |
 | `pgclone_clone_roles(conninfo)` | text | Clone all non-system roles with passwords, attributes, memberships, and permissions |
 | `pgclone_clone_roles(conninfo, role_names)` | text | Clone specific roles (comma-separated) with passwords, attributes, and permissions |
+| `pgclone_verify(conninfo)` | table | Compare row counts for all tables across source and target |
+| `pgclone_verify(conninfo, schema)` | table | Compare row counts for tables in a specific schema |
 | `pgclone_table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone_schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone_progress(job_id)` | json | Job progress as JSON |
