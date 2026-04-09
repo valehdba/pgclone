@@ -3517,6 +3517,232 @@ pgclone_clone_roles(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
+ * FUNCTION: pgclone_verify(source_conninfo [, schema_name])
+ *
+ * SET-RETURNING FUNCTION that compares row counts between source
+ * and local (target) databases, table by table.
+ *
+ * Returns columns:
+ *   schema_name, table_name, source_rows, target_rows, match
+ *
+ * Overloads:
+ *   pgclone_verify(conninfo)           -- all user schemas
+ *   pgclone_verify(conninfo, schema)   -- single schema
+ *
+ * "match" column values:
+ *   '✓'           — row counts are equal
+ *   '✗'           — row counts differ
+ *   '✗ (missing)' — table exists on source but not on target
+ * =============================================================== */
+
+/* Per-row data stored during SRF iteration */
+typedef struct VerifyRow
+{
+    char    schema_name[NAMEDATALEN];
+    char    table_name[NAMEDATALEN];
+    int64   source_rows;
+    int64   target_rows;
+    bool    target_exists;
+} VerifyRow;
+
+/* Context stored across SRF calls */
+typedef struct VerifyState
+{
+    VerifyRow  *rows;
+    int         num_rows;
+    int         current_row;
+} VerifyState;
+
+#define PGCLONE_VERIFY_COLS 5
+
+PG_FUNCTION_INFO_V1(pgclone_verify);
+
+Datum
+pgclone_verify(PG_FUNCTION_ARGS)
+{
+    FuncCallContext *funcctx;
+
+    if (SRF_IS_FIRSTCALL())
+    {
+        MemoryContext   oldctx;
+        TupleDesc       tupdesc;
+        VerifyState    *state;
+
+        text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
+        char       *source_conninfo   = text_to_cstring(source_conninfo_t);
+        char       *schema_filter     = NULL;
+
+        PGconn         *source_conn;
+        PGconn         *local_conn;
+        PGresult       *src_res;
+        StringInfoData  query;
+        int             ntables, i;
+
+        if (PG_NARGS() >= 2 && !PG_ARGISNULL(1))
+            schema_filter = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldctx  = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        /* Build tuple descriptor */
+        tupdesc = CreateTemplateTupleDesc(PGCLONE_VERIFY_COLS);
+        TupleDescInitEntry(tupdesc, 1, "schema_name",  TEXTOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 2, "table_name",   TEXTOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 3, "source_rows",  INT8OID, -1, 0);
+        TupleDescInitEntry(tupdesc, 4, "target_rows",  INT8OID, -1, 0);
+        TupleDescInitEntry(tupdesc, 5, "match",        TEXTOID, -1, 0);
+        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+
+        /* Connect to both source and local */
+        source_conn = pgclone_connect(source_conninfo);
+        local_conn = pgclone_connect_local();
+
+        /*
+         * Query source for all tables with row counts.
+         * Uses pg_class.reltuples for fast approximate counts
+         * (avoids full table scans). For exact counts after
+         * ANALYZE, this is accurate enough for verification.
+         */
+        initStringInfo(&query);
+        if (schema_filter != NULL)
+        {
+            appendStringInfo(&query,
+                "SELECT n.nspname, c.relname, "
+                "GREATEST(c.reltuples::bigint, 0) AS row_count "
+                "FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relkind IN ('r', 'p') "
+                "AND n.nspname = %s "
+                "ORDER BY n.nspname, c.relname",
+                quote_literal_cstr(schema_filter));
+        }
+        else
+        {
+            appendStringInfoString(&query,
+                "SELECT n.nspname, c.relname, "
+                "GREATEST(c.reltuples::bigint, 0) AS row_count "
+                "FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE c.relkind IN ('r', 'p') "
+                "AND n.nspname NOT LIKE 'pg_%' "
+                "AND n.nspname <> 'information_schema' "
+                "ORDER BY n.nspname, c.relname");
+        }
+
+        src_res = PQexec(source_conn, query.data);
+
+        if (PQresultStatus(src_res) != PGRES_TUPLES_OK)
+        {
+            char *errmsg_str = pstrdup(PQerrorMessage(source_conn));
+            PQclear(src_res);
+            PQfinish(source_conn);
+            PQfinish(local_conn);
+            pfree(query.data);
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgclone: could not query source tables: %s",
+                            errmsg_str)));
+        }
+
+        ntables = PQntuples(src_res);
+
+        /* Allocate state in multi_call context */
+        state = palloc0(sizeof(VerifyState));
+        state->rows = palloc0(sizeof(VerifyRow) * (ntables > 0 ? ntables : 1));
+        state->num_rows = ntables;
+        state->current_row = 0;
+
+        /* For each source table, get local row count */
+        for (i = 0; i < ntables; i++)
+        {
+            const char *nsp = PQgetvalue(src_res, i, 0);
+            const char *tbl = PQgetvalue(src_res, i, 1);
+            int64       src_count = atol(PQgetvalue(src_res, i, 2));
+            PGresult   *local_res;
+            StringInfoData local_query;
+
+            strlcpy(state->rows[i].schema_name, nsp, NAMEDATALEN);
+            strlcpy(state->rows[i].table_name, tbl, NAMEDATALEN);
+            state->rows[i].source_rows = src_count;
+
+            /* Check if table exists locally and get its row count */
+            initStringInfo(&local_query);
+            appendStringInfo(&local_query,
+                "SELECT GREATEST(c.reltuples::bigint, 0) "
+                "FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = %s AND c.relname = %s "
+                "AND c.relkind IN ('r', 'p')",
+                quote_literal_cstr(nsp),
+                quote_literal_cstr(tbl));
+
+            local_res = PQexec(local_conn, local_query.data);
+            pfree(local_query.data);
+
+            if (PQresultStatus(local_res) == PGRES_TUPLES_OK &&
+                PQntuples(local_res) > 0)
+            {
+                state->rows[i].target_rows = atol(PQgetvalue(local_res, 0, 0));
+                state->rows[i].target_exists = true;
+            }
+            else
+            {
+                state->rows[i].target_rows = 0;
+                state->rows[i].target_exists = false;
+            }
+            PQclear(local_res);
+        }
+
+        PQclear(src_res);
+        pfree(query.data);
+        PQfinish(source_conn);
+        PQfinish(local_conn);
+
+        funcctx->user_fctx = state;
+        MemoryContextSwitchTo(oldctx);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+
+    {
+        VerifyState *state = (VerifyState *) funcctx->user_fctx;
+
+        if (state->current_row < state->num_rows)
+        {
+            VerifyRow  *row = &state->rows[state->current_row];
+            Datum       values[PGCLONE_VERIFY_COLS];
+            bool        nulls[PGCLONE_VERIFY_COLS];
+            HeapTuple   tuple;
+            const char *match_str;
+
+            memset(nulls, 0, sizeof(nulls));
+
+            values[0] = CStringGetTextDatum(row->schema_name);
+            values[1] = CStringGetTextDatum(row->table_name);
+            values[2] = Int64GetDatum(row->source_rows);
+            values[3] = Int64GetDatum(row->target_rows);
+
+            /* Determine match status */
+            if (!row->target_exists)
+                match_str = "\xe2\x9c\x97 (missing)";  /* ✗ (missing) */
+            else if (row->source_rows == row->target_rows)
+                match_str = "\xe2\x9c\x93";            /* ✓ */
+            else
+                match_str = "\xe2\x9c\x97";            /* ✗ */
+
+            values[4] = CStringGetTextDatum(match_str);
+
+            tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+            state->current_row++;
+
+            SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+        }
+    }
+
+    SRF_RETURN_DONE(funcctx);
+}
+
+/* ===============================================================
  * FUNCTION: pgclone_version()
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgclone_version);
@@ -3524,7 +3750,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.4.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.5.0"));
 }
 
 /* ===============================================================

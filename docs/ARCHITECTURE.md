@@ -7,7 +7,7 @@ This document describes the internal architecture of pgclone, covering the codeb
 ```
 pgclone/
 ├── src/
-│   ├── pgclone.c          # Main extension (~4580 lines)
+│   ├── pgclone.c          # Main extension (~4800 lines)
 │   │                      #   - Table, schema, database clone functions
 │   │                      #   - DDL generation (indexes, constraints, triggers, views)
 │   │                      #   - COPY protocol data transfer
@@ -32,7 +32,7 @@ pgclone/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
 │   ├── fixtures/seed.sql  # Test data
-│   ├── pgclone_test.sql   # 79 pgTAP tests
+│   ├── pgclone_test.sql   # 84 pgTAP tests
 │   ├── run_tests.sh       # Test orchestrator
 │   ├── run_all.sh         # Multi-version runner
 │   ├── test_async.sh      # Async test suite (8 tests incl. worker pool)

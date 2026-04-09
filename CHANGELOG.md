@@ -2,6 +2,20 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [3.5.0]
+
+### Added
+- **Clone Verification**: `pgclone_verify()` compares row counts between source and target databases, table by table, returning a side-by-side comparison
+  - Two overloads: `pgclone_verify(conninfo)` for all schemas, `pgclone_verify(conninfo, schema)` for a specific schema
+  - Returns SET OF (schema_name, table_name, source_rows, target_rows, match)
+  - Match indicators: `✓` (equal), `✗` (different), `✗ (missing)` (table not on target)
+  - Uses `pg_class.reltuples` for fast approximate counts without full table scans
+  - Works with regular and partitioned tables
+- 5 new pgTAP tests (84 total): verify function runs, row counts match after clone, correct column count in result
+
+### Changed
+- Version bumped to 3.5.0
+
 ## [3.4.0]
 
 ### Added
