@@ -3,13 +3,13 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.3.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v3.3.0)
+[![Version](https://img.shields.io/badge/version-3.4.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v3.4.0)
 
 A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 
 ## Key Features
 
-- **Clone anything** — tables, schemas, functions, entire databases
+- **Clone anything** — tables, schemas, functions, entire databases, roles and permissions
 - **Fast data transfer** — uses PostgreSQL COPY protocol
 - **Data masking** — anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
 - **Auto-discovery** — scan source schemas for sensitive columns and get suggested mask rules
@@ -137,6 +137,7 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
     - [x] v3.1.0: Auto-Discovery of Sensitive Data
     - [x] v3.2.0: Applying Static Data Masking to cloned data
     - [x] v3.3.0: Applying Dynamic Data Masking to cloned data
+    - [x] v3.4.0: Clone roles with permissions and passwords
 - [ ] v4.0.0: Copy-on-Write (CoW) mode for local cloning
 
 ## License

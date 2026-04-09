@@ -180,3 +180,26 @@ INSERT INTO test_schema.employees (full_name, email, phone, salary, ssn, notes) 
     ('Charlie Brown',  'charlie@example.com',  '+1-555-111-2222', 67000, '345-67-8901', NULL),
     ('Diana Prince',   'diana@wonder.net',     '+1-555-333-4444', 120000, '456-78-9012', 'Director'),
     ('Eve Wilson',     'eve@example.com',      NULL,              55000, '567-89-0123', 'Intern');
+
+-- ---- Roles and permissions for clone_roles tests ----
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test_reader') THEN
+        CREATE ROLE test_reader WITH LOGIN PASSWORD 'reader_pass123';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test_writer') THEN
+        CREATE ROLE test_writer WITH LOGIN PASSWORD 'writer_pass456';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test_admin') THEN
+        CREATE ROLE test_admin WITH LOGIN CREATEDB PASSWORD 'admin_pass789';
+    END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA test_schema TO test_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA test_schema TO test_reader;
+
+GRANT USAGE, CREATE ON SCHEMA test_schema TO test_writer;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA test_schema TO test_writer;
+
+GRANT ALL PRIVILEGES ON SCHEMA test_schema TO test_admin;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA test_schema TO test_admin;
