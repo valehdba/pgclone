@@ -274,7 +274,7 @@ run_test "Pool: test_schema.orders has 10 rows" "[ '$POOL_ORD' = '10' ]"
 # Verify pool workers show as separate jobs (type = table, parallel_workers = -1 sentinel)
 POOL_WORKERS=$(psql -U postgres -d target_db -tAc "
     SELECT count(*) FROM pgclone_jobs_view
-    WHERE job_id > $JOB_ID8 AND operation = 'table';
+    WHERE job_id > $JOB_ID8 AND op_type = 'table';
 " 2>/dev/null || echo "0")
 POOL_WORKERS=$(echo "$POOL_WORKERS" | tr -d '[:space:]')
 run_test "Pool workers visible in jobs_view" "[ '$POOL_WORKERS' -ge 1 ]"

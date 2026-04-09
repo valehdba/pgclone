@@ -3987,6 +3987,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         /* Create schema + sequences via loopback */
         {
             PGconn     *local_conn = pgclone_connect_local();
+            PGconn     *src_conn_pre = pgclone_connect(source_conninfo);
 
             StringInfoData fbuf;
             initStringInfo(&fbuf);
@@ -3994,6 +3995,63 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
                              quote_identifier(schema_name));
             pgclone_exec_conn(local_conn, fbuf.data);
 
+            /* Pre-create all sequences — pool workers need them for DEFAULT nextval() */
+            {
+                PGresult *seq_res;
+                int si;
+
+                resetStringInfo(&fbuf);
+                appendStringInfo(&fbuf,
+                    "SELECT s.relname, "
+                    "       pg_sequence.seqstart, "
+                    "       pg_sequence.seqincrement, "
+                    "       pg_sequence.seqmax, "
+                    "       pg_sequence.seqmin, "
+                    "       pg_sequence.seqcache, "
+                    "       pg_sequence.seqcycle, "
+                    "       pg_sequence.seqtypid::regtype::text "
+                    "FROM pg_catalog.pg_class s "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid = s.relnamespace "
+                    "JOIN pg_catalog.pg_sequence ON pg_sequence.seqrelid = s.oid "
+                    "WHERE n.nspname = %s AND s.relkind = 'S'",
+                    quote_literal_cstr(schema_name));
+
+                seq_res = PQexec(src_conn_pre, fbuf.data);
+                if (PQresultStatus(seq_res) == PGRES_TUPLES_OK)
+                {
+                    for (si = 0; si < PQntuples(seq_res); si++)
+                    {
+                        PGresult *lcres;
+
+                        resetStringInfo(&fbuf);
+                        appendStringInfo(&fbuf,
+                            "CREATE SEQUENCE IF NOT EXISTS %s.%s "
+                            "AS %s "
+                            "START WITH %s INCREMENT BY %s "
+                            "MINVALUE %s MAXVALUE %s CACHE %s %s",
+                            quote_identifier(schema_name),
+                            quote_identifier(PQgetvalue(seq_res, si, 0)),
+                            PQgetvalue(seq_res, si, 7),
+                            PQgetvalue(seq_res, si, 1),
+                            PQgetvalue(seq_res, si, 2),
+                            PQgetvalue(seq_res, si, 4),
+                            PQgetvalue(seq_res, si, 3),
+                            PQgetvalue(seq_res, si, 5),
+                            strcmp(PQgetvalue(seq_res, si, 6), "t") == 0 ? "CYCLE" : "NO CYCLE");
+
+                        lcres = PQexec(local_conn, fbuf.data);
+                        if (PQresultStatus(lcres) != PGRES_COMMAND_OK)
+                            ereport(WARNING,
+                                    (errmsg("pgclone: pool pre-create sequence %s.%s: %s",
+                                            schema_name, PQgetvalue(seq_res, si, 0),
+                                            PQerrorMessage(local_conn))));
+                        PQclear(lcres);
+                    }
+                }
+                PQclear(seq_res);
+            }
+
+            PQfinish(src_conn_pre);
             PQfinish(local_conn);
             pfree(fbuf.data);
         }

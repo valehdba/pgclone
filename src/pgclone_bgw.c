@@ -451,6 +451,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
             "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
             "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = '%s' AND c.relname = '%s' "
+            "AND con.contype != 'n' "
             "ORDER BY CASE contype WHEN 'p' THEN 1 WHEN 'u' THEN 2 "
             "WHEN 'c' THEN 3 WHEN 'f' THEN 4 ELSE 5 END",
             job->schema_name, table_name);
