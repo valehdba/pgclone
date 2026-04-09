@@ -19,6 +19,7 @@ Complete reference for all pgclone functions and options.
 - [Auto-Discovery of Sensitive Data](#auto-discovery-of-sensitive-data-v310)
 - [Static Data Masking](#static-data-masking-v320)
 - [Dynamic Data Masking](#dynamic-data-masking-v330)
+- [Clone Roles and Permissions](#clone-roles-and-permissions-v340)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -478,6 +479,81 @@ SELECT pgclone_create_masking_policy(
 
 ---
 
+## Clone Roles and Permissions (v3.4.0)
+
+Clone database roles from a source PostgreSQL instance to the local target, including encrypted passwords, role attributes, memberships, and all privilege grants.
+
+### Import all roles
+
+```sql
+SELECT pgclone_clone_roles(
+    'host=source-server dbname=mydb user=postgres password=secret'
+);
+-- OK: 8 roles created, 2 roles updated, 45 grants applied
+```
+
+### Import specific roles
+
+```sql
+SELECT pgclone_clone_roles(
+    'host=source-server dbname=mydb user=postgres password=secret',
+    'app_user, reporting_user, api_service'
+);
+-- OK: 3 roles created, 0 roles updated, 18 grants applied
+```
+
+### Import a single role
+
+```sql
+SELECT pgclone_clone_roles(
+    'host=source-server dbname=mydb user=postgres password=secret',
+    'app_user'
+);
+-- OK: 1 roles created, 0 roles updated, 7 grants applied
+```
+
+### What gets cloned
+
+| Category | Details |
+|----------|---------|
+| Role attributes | LOGIN, SUPERUSER, CREATEDB, CREATEROLE, REPLICATION, INHERIT, CONNECTION LIMIT, VALID UNTIL |
+| Passwords | Encrypted password copied from `pg_authid` — password is set identically on target |
+| Role memberships | `GRANT role TO role` relationships |
+| Schema privileges | USAGE, CREATE on schemas |
+| Table privileges | SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER |
+| Sequence privileges | USAGE, SELECT, UPDATE |
+| Function privileges | EXECUTE on functions and procedures |
+
+### Behavior for existing roles
+
+If a role already exists on the target:
+
+- Password is updated to match the source
+- Role attributes (LOGIN, CREATEDB, etc.) are updated to match the source
+- Permissions are applied additively (existing grants are not revoked)
+
+### Typical workflow
+
+```sql
+-- 1. Clone the database structure and data
+SELECT pgclone_database(
+    'host=prod dbname=myapp user=postgres',
+    true
+);
+
+-- 2. Clone all roles and their permissions
+SELECT pgclone_clone_roles(
+    'host=prod dbname=myapp user=postgres'
+);
+```
+
+### Requirements
+
+- **Superuser on both source and target** — `pg_authid` (which stores encrypted passwords) is only accessible to superusers
+- System roles (`pg_*`) and the `postgres` role are excluded from cloning
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -514,6 +590,8 @@ SELECT pgclone_create_masking_policy(
 | `pgclone_mask_in_place(schema, table, mask_json)` | text | Apply masking to existing local table via UPDATE |
 | `pgclone_create_masking_policy(schema, table, mask_json, role)` | text | Create dynamic masking view + role-based access |
 | `pgclone_drop_masking_policy(schema, table)` | text | Drop masking view + restore base table access |
+| `pgclone_clone_roles(conninfo)` | text | Clone all non-system roles with passwords, attributes, memberships, and permissions |
+| `pgclone_clone_roles(conninfo, role_names)` | text | Clone specific roles (comma-separated) with passwords, attributes, and permissions |
 | `pgclone_table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone_schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone_progress(job_id)` | json | Job progress as JSON |

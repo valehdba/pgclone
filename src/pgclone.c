@@ -3071,6 +3071,451 @@ pgclone_drop_masking_policy(PG_FUNCTION_ARGS)
     PG_RETURN_TEXT_P(cstring_to_text(result.data));
 }
 
+/* ---------------------------------------------------------------
+ * Internal helper: parse comma-separated role names into a SQL
+ * IN clause fragment: "AND a.rolname IN ('role1', 'role2', ...)"
+ * or "AND grantee IN ('role1', ...)" depending on col_name.
+ *
+ * Returns empty string if role_filter is NULL (no filtering).
+ * Caller must pfree the returned string.
+ * --------------------------------------------------------------- */
+static char *
+pgclone_build_role_filter(const char *role_filter, const char *col_name)
+{
+    StringInfoData  filter;
+    const char     *p;
+    bool            first = true;
+
+    if (role_filter == NULL || role_filter[0] == '\0')
+        return pstrdup("");
+
+    initStringInfo(&filter);
+    appendStringInfo(&filter, "AND %s IN (", col_name);
+
+    p = role_filter;
+    while (*p)
+    {
+        char    name[NAMEDATALEN];
+        int     len = 0;
+
+        /* Skip whitespace and commas */
+        while (*p == ' ' || *p == ',' || *p == '\t') p++;
+        if (*p == '\0') break;
+
+        /* Extract role name */
+        while (*p && *p != ',' && *p != ' ' && *p != '\t' && len < NAMEDATALEN - 1)
+            name[len++] = *p++;
+        name[len] = '\0';
+
+        if (len > 0)
+        {
+            if (!first)
+                appendStringInfoString(&filter, ", ");
+            appendStringInfo(&filter, "%s", quote_literal_cstr(name));
+            first = false;
+        }
+    }
+
+    appendStringInfoChar(&filter, ')');
+
+    /* If no valid names were parsed, return empty */
+    if (first)
+    {
+        pfree(filter.data);
+        return pstrdup("");
+    }
+
+    return filter.data;
+}
+
+/* ===============================================================
+ * FUNCTION: pgclone_clone_roles(source_conninfo [, role_names])
+ *
+ * Clones database roles from source to local, including:
+ *   - Role attributes (LOGIN, SUPERUSER, CREATEDB, etc.)
+ *   - Encrypted passwords (copied as-is from pg_authid)
+ *   - Connection limits and password validity
+ *   - Role memberships (GRANT role TO role)
+ *   - Schema-level privileges (USAGE, CREATE)
+ *   - Table-level privileges (SELECT, INSERT, UPDATE, DELETE, etc.)
+ *   - Sequence privileges (USAGE, SELECT, UPDATE)
+ *   - Function/procedure EXECUTE privileges
+ *
+ * Overloads:
+ *   pgclone_clone_roles(conninfo)           -- all non-system roles
+ *   pgclone_clone_roles(conninfo, 'role1')  -- single role
+ *   pgclone_clone_roles(conninfo, 'r1,r2')  -- specific roles
+ *
+ * If a role already exists on the target, its password and attributes
+ * are synced to match the source. Permissions are applied additively
+ * (existing grants are NOT revoked).
+ *
+ * Requires superuser on BOTH source and target (pg_authid access).
+ * System roles (pg_*) and the postgres role are always excluded.
+ * =============================================================== */
+PG_FUNCTION_INFO_V1(pgclone_clone_roles);
+
+Datum
+pgclone_clone_roles(PG_FUNCTION_ARGS)
+{
+    text       *source_conninfo_t = PG_GETARG_TEXT_PP(0);
+    char       *source_conninfo   = text_to_cstring(source_conninfo_t);
+    char       *role_filter       = NULL;
+
+    PGconn         *source_conn;
+    PGconn         *local_conn;
+    PGresult       *role_res;
+    PGresult       *grant_res;
+    StringInfoData  query;
+    StringInfoData  cmd;
+    StringInfoData  result;
+    int             ngrants;
+    int             i;
+    int             roles_created = 0;
+    int             roles_updated = 0;
+    int             grants_applied = 0;
+
+    /* Optional: comma-separated role names */
+    if (PG_NARGS() >= 2 && !PG_ARGISNULL(1))
+        role_filter = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+    /* Build reusable filter fragments */
+    char *authid_filter  = pgclone_build_role_filter(role_filter, "a.rolname");
+    char *grantee_filter = pgclone_build_role_filter(role_filter, "grantee");
+    char *member_filter  = pgclone_build_role_filter(role_filter, "r.rolname");
+    char *acl_filter     = pgclone_build_role_filter(role_filter, "r.rolname");
+
+    source_conn = pgclone_connect(source_conninfo);
+    local_conn = pgclone_connect_local();
+
+    /* ---- Step 1: Fetch roles from source pg_authid ---- */
+    initStringInfo(&query);
+    appendStringInfo(&query,
+        "SELECT a.rolname, a.rolsuper, a.rolinherit, "
+        "a.rolcreaterole, a.rolcreatedb, a.rolcanlogin, "
+        "a.rolreplication, a.rolconnlimit, a.rolpassword, "
+        "a.rolvaliduntil "
+        "FROM pg_catalog.pg_authid a "
+        "WHERE a.rolname NOT LIKE 'pg_%%%%' "
+        "AND a.rolname <> 'postgres' "
+        "%s "
+        "ORDER BY a.rolname",
+        authid_filter);
+
+    role_res = PQexec(source_conn, query.data);
+    resetStringInfo(&query);
+
+    if (PQresultStatus(role_res) != PGRES_TUPLES_OK)
+    {
+        char *errmsg_str = pstrdup(PQerrorMessage(source_conn));
+        PQclear(role_res);
+        PQfinish(source_conn);
+        PQfinish(local_conn);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not query pg_authid on source: %s", errmsg_str),
+                 errhint("Requires superuser access on the source database.")));
+    }
+
+    /* ---- Step 2: Create/update each role on target ---- */
+    initStringInfo(&cmd);
+
+    for (i = 0; i < PQntuples(role_res); i++)
+    {
+        const char *rolname      = PQgetvalue(role_res, i, 0);
+        const char *rolsuper     = PQgetvalue(role_res, i, 1);
+        const char *rolinherit   = PQgetvalue(role_res, i, 2);
+        const char *rolcreaterole= PQgetvalue(role_res, i, 3);
+        const char *rolcreatedb  = PQgetvalue(role_res, i, 4);
+        const char *rolcanlogin  = PQgetvalue(role_res, i, 5);
+        const char *rolrepl      = PQgetvalue(role_res, i, 6);
+        const char *rolconnlimit = PQgetvalue(role_res, i, 7);
+        bool        has_password = !PQgetisnull(role_res, i, 8);
+        const char *rolpassword  = has_password ? PQgetvalue(role_res, i, 8) : NULL;
+        bool        has_validuntil = !PQgetisnull(role_res, i, 9);
+        const char *rolvaliduntil  = has_validuntil ? PQgetvalue(role_res, i, 9) : NULL;
+        PGresult   *check_res;
+        bool        role_exists;
+
+        /* Check if role already exists on target */
+        resetStringInfo(&cmd);
+        appendStringInfo(&cmd,
+            "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s",
+            quote_literal_cstr(rolname));
+
+        check_res = PQexec(local_conn, cmd.data);
+        role_exists = (PQresultStatus(check_res) == PGRES_TUPLES_OK &&
+                       PQntuples(check_res) > 0);
+        PQclear(check_res);
+
+        /* CREATE or ALTER the role with all attributes */
+        resetStringInfo(&cmd);
+        if (!role_exists)
+        {
+            appendStringInfo(&cmd, "CREATE ROLE %s WITH %s %s %s %s %s %s CONNECTION LIMIT %s",
+                             quote_identifier(rolname),
+                             rolsuper[0] == 't' ? "SUPERUSER" : "NOSUPERUSER",
+                             rolinherit[0] == 't' ? "INHERIT" : "NOINHERIT",
+                             rolcreaterole[0] == 't' ? "CREATEROLE" : "NOCREATEROLE",
+                             rolcreatedb[0] == 't' ? "CREATEDB" : "NOCREATEDB",
+                             rolcanlogin[0] == 't' ? "LOGIN" : "NOLOGIN",
+                             rolrepl[0] == 't' ? "REPLICATION" : "NOREPLICATION",
+                             rolconnlimit);
+
+            if (pgclone_exec_conn(local_conn, cmd.data))
+                roles_created++;
+            else
+                elog(WARNING, "pgclone: failed to create role \"%s\"", rolname);
+        }
+        else
+        {
+            appendStringInfo(&cmd, "ALTER ROLE %s WITH %s %s %s %s %s %s CONNECTION LIMIT %s",
+                             quote_identifier(rolname),
+                             rolsuper[0] == 't' ? "SUPERUSER" : "NOSUPERUSER",
+                             rolinherit[0] == 't' ? "INHERIT" : "NOINHERIT",
+                             rolcreaterole[0] == 't' ? "CREATEROLE" : "NOCREATEROLE",
+                             rolcreatedb[0] == 't' ? "CREATEDB" : "NOCREATEDB",
+                             rolcanlogin[0] == 't' ? "LOGIN" : "NOLOGIN",
+                             rolrepl[0] == 't' ? "REPLICATION" : "NOREPLICATION",
+                             rolconnlimit);
+
+            pgclone_exec_conn(local_conn, cmd.data);
+            roles_updated++;
+        }
+
+        /* Sync password — the value from pg_authid is already encrypted
+         * (SCRAM-SHA-256 or md5 hash). PostgreSQL recognizes the hash format
+         * and stores it as-is without re-hashing. */
+        if (has_password)
+        {
+            resetStringInfo(&cmd);
+            appendStringInfo(&cmd, "ALTER ROLE %s PASSWORD %s",
+                             quote_identifier(rolname),
+                             quote_literal_cstr(rolpassword));
+            pgclone_exec_conn(local_conn, cmd.data);
+        }
+
+        /* Sync password validity */
+        if (has_validuntil)
+        {
+            resetStringInfo(&cmd);
+            appendStringInfo(&cmd, "ALTER ROLE %s VALID UNTIL %s",
+                             quote_identifier(rolname),
+                             quote_literal_cstr(rolvaliduntil));
+            pgclone_exec_conn(local_conn, cmd.data);
+        }
+    }
+
+    PQclear(role_res);
+
+    /* ---- Step 3: Clone role memberships (GRANT role TO role) ---- */
+    appendStringInfo(&query,
+        "SELECT r.rolname AS member, g.rolname AS group_role "
+        "FROM pg_catalog.pg_auth_members m "
+        "JOIN pg_catalog.pg_authid r ON r.oid = m.member "
+        "JOIN pg_catalog.pg_authid g ON g.oid = m.roleid "
+        "WHERE r.rolname NOT LIKE 'pg_%%%%' "
+        "AND g.rolname NOT LIKE 'pg_%%%%' "
+        "AND r.rolname <> 'postgres' "
+        "AND g.rolname <> 'postgres' "
+        "%s",
+        member_filter);
+
+    grant_res = PQexec(source_conn, query.data);
+    resetStringInfo(&query);
+
+    if (PQresultStatus(grant_res) == PGRES_TUPLES_OK)
+    {
+        ngrants = PQntuples(grant_res);
+        for (i = 0; i < ngrants; i++)
+        {
+            const char *member = PQgetvalue(grant_res, i, 0);
+            const char *grp    = PQgetvalue(grant_res, i, 1);
+
+            resetStringInfo(&cmd);
+            appendStringInfo(&cmd, "GRANT %s TO %s",
+                             quote_identifier(grp),
+                             quote_identifier(member));
+
+            if (pgclone_exec_conn(local_conn, cmd.data))
+                grants_applied++;
+        }
+    }
+    PQclear(grant_res);
+
+    /* ---- Step 4: Clone schema-level privileges ---- */
+    appendStringInfo(&query,
+        "SELECT n.nspname, "
+        "ae.privilege_type AS priv, "
+        "r.rolname AS grantee_name "
+        "FROM pg_catalog.pg_namespace n, "
+        "LATERAL aclexplode(n.nspacl) ae "
+        "JOIN pg_catalog.pg_authid r ON r.oid = ae.grantee "
+        "WHERE n.nspname NOT LIKE 'pg_%%%%' "
+        "AND n.nspname <> 'information_schema' "
+        "AND r.rolname NOT LIKE 'pg_%%%%' "
+        "AND r.rolname <> 'postgres' "
+        "AND n.nspacl IS NOT NULL "
+        "%s",
+        acl_filter);
+
+    grant_res = PQexec(source_conn, query.data);
+    resetStringInfo(&query);
+
+    if (PQresultStatus(grant_res) == PGRES_TUPLES_OK)
+    {
+        ngrants = PQntuples(grant_res);
+        for (i = 0; i < ngrants; i++)
+        {
+            const char *nsp     = PQgetvalue(grant_res, i, 0);
+            const char *priv    = PQgetvalue(grant_res, i, 1);
+            const char *grantee = PQgetvalue(grant_res, i, 2);
+
+            resetStringInfo(&cmd);
+            appendStringInfo(&cmd, "GRANT %s ON SCHEMA %s TO %s",
+                             priv,
+                             quote_identifier(nsp),
+                             quote_identifier(grantee));
+
+            if (pgclone_exec_conn(local_conn, cmd.data))
+                grants_applied++;
+        }
+    }
+    PQclear(grant_res);
+
+    /* ---- Step 5: Clone table-level privileges ---- */
+    appendStringInfo(&query,
+        "SELECT table_schema, table_name, grantee, privilege_type "
+        "FROM information_schema.table_privileges "
+        "WHERE table_schema NOT LIKE 'pg_%%%%' "
+        "AND table_schema <> 'information_schema' "
+        "AND grantor <> grantee "
+        "AND grantee NOT LIKE 'pg_%%%%' "
+        "AND grantee <> 'postgres' "
+        "%s "
+        "ORDER BY table_schema, table_name, grantee",
+        grantee_filter);
+
+    grant_res = PQexec(source_conn, query.data);
+    resetStringInfo(&query);
+
+    if (PQresultStatus(grant_res) == PGRES_TUPLES_OK)
+    {
+        ngrants = PQntuples(grant_res);
+        for (i = 0; i < ngrants; i++)
+        {
+            const char *tschema = PQgetvalue(grant_res, i, 0);
+            const char *tname   = PQgetvalue(grant_res, i, 1);
+            const char *grantee = PQgetvalue(grant_res, i, 2);
+            const char *priv    = PQgetvalue(grant_res, i, 3);
+
+            resetStringInfo(&cmd);
+            appendStringInfo(&cmd, "GRANT %s ON %s.%s TO %s",
+                             priv,
+                             quote_identifier(tschema),
+                             quote_identifier(tname),
+                             quote_identifier(grantee));
+
+            if (pgclone_exec_conn(local_conn, cmd.data))
+                grants_applied++;
+        }
+    }
+    PQclear(grant_res);
+
+    /* ---- Step 6: Clone sequence privileges ---- */
+    appendStringInfo(&query,
+        "SELECT usg.object_schema, usg.object_name, usg.grantee, usg.privilege_type "
+        "FROM information_schema.usage_privileges usg "
+        "WHERE usg.object_schema NOT LIKE 'pg_%%%%' "
+        "AND usg.object_schema <> 'information_schema' "
+        "AND usg.object_type = 'SEQUENCE' "
+        "AND usg.grantee NOT LIKE 'pg_%%%%' "
+        "AND usg.grantee <> 'postgres' "
+        "%s",
+        grantee_filter);
+
+    grant_res = PQexec(source_conn, query.data);
+    resetStringInfo(&query);
+
+    if (PQresultStatus(grant_res) == PGRES_TUPLES_OK)
+    {
+        ngrants = PQntuples(grant_res);
+        for (i = 0; i < ngrants; i++)
+        {
+            const char *sschema = PQgetvalue(grant_res, i, 0);
+            const char *sname   = PQgetvalue(grant_res, i, 1);
+            const char *grantee = PQgetvalue(grant_res, i, 2);
+            const char *priv    = PQgetvalue(grant_res, i, 3);
+
+            resetStringInfo(&cmd);
+            appendStringInfo(&cmd, "GRANT %s ON SEQUENCE %s.%s TO %s",
+                             priv,
+                             quote_identifier(sschema),
+                             quote_identifier(sname),
+                             quote_identifier(grantee));
+
+            if (pgclone_exec_conn(local_conn, cmd.data))
+                grants_applied++;
+        }
+    }
+    PQclear(grant_res);
+
+    /* ---- Step 7: Clone function/procedure EXECUTE privileges ---- */
+    appendStringInfo(&query,
+        "SELECT routine_schema, routine_name, grantee, privilege_type "
+        "FROM information_schema.routine_privileges "
+        "WHERE routine_schema NOT LIKE 'pg_%%%%' "
+        "AND routine_schema <> 'information_schema' "
+        "AND grantor <> grantee "
+        "AND grantee NOT LIKE 'pg_%%%%' "
+        "AND grantee <> 'postgres' "
+        "%s",
+        grantee_filter);
+
+    grant_res = PQexec(source_conn, query.data);
+    resetStringInfo(&query);
+
+    if (PQresultStatus(grant_res) == PGRES_TUPLES_OK)
+    {
+        ngrants = PQntuples(grant_res);
+        for (i = 0; i < ngrants; i++)
+        {
+            const char *fschema = PQgetvalue(grant_res, i, 0);
+            const char *fname   = PQgetvalue(grant_res, i, 1);
+            const char *grantee = PQgetvalue(grant_res, i, 2);
+            const char *priv    = PQgetvalue(grant_res, i, 3);
+
+            resetStringInfo(&cmd);
+            appendStringInfo(&cmd, "GRANT %s ON FUNCTION %s.%s TO %s",
+                             priv,
+                             quote_identifier(fschema),
+                             quote_identifier(fname),
+                             quote_identifier(grantee));
+
+            /* May fail for overloaded functions (ambiguous name) — OK */
+            if (pgclone_exec_conn(local_conn, cmd.data))
+                grants_applied++;
+        }
+    }
+    PQclear(grant_res);
+
+    pfree(cmd.data);
+    pfree(query.data);
+    pfree(authid_filter);
+    pfree(grantee_filter);
+    pfree(member_filter);
+    pfree(acl_filter);
+    PQfinish(source_conn);
+    PQfinish(local_conn);
+
+    initStringInfo(&result);
+    appendStringInfo(&result,
+                     "OK: %d roles created, %d roles updated, %d grants applied",
+                     roles_created, roles_updated, grants_applied);
+
+    PG_RETURN_TEXT_P(cstring_to_text(result.data));
+}
+
 /* ===============================================================
  * FUNCTION: pgclone_version()
  * =============================================================== */
@@ -3079,7 +3524,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.3.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.4.0"));
 }
 
 /* ===============================================================

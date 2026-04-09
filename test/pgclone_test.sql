@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(73);
+SELECT plan(79);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -550,6 +550,44 @@ SELECT results_eq(
 SELECT lives_ok(
     $$SELECT pgclone_drop_masking_policy('test_schema', 'employees_ddm')$$,
     'pgclone_drop_masking_policy runs without error'
+);
+
+-- ============================================================
+-- TEST GROUP 22: Clone roles with permissions
+-- ============================================================
+
+-- Clone roles from source
+SELECT lives_ok(
+    format('SELECT pgclone_clone_roles(%L)',
+        current_setting('app.source_conninfo')),
+    'pgclone_clone_roles runs without error'
+);
+
+-- Verify roles were created
+SELECT ok(
+    (SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = 'test_reader')),
+    'test_reader role exists after clone'
+);
+
+SELECT ok(
+    (SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = 'test_writer')),
+    'test_writer role exists after clone'
+);
+
+SELECT ok(
+    (SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = 'test_admin')),
+    'test_admin role exists after clone'
+);
+
+-- Verify role attributes
+SELECT ok(
+    (SELECT rolcanlogin FROM pg_roles WHERE rolname = 'test_reader'),
+    'test_reader has LOGIN attribute'
+);
+
+SELECT ok(
+    (SELECT rolcreatedb FROM pg_roles WHERE rolname = 'test_admin'),
+    'test_admin has CREATEDB attribute'
 );
 
 SELECT * FROM finish();

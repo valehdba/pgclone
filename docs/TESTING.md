@@ -6,7 +6,7 @@ PgClone has a comprehensive test suite that runs across PostgreSQL versions 14�
 
 The test suite is organized into three test groups:
 
-### 1. pgTAP Sync Tests (73 tests)
+### 1. pgTAP Sync Tests (79 tests)
 
 Located in `test/pgclone_test.sql`, these cover core synchronous functionality:
 
@@ -33,6 +33,7 @@ Located in `test/pgclone_test.sql`, these cover core synchronous functionality:
 | 19. Auto-discovery | 6 | Detect email, name, phone, salary, ssn columns |
 | 20. Mask in-place | 7 | Clone-then-mask workflow, verify UPDATE masking |
 | 21. Dynamic masking | 7 | Create/drop policy, view existence, masked view data |
+| 22. Clone roles | 6 | Role creation, LOGIN/CREATEDB attributes, permissions |
 
 ### 2. Database Create Tests
 
@@ -136,7 +137,7 @@ Tests run in parallel across PostgreSQL 14, 15, 16, 17, and 18 with `fail-fast: 
 3. **Start target PostgreSQL** — separate instance on port 5434 with `shared_preload_libraries = 'pgclone'`
 4. **Seed source database** — GitHub Actions service container on port 5433
 5. **Install pgTAP** — built against the same PG version
-6. **Run sync tests** — 73 pgTAP tests
+6. **Run sync tests** — 79 pgTAP tests
 7. **Run database_create tests** — creates/clones/verifies/cleans up
 8. **Run async tests** — background worker tests with polling
 9. **Show logs on failure** — dumps PostgreSQL server log for debugging

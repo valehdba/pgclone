@@ -2,6 +2,26 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [3.4.0]
+
+### Added
+- **Clone Roles with Permissions and Passwords**: `pgclone_clone_roles()` clones database roles from source to local, including encrypted passwords, role attributes, and all privilege grants
+  - `pgclone_clone_roles(conninfo)` — clone all non-system roles
+  - `pgclone_clone_roles(conninfo, 'role1,role2')` — clone specific roles (comma-separated)
+  - Clones role attributes: LOGIN, SUPERUSER, CREATEDB, CREATEROLE, REPLICATION, INHERIT, CONNECTION LIMIT, VALID UNTIL
+  - Copies encrypted passwords from `pg_authid` (requires superuser on both source and target)
+  - If target role already exists: updates password, attributes, and applies permissions additively
+  - Clones role memberships (GRANT role TO role)
+  - Clones schema-level privileges (USAGE, CREATE) via `aclexplode()`
+  - Clones table-level privileges (SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER)
+  - Clones sequence privileges (USAGE, SELECT, UPDATE)
+  - Clones function/procedure EXECUTE privileges
+- `test_reader`, `test_writer`, `test_admin` test fixture roles with graduated permissions
+- 6 new pgTAP tests (79 total): role creation, LOGIN attribute, CREATEDB attribute verification
+
+### Changed
+- Version bumped to 3.4.0
+
 ## [3.3.0]
 
 ### Added
