@@ -138,6 +138,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
     - [x] v3.2.0: Applying Static Data Masking to cloned data
     - [x] v3.3.0: Applying Dynamic Data Masking to cloned data
     - [x] v3.4.0: Clone roles with permissions and passwords
+- [ ] v3.5.0: Clone verification — compare row counts across source and target
+- [ ] v3.6.0: GDPR/Compliance masking report
 - [ ] v4.0.0: Copy-on-Write (CoW) mode for local cloning
 
 ## License
