@@ -2496,6 +2496,125 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
+ * Sensitivity pattern rules — shared by pgclone_discover_sensitive,
+ * pgclone_masking_report, and future compliance functions.
+ *
+ * Each rule maps a column name pattern (LIKE-style) to a sensitivity
+ * category and recommended masking strategy.
+ * =============================================================== */
+typedef struct SensitivityRule
+{
+    const char *pattern;     /* LIKE pattern: %email%, %_name, etc. */
+    const char *category;    /* Human-readable: "Email", "PII - Name", etc. */
+    const char *strategy;    /* Recommended mask type */
+} SensitivityRule;
+
+static const SensitivityRule sensitivity_rules[] = {
+    /* Email */
+    {"%email%",          "Email",              "email"},
+    {"%e_mail%",         "Email",              "email"},
+    /* Name / PII */
+    {"%first_name%",     "PII - Name",         "name"},
+    {"%last_name%",      "PII - Name",         "name"},
+    {"%full_name%",      "PII - Name",         "name"},
+    {"%firstname%",      "PII - Name",         "name"},
+    {"%lastname%",       "PII - Name",         "name"},
+    {"%fullname%",       "PII - Name",         "name"},
+    {"%_name",           "PII - Name",         "name"},
+    /* Phone */
+    {"%phone%",          "Phone",              "phone"},
+    {"%mobile%",         "Phone",              "phone"},
+    {"%telephone%",      "Phone",              "phone"},
+    {"%fax%",            "Phone",              "phone"},
+    /* SSN / National ID */
+    {"%ssn%",            "National ID",        "null"},
+    {"%social_security%","National ID",        "null"},
+    {"%national_id%",    "National ID",        "null"},
+    {"%tax_id%",         "National ID",        "null"},
+    {"%taxpayer%",       "National ID",        "null"},
+    /* Financial */
+    {"%salary%",         "Financial",          "random_int"},
+    {"%income%",         "Financial",          "random_int"},
+    {"%wage%",           "Financial",          "random_int"},
+    {"%compensation%",   "Financial",          "random_int"},
+    /* Credentials */
+    {"%password%",       "Credential",         "hash"},
+    {"%passwd%",         "Credential",         "hash"},
+    {"%secret%",         "Credential",         "hash"},
+    {"%token%",          "Credential",         "hash"},
+    {"%api_key%",        "Credential",         "hash"},
+    {"%apikey%",         "Credential",         "hash"},
+    /* Address */
+    {"%address%",        "Address",            "constant"},
+    {"%street%",         "Address",            "constant"},
+    {"%zip%",            "Address",            "partial"},
+    {"%zipcode%",        "Address",            "partial"},
+    {"%postal%",         "Address",            "partial"},
+    /* Date of birth */
+    {"%birth%",          "Date of Birth",      "null"},
+    {"%dob%",            "Date of Birth",      "null"},
+    {"%date_of_birth%",  "Date of Birth",      "null"},
+    /* Credit card */
+    {"%card_number%",    "Credit Card",        "null"},
+    {"%credit_card%",    "Credit Card",        "null"},
+    {"%ccn%",            "Credit Card",        "null"},
+    {"%cvv%",            "Credit Card",        "null"},
+    /* IP / location */
+    {"%ip_address%",     "IP Address",         "hash"},
+    {"%ipaddress%",      "IP Address",         "hash"},
+    {NULL, NULL, NULL}
+};
+
+/* ---------------------------------------------------------------
+ * Match a column name against sensitivity rules.
+ * Returns the matching rule, or NULL if no match.
+ * --------------------------------------------------------------- */
+static const SensitivityRule *
+pgclone_match_sensitivity(const char *col_name)
+{
+    char    col_lower[NAMEDATALEN];
+    int     cl, ri;
+
+    /* Lowercase the column name */
+    for (cl = 0; col_name[cl] && cl < NAMEDATALEN - 1; cl++)
+        col_lower[cl] = (col_name[cl] >= 'A' && col_name[cl] <= 'Z')
+                        ? (col_name[cl] + 32) : col_name[cl];
+    col_lower[cl] = '\0';
+
+    for (ri = 0; sensitivity_rules[ri].pattern != NULL; ri++)
+    {
+        const char *pat = sensitivity_rules[ri].pattern;
+        bool match = false;
+
+        if (pat[0] == '%' && pat[strlen(pat) - 1] == '%')
+        {
+            /* %substring% — contains */
+            char substr[128];
+            int plen = strlen(pat) - 2;
+            if (plen > 0 && plen < (int)sizeof(substr))
+            {
+                memcpy(substr, pat + 1, plen);
+                substr[plen] = '\0';
+                match = (strstr(col_lower, substr) != NULL);
+            }
+        }
+        else if (pat[0] == '%')
+        {
+            /* %suffix — ends with */
+            const char *suffix = pat + 1;
+            int slen = strlen(suffix);
+            int clen = strlen(col_lower);
+            if (clen >= slen)
+                match = (strcmp(col_lower + clen - slen, suffix) == 0);
+        }
+
+        if (match)
+            return &sensitivity_rules[ri];
+    }
+    return NULL;
+}
+
+/* ===============================================================
  * FUNCTION: pgclone_discover_sensitive(conninfo, schema_name)
  *
  * Scans the source catalog for columns whose names match common
@@ -2521,70 +2640,6 @@ pgclone_discover_sensitive(PG_FUNCTION_ARGS)
     StringInfoData  result;
     int             nrows, i;
     bool            first_table = true;
-
-    /*
-     * Pattern rules: column name patterns mapped to mask strategies.
-     * Patterns use SQL LIKE (case-insensitive via lower()).
-     * Order matters: first match wins per column.
-     */
-    static const struct {
-        const char *pattern;    /* SQL LIKE pattern */
-        const char *strategy;   /* mask type name */
-    } rules[] = {
-        /* Email patterns */
-        {"%email%",         "email"},
-        {"%e_mail%",        "email"},
-        /* Name patterns */
-        {"%first_name%",    "name"},
-        {"%last_name%",     "name"},
-        {"%full_name%",     "name"},
-        {"%firstname%",     "name"},
-        {"%lastname%",      "name"},
-        {"%fullname%",      "name"},
-        {"%_name",          "name"},      /* ends with _name but not column_name-like */
-        /* Phone patterns */
-        {"%phone%",         "phone"},
-        {"%mobile%",        "phone"},
-        {"%telephone%",     "phone"},
-        {"%fax%",           "phone"},
-        /* SSN / National ID */
-        {"%ssn%",           "null"},
-        {"%social_security%","null"},
-        {"%national_id%",   "null"},
-        {"%tax_id%",        "null"},
-        {"%taxpayer%",      "null"},
-        /* Financial */
-        {"%salary%",        "random_int"},
-        {"%income%",        "random_int"},
-        {"%wage%",          "random_int"},
-        {"%compensation%",  "random_int"},
-        /* Secrets / credentials */
-        {"%password%",      "hash"},
-        {"%passwd%",        "hash"},
-        {"%secret%",        "hash"},
-        {"%token%",         "hash"},
-        {"%api_key%",       "hash"},
-        {"%apikey%",        "hash"},
-        /* Address */
-        {"%address%",       "constant"},
-        {"%street%",        "constant"},
-        {"%zip%",           "partial"},
-        {"%zipcode%",       "partial"},
-        {"%postal%",        "partial"},
-        /* Date of birth */
-        {"%birth%",         "null"},
-        {"%dob%",           "null"},
-        {"%date_of_birth%", "null"},
-        /* Credit card */
-        {"%card_number%",   "null"},
-        {"%credit_card%",   "null"},
-        {"%ccn%",           "null"},
-        {"%cvv%",           "null"},
-        /* IP / location */
-        {"%ip_address%",    "hash"},
-        {"%ipaddress%",     "hash"},
-        {NULL, NULL}
-    };
 
     source_conn = pgclone_connect(source_conninfo);
 
@@ -2631,57 +2686,11 @@ pgclone_discover_sensitive(PG_FUNCTION_ARGS)
         {
             const char *tbl = PQgetvalue(res, i, 0);
             const char *col = PQgetvalue(res, i, 1);
-            const char *matched_strategy = NULL;
-            int         ri;
-            char        col_lower[NAMEDATALEN];
-            int         cl;
+            const SensitivityRule *rule;
 
-            /* Lowercase the column name for matching */
-            for (cl = 0; col[cl] && cl < NAMEDATALEN - 1; cl++)
-                col_lower[cl] = (col[cl] >= 'A' && col[cl] <= 'Z')
-                                ? (col[cl] + 32) : col[cl];
-            col_lower[cl] = '\0';
+            rule = pgclone_match_sensitivity(col);
 
-            /* Match against pattern rules */
-            for (ri = 0; rules[ri].pattern != NULL; ri++)
-            {
-                const char *pat = rules[ri].pattern;
-                bool match = false;
-
-                /*
-                 * Simple LIKE matching in C:
-                 * Only supports leading/trailing '%' wildcards.
-                 */
-                if (pat[0] == '%' && pat[strlen(pat) - 1] == '%')
-                {
-                    /* %substring% — contains */
-                    char substr[128];
-                    int plen = strlen(pat) - 2;
-                    if (plen > 0 && plen < (int)sizeof(substr))
-                    {
-                        memcpy(substr, pat + 1, plen);
-                        substr[plen] = '\0';
-                        match = (strstr(col_lower, substr) != NULL);
-                    }
-                }
-                else if (pat[0] == '%')
-                {
-                    /* %suffix — ends with */
-                    const char *suffix = pat + 1;
-                    int slen = strlen(suffix);
-                    int clen = strlen(col_lower);
-                    if (clen >= slen)
-                        match = (strcmp(col_lower + clen - slen, suffix) == 0);
-                }
-
-                if (match)
-                {
-                    matched_strategy = rules[ri].strategy;
-                    break;
-                }
-            }
-
-            if (matched_strategy == NULL)
+            if (rule == NULL)
                 continue;
 
             /* New table? Close previous table's object and open new one. */
@@ -2704,7 +2713,7 @@ pgclone_discover_sensitive(PG_FUNCTION_ARGS)
                 appendStringInfoString(&result, ", ");
 
             appendStringInfo(&result, "\"%s\": \"%s\"",
-                             col, matched_strategy);
+                             col, rule->strategy);
             first_col_in_table = false;
             matched_in_table++;
         }
@@ -3743,6 +3752,225 @@ pgclone_verify(PG_FUNCTION_ARGS)
 }
 
 /* ===============================================================
+ * FUNCTION: pgclone_masking_report(schema_name)
+ *
+ * SET-RETURNING FUNCTION that generates a GDPR/compliance audit
+ * report for a local schema. For each table and column:
+ *   1. Detects if the column name matches sensitive data patterns
+ *   2. Checks if a masked view (table_masked) exists
+ *   3. Reports the masking status and recommendation
+ *
+ * Returns columns:
+ *   schema_name, table_name, column_name, sensitivity,
+ *   mask_status, recommendation
+ *
+ * mask_status values:
+ *   'MASKED (view)'  — a _masked view exists for this table
+ *   'UNMASKED'       — sensitive column with no masking in place
+ *   'NOT SENSITIVE'  — column doesn't match any sensitivity pattern
+ * =============================================================== */
+
+typedef struct ReportRow
+{
+    char    schema_name[NAMEDATALEN];
+    char    table_name[NAMEDATALEN];
+    char    column_name[NAMEDATALEN];
+    char    sensitivity[64];     /* "Email", "PII - Name", etc. or "" */
+    char    mask_status[32];     /* "MASKED (view)", "UNMASKED", "NOT SENSITIVE" */
+    char    recommendation[128]; /* suggested action */
+} ReportRow;
+
+typedef struct ReportState
+{
+    ReportRow  *rows;
+    int         num_rows;
+    int         current_row;
+} ReportState;
+
+#define PGCLONE_REPORT_COLS 6
+
+PG_FUNCTION_INFO_V1(pgclone_masking_report);
+
+Datum
+pgclone_masking_report(PG_FUNCTION_ARGS)
+{
+    FuncCallContext *funcctx;
+
+    if (SRF_IS_FIRSTCALL())
+    {
+        MemoryContext   oldctx;
+        TupleDesc       tupdesc;
+        ReportState    *state;
+
+        text       *schema_t    = PG_GETARG_TEXT_PP(0);
+        char       *schema_name = text_to_cstring(schema_t);
+
+        PGconn         *local_conn;
+        PGresult       *col_res;
+        PGresult       *view_check;
+        StringInfoData  query;
+        StringInfoData  view_query;
+        int             nrows, i;
+        int             alloc_size;
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldctx  = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        tupdesc = CreateTemplateTupleDesc(PGCLONE_REPORT_COLS);
+        TupleDescInitEntry(tupdesc, 1, "schema_name",    TEXTOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 2, "table_name",     TEXTOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 3, "column_name",    TEXTOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 4, "sensitivity",    TEXTOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 5, "mask_status",    TEXTOID, -1, 0);
+        TupleDescInitEntry(tupdesc, 6, "recommendation", TEXTOID, -1, 0);
+        funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+
+        local_conn = pgclone_connect_local();
+
+        /* Get all columns in the schema */
+        initStringInfo(&query);
+        appendStringInfo(&query,
+            "SELECT c.relname, a.attname "
+            "FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
+            "WHERE n.nspname = %s "
+            "AND c.relkind IN ('r', 'p') "
+            "AND a.attnum > 0 AND NOT a.attisdropped "
+            "ORDER BY c.relname, a.attnum",
+            quote_literal_cstr(schema_name));
+
+        col_res = PQexec(local_conn, query.data);
+
+        if (PQresultStatus(col_res) != PGRES_TUPLES_OK)
+        {
+            char *errmsg_str = pstrdup(PQerrorMessage(local_conn));
+            PQclear(col_res);
+            PQfinish(local_conn);
+            pfree(query.data);
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgclone: could not query columns: %s", errmsg_str)));
+        }
+
+        nrows = PQntuples(col_res);
+        alloc_size = nrows > 0 ? nrows : 1;
+
+        state = palloc0(sizeof(ReportState));
+        state->rows = palloc0(sizeof(ReportRow) * alloc_size);
+        state->num_rows = 0;
+        state->current_row = 0;
+
+        /*
+         * For each column, check sensitivity and whether a masked
+         * view exists for its table.
+         */
+        initStringInfo(&view_query);
+
+        {
+            char last_table[NAMEDATALEN];
+            bool last_table_has_view = false;
+
+            last_table[0] = '\0';
+
+            for (i = 0; i < nrows; i++)
+            {
+                const char *tbl = PQgetvalue(col_res, i, 0);
+                const char *col = PQgetvalue(col_res, i, 1);
+                const SensitivityRule *rule;
+                ReportRow *row;
+                bool is_sensitive;
+
+                /* Check for masked view only when table changes */
+                if (strcmp(tbl, last_table) != 0)
+                {
+                    strlcpy(last_table, tbl, NAMEDATALEN);
+
+                    resetStringInfo(&view_query);
+                    appendStringInfo(&view_query,
+                        "SELECT 1 FROM pg_catalog.pg_class c "
+                        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE n.nspname = %s AND c.relname = '%s_masked' "
+                        "AND c.relkind = 'v'",
+                        quote_literal_cstr(schema_name), tbl);
+
+                    view_check = PQexec(local_conn, view_query.data);
+                    last_table_has_view = (PQresultStatus(view_check) == PGRES_TUPLES_OK &&
+                                           PQntuples(view_check) > 0);
+                    PQclear(view_check);
+                }
+
+                rule = pgclone_match_sensitivity(col);
+                is_sensitive = (rule != NULL);
+
+                /* Only include sensitive columns in the report */
+                if (!is_sensitive)
+                    continue;
+
+                row = &state->rows[state->num_rows];
+                strlcpy(row->schema_name, schema_name, NAMEDATALEN);
+                strlcpy(row->table_name, tbl, NAMEDATALEN);
+                strlcpy(row->column_name, col, NAMEDATALEN);
+                strlcpy(row->sensitivity, rule->category, sizeof(row->sensitivity));
+
+                if (last_table_has_view)
+                {
+                    strlcpy(row->mask_status, "MASKED (view)", sizeof(row->mask_status));
+                    snprintf(row->recommendation, sizeof(row->recommendation),
+                             "OK - masked via %s_masked view", tbl);
+                }
+                else
+                {
+                    strlcpy(row->mask_status, "UNMASKED", sizeof(row->mask_status));
+                    snprintf(row->recommendation, sizeof(row->recommendation),
+                             "Apply mask strategy: %s", rule->strategy);
+                }
+
+                state->num_rows++;
+            }
+        }
+
+        pfree(view_query.data);
+        pfree(query.data);
+        PQclear(col_res);
+        PQfinish(local_conn);
+
+        funcctx->user_fctx = state;
+        MemoryContextSwitchTo(oldctx);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+
+    {
+        ReportState *state = (ReportState *) funcctx->user_fctx;
+
+        if (state->current_row < state->num_rows)
+        {
+            ReportRow  *row = &state->rows[state->current_row];
+            Datum       values[PGCLONE_REPORT_COLS];
+            bool        nulls[PGCLONE_REPORT_COLS];
+            HeapTuple   tuple;
+
+            memset(nulls, 0, sizeof(nulls));
+
+            values[0] = CStringGetTextDatum(row->schema_name);
+            values[1] = CStringGetTextDatum(row->table_name);
+            values[2] = CStringGetTextDatum(row->column_name);
+            values[3] = CStringGetTextDatum(row->sensitivity);
+            values[4] = CStringGetTextDatum(row->mask_status);
+            values[5] = CStringGetTextDatum(row->recommendation);
+
+            tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+            state->current_row++;
+
+            SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+        }
+    }
+
+    SRF_RETURN_DONE(funcctx);
+}
+
+/* ===============================================================
  * FUNCTION: pgclone_version()
  * =============================================================== */
 PG_FUNCTION_INFO_V1(pgclone_version);
@@ -3750,7 +3978,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.5.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.6.0"));
 }
 
 /* ===============================================================

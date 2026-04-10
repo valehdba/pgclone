@@ -21,6 +21,7 @@ Complete reference for all pgclone functions and options.
 - [Dynamic Data Masking](#dynamic-data-masking-v330)
 - [Clone Roles and Permissions](#clone-roles-and-permissions-v340)
 - [Clone Verification](#clone-verification-v350)
+- [GDPR/Compliance Masking Report](#gdprcompliance-masking-report-v360)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -603,6 +604,59 @@ Returns one row per table across all user schemas.
 
 ---
 
+## GDPR/Compliance Masking Report (v3.6.0)
+
+Generate an audit report listing all sensitive columns in a schema, their masking status, and recommended actions.
+
+```sql
+SELECT * FROM pgclone_masking_report('public');
+```
+
+```
+ schema_name | table_name | column_name | sensitivity  | mask_status   | recommendation
+-------------+------------+-------------+--------------+---------------+--------------------------------------
+ public      | employees  | full_name   | PII - Name   | UNMASKED      | Apply mask strategy: name
+ public      | employees  | email       | Email        | UNMASKED      | Apply mask strategy: email
+ public      | employees  | phone       | Phone        | UNMASKED      | Apply mask strategy: phone
+ public      | employees  | salary      | Financial    | UNMASKED      | Apply mask strategy: random_int
+ public      | employees  | ssn         | National ID  | UNMASKED      | Apply mask strategy: null
+ public      | users      | email       | Email        | MASKED (view) | OK - masked via users_masked view
+ public      | users      | password    | Credential   | MASKED (view) | OK - masked via users_masked view
+```
+
+### Columns
+
+| Column | Description |
+|--------|-------------|
+| `sensitivity` | Category: Email, PII - Name, Phone, National ID, Financial, Credential, Address, Date of Birth, Credit Card, IP Address |
+| `mask_status` | `MASKED (view)` if a `_masked` view exists, `UNMASKED` otherwise |
+| `recommendation` | "OK - masked via view" or "Apply mask strategy: X" |
+
+### Typical compliance workflow
+
+```sql
+-- 1. Clone production data
+SELECT pgclone_database('host=prod dbname=myapp user=postgres', true);
+
+-- 2. Run masking report — find unmasked PII
+SELECT * FROM pgclone_masking_report('public') WHERE mask_status = 'UNMASKED';
+
+-- 3. Apply masking policies to unmasked tables
+SELECT pgclone_create_masking_policy('public', 'employees',
+    '{"email": "email", "full_name": "name", "ssn": "null"}', 'dba_team');
+
+-- 4. Re-run report — confirm all sensitive columns are now masked
+SELECT * FROM pgclone_masking_report('public');
+```
+
+### Notes
+
+- Only sensitive columns appear in the report (non-sensitive columns are filtered out).
+- The report checks for masked views created by `pgclone_create_masking_policy()`.
+- Uses the same ~40 sensitivity patterns as `pgclone_discover_sensitive()`.
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -643,6 +697,7 @@ Returns one row per table across all user schemas.
 | `pgclone_clone_roles(conninfo, role_names)` | text | Clone specific roles (comma-separated) with passwords, attributes, and permissions |
 | `pgclone_verify(conninfo)` | table | Compare row counts for all tables across source and target |
 | `pgclone_verify(conninfo, schema)` | table | Compare row counts for tables in a specific schema |
+| `pgclone_masking_report(schema)` | table | GDPR/compliance audit: sensitive columns, mask status, recommendations |
 | `pgclone_table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone_schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone_progress(job_id)` | json | Job progress as JSON |

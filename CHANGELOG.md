@@ -2,6 +2,21 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [3.6.0]
+
+### Added
+- **GDPR/Compliance Masking Report**: `pgclone_masking_report(schema)` generates an audit report listing all sensitive columns, their masking status, and recommendations
+  - Detects sensitive columns using shared `sensitivity_rules` (~40 patterns across 10 categories)
+  - Checks if a masked view (`table_masked`) exists for each table
+  - `mask_status`: `MASKED (view)` or `UNMASKED`
+  - `recommendation`: either "OK - masked via view" or "Apply mask strategy: X"
+  - Returns SET OF (schema_name, table_name, column_name, sensitivity, mask_status, recommendation)
+  - Useful for GDPR, HIPAA, SOX compliance audits — "prove no PII exists unmasked"
+
+### Changed
+- Refactored sensitivity rules into shared `SensitivityRule` struct and `pgclone_match_sensitivity()` helper — used by both `pgclone_discover_sensitive` and `pgclone_masking_report`
+- Version bumped to 3.6.0
+
 ## [3.5.0]
 
 ### Added
