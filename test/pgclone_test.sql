@@ -210,7 +210,7 @@ SELECT throws_ok(
     format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'inject_test1',
-        '{\"where\": \"1=1; DROP TABLE customers; --\"}'),
+        '{"where": "1=1; DROP TABLE customers; --"}'),
     '22023',
     'pgclone: WHERE clause must not contain semicolons',
     'semicolon in WHERE clause is rejected'
@@ -221,7 +221,7 @@ SELECT throws_ok(
     format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'inject_test2',
-        '{\"where\": \"1=1 OR DROP TABLE customers\"}'),
+        '{"where": "1=1 OR DROP TABLE customers"}'),
     '22023',
     'pgclone: WHERE clause contains forbidden keyword: DROP',
     'DROP keyword in WHERE clause is rejected'
@@ -232,7 +232,7 @@ SELECT throws_ok(
     format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'inject_test3',
-        '{\"where\": \"1=1 OR INSERT INTO customers VALUES(999)\"}'),
+        '{"where": "1=1 OR INSERT INTO customers VALUES(999)"}'),
     '22023',
     'pgclone: WHERE clause contains forbidden keyword: INSERT',
     'INSERT keyword in WHERE clause is rejected'
@@ -243,7 +243,7 @@ SELECT lives_ok(
     format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'no_false_positive',
-        '{\"where\": \"created_at IS NOT NULL\"}'),
+        '{"where": "created_at IS NOT NULL"}'),
     'WHERE with created_at does not false-positive on CREATE keyword'
 );
 
