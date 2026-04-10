@@ -13,6 +13,7 @@ jobs:
   test:
     name: "PostgreSQL ${{ matrix.pg_version }}"
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
