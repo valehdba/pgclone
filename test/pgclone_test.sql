@@ -261,34 +261,25 @@ SELECT lives_ok(
 
 SELECT has_table('test_schema', 'employees_masked_email', 'masked email table created');
 
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_email',
-        ARRAY[5],
-        'masked email table has 5 rows'
-    )$$,
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_masked_email',
+    ARRAY[5],
     'masked email table has 5 rows'
 );
 
 -- Verify emails are masked: local part replaced, domain preserved
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_email
-          WHERE email LIKE ''a%@%'' AND email NOT LIKE ''alice@%''',
-        ARRAY[1],
-        'alice email is masked (starts with a but not full address)'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_email
+      WHERE email LIKE 'a%@%' AND email NOT LIKE 'alice@%'$$,
+    ARRAY[1],
     'alice email is masked (starts with a but not full address)'
 );
 
 -- No original email should survive
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_email
-          WHERE email = ''alice@example.com''',
-        ARRAY[0],
-        'original alice email not present in masked table'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_email
+      WHERE email = 'alice@example.com'$$,
+    ARRAY[0],
     'original alice email not present in masked table'
 );
 
@@ -305,13 +296,10 @@ SELECT lives_ok(
 );
 
 -- All names should be XXXX
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_name
-          WHERE full_name = ''XXXX''',
-        ARRAY[5],
-        'all names masked to XXXX'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_name
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[5],
     'all names masked to XXXX'
 );
 
@@ -327,13 +315,10 @@ SELECT lives_ok(
     'pgclone_table with null mask on ssn'
 );
 
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_null
-          WHERE ssn IS NULL',
-        ARRAY[5],
-        'all SSNs nullified'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_null
+      WHERE ssn IS NULL$$,
+    ARRAY[5],
     'all SSNs nullified'
 );
 
@@ -350,13 +335,10 @@ SELECT lives_ok(
 );
 
 -- Hashed emails should be 32-char hex strings (md5)
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_hash
-          WHERE length(email) = 32 AND email ~ ''^[a-f0-9]+$''',
-        ARRAY[5],
-        'all emails are md5 hashes (32 hex chars)'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_hash
+      WHERE length(email) = 32 AND email ~ '^[a-f0-9]+$'$$,
+    ARRAY[5],
     'all emails are md5 hashes (32 hex chars)'
 );
 
@@ -373,13 +355,10 @@ SELECT lives_ok(
 );
 
 -- Non-null notes should be REDACTED (NULL notes stay NULL is acceptable too)
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_const
-          WHERE notes = ''REDACTED''',
-        ARRAY[5],
-        'all notes replaced with REDACTED'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_const
+      WHERE notes = 'REDACTED'$$,
+    ARRAY[5],
     'all notes replaced with REDACTED'
 );
 
@@ -396,23 +375,17 @@ SELECT lives_ok(
 );
 
 -- WHERE salary > 60000 should give 4 rows (Alice=95k, Bob=82k, Charlie=67k, Diana=120k)
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_combo',
-        ARRAY[4],
-        'combo masked table has 4 rows (salary > 60000)'
-    )$$,
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_masked_combo',
+    ARRAY[4],
     'combo masked table has 4 rows (salary > 60000)'
 );
 
 -- Names should be masked
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_masked_combo
-          WHERE full_name = ''XXXX''',
-        ARRAY[4],
-        'all names in combo table masked to XXXX'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_masked_combo
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[4],
     'all names in combo table masked to XXXX'
 );
 
@@ -478,13 +451,10 @@ SELECT lives_ok(
 );
 
 -- Verify original data is present before masking
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_inplace
-          WHERE email = ''alice@example.com''',
-        ARRAY[1],
-        'original alice email present before mask_in_place'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE email = 'alice@example.com'$$,
+    ARRAY[1],
     'original alice email present before mask_in_place'
 );
 
@@ -497,45 +467,33 @@ SELECT lives_ok(
 );
 
 -- Verify emails are masked
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_inplace
-          WHERE email = ''alice@example.com''',
-        ARRAY[0],
-        'original alice email removed after mask_in_place'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE email = 'alice@example.com'$$,
+    ARRAY[0],
     'original alice email removed after mask_in_place'
 );
 
 -- Verify names are masked
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_inplace
-          WHERE full_name = ''XXXX''',
-        ARRAY[5],
-        'all names masked to XXXX after mask_in_place'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[5],
     'all names masked to XXXX after mask_in_place'
 );
 
 -- Verify SSNs are nullified
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_inplace
-          WHERE ssn IS NULL',
-        ARRAY[5],
-        'all SSNs nullified after mask_in_place'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_inplace
+      WHERE ssn IS NULL$$,
+    ARRAY[5],
     'all SSNs nullified after mask_in_place'
 );
 
 -- Row count should be unchanged
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_inplace',
-        ARRAY[5],
-        'row count unchanged after mask_in_place'
-    )$$,
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_inplace',
+    ARRAY[5],
     'row count unchanged after mask_in_place'
 );
 
@@ -567,33 +525,24 @@ SELECT has_view(
 );
 
 -- Verify masked view returns masked data
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_ddm_masked
-          WHERE full_name = ''XXXX''',
-        ARRAY[5],
-        'masked view shows XXXX for all names'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_ddm_masked
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[5],
     'masked view shows XXXX for all names'
 );
 
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_ddm_masked
-          WHERE ssn IS NULL',
-        ARRAY[5],
-        'masked view shows NULL for all SSNs'
-    )$$,
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_ddm_masked
+      WHERE ssn IS NULL$$,
+    ARRAY[5],
     'masked view shows NULL for all SSNs'
 );
 
 -- Verify row count preserved
-SELECT lives_ok(
-    $$SELECT results_eq(
-        'SELECT count(*)::integer FROM test_schema.employees_ddm_masked',
-        ARRAY[5],
-        'masked view has 5 rows'
-    )$$,
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_ddm_masked',
+    ARRAY[5],
     'masked view has 5 rows'
 );
 
