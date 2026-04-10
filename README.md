@@ -144,4 +144,4 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 
 ## License
 
-PostgreSQL License
+[PostgreSQL License](LICENSE)
