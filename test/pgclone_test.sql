@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(89);
+SELECT plan(88);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -546,11 +546,9 @@ SELECT results_eq(
     'masked view has 5 rows'
 );
 
--- Drop the masking policy
-SELECT lives_ok(
-    $$SELECT pgclone_drop_masking_policy('test_schema', 'employees_ddm')$$,
-    'pgclone_drop_masking_policy runs without error'
-);
+-- NOTE: pgclone_drop_masking_policy is tested in test_database_create.sh
+-- because it uses DROP VIEW via loopback which deadlocks inside pgTAP's
+-- transaction (tests 70-72 hold AccessShareLock on the masked view).
 
 -- ============================================================
 -- TEST GROUP 22: Clone roles with permissions
