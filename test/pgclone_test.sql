@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(84);
+SELECT plan(89);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -689,6 +689,48 @@ SELECT results_eq(
         'public'),
     ARRAY['✓'::text],
     'simple_test table shows match after clone'
+);
+
+-- ============================================================
+-- TEST GROUP 24: GDPR/Compliance masking report
+-- ============================================================
+
+-- Run masking report on test_schema (employees table has sensitive columns)
+SELECT lives_ok(
+    $$SELECT * FROM pgclone_masking_report('test_schema')$$,
+    'pgclone_masking_report runs without error'
+);
+
+-- Should detect email column in employees table
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM pgclone_masking_report('test_schema')
+      WHERE table_name = 'employees' AND column_name = 'email'$$,
+    ARRAY[1],
+    'report detects email column in employees'
+);
+
+-- Should detect full_name as PII
+SELECT results_eq(
+    $$SELECT sensitivity FROM pgclone_masking_report('test_schema')
+      WHERE table_name = 'employees' AND column_name = 'full_name' LIMIT 1$$,
+    ARRAY['PII - Name'::text],
+    'full_name detected as PII - Name'
+);
+
+-- Should detect ssn as National ID
+SELECT results_eq(
+    $$SELECT sensitivity FROM pgclone_masking_report('test_schema')
+      WHERE table_name = 'employees' AND column_name = 'ssn' LIMIT 1$$,
+    ARRAY['National ID'::text],
+    'ssn detected as National ID'
+);
+
+-- Without a masked view, status should be UNMASKED
+SELECT results_eq(
+    $$SELECT mask_status FROM pgclone_masking_report('test_schema')
+      WHERE table_name = 'employees' AND column_name = 'email' LIMIT 1$$,
+    ARRAY['UNMASKED'::text],
+    'email shows UNMASKED when no masked view exists'
 );
 
 SELECT * FROM finish();
