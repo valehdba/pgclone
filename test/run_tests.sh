@@ -51,6 +51,20 @@ psql -U postgres -d target_db -f /build/pgclone/test/pgclone_test.sql 2>&1
 
 TEST_EXIT=$?
 
+# Run loopback-DDL tests (clone_roles, verify, masking_report, DDM)
+echo ""
+echo "============================================"
+echo "Running pgclone loopback-DDL tests..."
+echo "============================================"
+
+bash /build/pgclone/test/test_loopback.sh 2>&1
+
+LOOPBACK_EXIT=$?
+
+if [ $LOOPBACK_EXIT -ne 0 ]; then
+    TEST_EXIT=1
+fi
+
 # Run pgclone_database_create tests (outside transaction)
 echo ""
 echo "============================================"
