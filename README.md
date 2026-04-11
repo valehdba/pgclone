@@ -113,7 +113,7 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 |----------|-------------|
 | [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, and examples |
 | [Async Operations](docs/ASYNC.md) | Background workers, progress tracking, parallel cloning |
-| [Testing](docs/TESTING.md) | Test infrastructure, 73 pgTAP tests, Docker, CI/CD |
+| [Testing](docs/TESTING.md) | Test infrastructure, 115 tests across 4 suites, Docker, CI/CD |
 | [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, PG version compatibility |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 

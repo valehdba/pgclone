@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 2.1.x   | ✅ Active |
-| 2.0.x   | ✅ Security fixes |
+| 3.x     | ✅ Active |
+| 2.x     | ✅ Security fixes |
 | 1.x     | ❌ End of life |
 | 0.x     | ❌ End of life |
 
@@ -33,11 +33,11 @@ Connection strings passed to pgclone functions may contain passwords in plaintex
 
 ### SQL Injection — WHERE Clause
 
-The `"where"` option in JSON parameters is passed directly to SQL queries on the **source** database. This is by design for flexibility, but means:
+The `"where"` option in JSON parameters is validated against SQL injection patterns (DDL/DML keywords and semicolons are rejected) and executed inside a `READ ONLY` transaction on the source database. This provides two layers of protection:
 
 - Only use `WHERE` filters with trusted input
 - Do not pass user-supplied strings directly into the `"where"` option
-- A future version (v2.2.1) will add read-only transaction wrapping for additional protection
+- The keyword validation and read-only transaction wrapping (v2.2.1) prevent most injection attacks, but defense-in-depth is recommended
 
 ### Network Security
 
