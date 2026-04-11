@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo/banner.svg" alt="pgclone banner" width="100%">
+</p>
+
 # PgClone
 
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
