@@ -36,9 +36,9 @@ for ver in $VERSIONS; do
     SERVICE="test-pg${ver}"
 
     if docker compose build "$SERVICE" 2>&1 | tail -5; then
-        OUTPUT=$(docker compose run --rm "$SERVICE" 2>&1)
-        echo "$OUTPUT"
-        if echo "$OUTPUT" | grep -q "ALL TESTS PASSED"; then
+        TMPLOG=$(mktemp)
+        docker compose run --rm "$SERVICE" 2>&1 | tee "$TMPLOG" || true
+        if grep -q "ALL TESTS PASSED" "$TMPLOG"; then
             echo "✅ PostgreSQL $ver: PASSED"
             RESULTS="$RESULTS\n  ✅ PostgreSQL $ver: PASSED"
             PASS=$((PASS + 1))
@@ -47,6 +47,7 @@ for ver in $VERSIONS; do
             RESULTS="$RESULTS\n  ❌ PostgreSQL $ver: FAILED"
             FAIL=$((FAIL + 1))
         fi
+        rm -f "$TMPLOG"
     else
         echo "❌ PostgreSQL $ver: BUILD FAILED"
         RESULTS="$RESULTS\n  ❌ PostgreSQL $ver: BUILD FAILED"
