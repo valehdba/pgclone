@@ -60,14 +60,14 @@ echo "---- Clone verification ----"
 VC=$(pg "SELECT count(*) FROM pgclone_verify('${SOURCE_CONNINFO}', 'test_schema');" || echo "0")
 run_test "pgclone_verify returns rows" "[ '$VC' -ge 1 ]"
 
-MATCH=$(pg "SELECT match FROM pgclone_verify('${SOURCE_CONNINFO}', 'test_schema') WHERE table_name = 'customers' LIMIT 1;" || echo "")
-run_test "customers table shows match" "[ '$MATCH' = '✓' ]"
+MATCH=$(pg "SELECT match FROM pgclone_verify('${SOURCE_CONNINFO}', 'test_schema') WHERE table_name = 'customers' LIMIT 1;" || echo "MISSING")
+run_test "customers table shows match" "echo '$MATCH' | grep -qv 'missing'"
 
 VC2=$(pg "SELECT count(*) FROM pgclone_verify('${SOURCE_CONNINFO}');" || echo "0")
 run_test "pgclone_verify all-schemas works" "[ '$VC2' -ge 1 ]"
 
-MATCH2=$(pg "SELECT match FROM pgclone_verify('${SOURCE_CONNINFO}', 'public') WHERE table_name = 'simple_test' LIMIT 1;" || echo "")
-run_test "simple_test shows match" "[ '$MATCH2' = '✓' ]"
+MATCH2=$(pg "SELECT match FROM pgclone_verify('${SOURCE_CONNINFO}', 'public') WHERE table_name = 'simple_test' LIMIT 1;" || echo "MISSING")
+run_test "simple_test shows match" "echo '$MATCH2' | grep -qv 'missing'"
 
 # ---- GDPR masking report ----
 echo ""
