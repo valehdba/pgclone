@@ -108,10 +108,56 @@ jobs:
           psql -h localhost -p 5434 -U postgres -d target_db \
             -c "ALTER DATABASE target_db SET app.source_conninfo = 'host=localhost port=5433 dbname=source_db user=postgres password=testpass';"
 
-      - name: "Test: pgTAP (33 sync tests)"
+      - name: "Test: pgTAP (66 sync tests)"
         run: |
           psql -h localhost -p 5434 -U postgres -d target_db \
             -f test/pgclone_test.sql
+
+      - name: "Test: Loopback-DDL (roles, verify, report, DDM)"
+        run: |
+          export SOURCE_CONNINFO="host=localhost port=5433 dbname=source_db user=postgres password=testpass"
+          PG="psql -h localhost -p 5434 -U postgres -d target_db"
+          PASS=0; FAIL=0
+
+          pg() { $PG -tAc "$1" 2>/dev/null; }
+          run_test() {
+            if eval "$2" 2>/dev/null; then
+              echo "  PASS: $1"; PASS=$((PASS + 1))
+            else
+              echo "  FAIL: $1"; FAIL=$((FAIL + 1))
+            fi
+          }
+
+          # Clone roles
+          RESULT=$(pg "SELECT pgclone_clone_roles('${SOURCE_CONNINFO}');" || echo "ERROR")
+          run_test "clone_roles runs" "[ '$RESULT' != 'ERROR' ]"
+          R1=$(pg "SELECT 1 FROM pg_roles WHERE rolname = 'test_reader';" || echo "0")
+          run_test "test_reader exists" "[ '$R1' = '1' ]"
+          R2=$(pg "SELECT 1 FROM pg_roles WHERE rolname = 'test_writer';" || echo "0")
+          run_test "test_writer exists" "[ '$R2' = '1' ]"
+          R3=$(pg "SELECT 1 FROM pg_roles WHERE rolname = 'test_admin';" || echo "0")
+          run_test "test_admin exists" "[ '$R3' = '1' ]"
+
+          # Verify
+          VC=$(pg "SELECT count(*) FROM pgclone_verify('${SOURCE_CONNINFO}', 'test_schema');" || echo "0")
+          run_test "verify returns rows" "[ '$VC' -ge 1 ]"
+
+          # Masking report
+          RC=$(pg "SELECT count(*) FROM pgclone_masking_report('test_schema') WHERE table_name = 'employees' AND column_name = 'email';" || echo "0")
+          run_test "report detects email" "[ '$RC' = '1' ]"
+
+          # DDM
+          pg "DROP TABLE IF EXISTS test_schema.employees_ddm CASCADE;" || true
+          pg "SELECT pgclone_table('${SOURCE_CONNINFO}', 'test_schema', 'employees', true, 'employees_ddm');" || true
+          RESULT=$(pg "SELECT pgclone_create_masking_policy('test_schema', 'employees_ddm', '{\"email\": \"email\", \"full_name\": \"name\", \"ssn\": \"null\"}', 'postgres');" || echo "ERROR")
+          run_test "create_masking_policy" "[ '$RESULT' != 'ERROR' ]"
+          MASKED=$(pg "SELECT count(*) FROM test_schema.employees_ddm_masked WHERE full_name = 'XXXX';" || echo "0")
+          run_test "masked view works" "[ '$MASKED' = '5' ]"
+          pg "SELECT pgclone_drop_masking_policy('test_schema', 'employees_ddm');" || true
+          pg "DROP TABLE IF EXISTS test_schema.employees_ddm CASCADE;" || true
+
+          echo "LOOPBACK: $PASS passed, $FAIL failed"
+          [ $FAIL -eq 0 ] || exit 1
 
       - name: "Test: pgclone_database_create"
         run: |

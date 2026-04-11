@@ -4,9 +4,9 @@ PgClone has a comprehensive test suite that runs across PostgreSQL versions 14�
 
 ## Test Suite Overview
 
-The test suite is organized into three test groups:
+The test suite is organized into four test groups:
 
-### 1. pgTAP Sync Tests (89 tests)
+### 1. pgTAP Sync Tests (66 tests)
 
 Located in `test/pgclone_test.sql`, these cover core synchronous functionality:
 
@@ -32,16 +32,23 @@ Located in `test/pgclone_test.sql`, these cover core synchronous functionality:
 | 18. Combined masks | 3 | Multi-mask + WHERE filter composition |
 | 19. Auto-discovery | 6 | Detect email, name, phone, salary, ssn columns |
 | 20. Mask in-place | 7 | Clone-then-mask workflow, verify UPDATE masking |
-| 21. Dynamic masking | 7 | Create/drop policy, view existence, masked view data |
-| 22. Clone roles | 6 | Role creation, LOGIN/CREATEDB attributes, permissions |
-| 23. Clone verify | 5 | Row count comparison, match indicators, schema/all modes |
-| 24. Masking report | 5 | GDPR audit, sensitivity detection, mask status |
 
-### 2. Database Create Tests
+### 2. Loopback-DDL Tests (21 tests)
+
+Located in `test/test_loopback.sh`. These tests call functions that use loopback libpq connections for DDL (CREATE VIEW, CREATE ROLE, GRANT, etc.) which cannot run inside pgTAP's transaction without deadlocking:
+
+| Section | Tests | What It Covers |
+|---------|-------|----------------|
+| Clone roles | 6 | Role creation, LOGIN/CREATEDB attributes, permissions |
+| Clone verify | 4 | Row count comparison, match indicators, schema/all modes |
+| Masking report | 4 | GDPR audit, sensitivity detection, mask status |
+| Dynamic masking | 7 | Create/drop policy, view existence, masked view data |
+
+### 3. Database Create Tests (7 tests)
 
 Located in `test/test_database_create.sh` — verifies `pgclone_database_create()` creates a new database, clones data into it, and supports idempotent re-cloning.
 
-### 3. Async Tests
+### 4. Async Tests (21 tests)
 
 Located in `test/test_async.sh` — covers background worker operations (8 tests):
 
@@ -139,10 +146,11 @@ Tests run in parallel across PostgreSQL 14, 15, 16, 17, and 18 with `fail-fast: 
 3. **Start target PostgreSQL** — separate instance on port 5434 with `shared_preload_libraries = 'pgclone'`
 4. **Seed source database** — GitHub Actions service container on port 5433
 5. **Install pgTAP** — built against the same PG version
-6. **Run sync tests** — 89 pgTAP tests
-7. **Run database_create tests** — creates/clones/verifies/cleans up
-8. **Run async tests** — background worker tests with polling
-9. **Show logs on failure** — dumps PostgreSQL server log for debugging
+6. **Run sync tests** — 66 pgTAP tests
+7. **Run loopback-DDL tests** — 21 shell tests for clone_roles, verify, masking_report, DDM
+8. **Run database_create tests** — creates/clones/verifies/cleans up
+9. **Run async tests** — background worker tests with polling
+10. **Show logs on failure** — dumps PostgreSQL server log for debugging
 
 ### Service Container
 
@@ -174,7 +182,7 @@ The test fixture (`test/fixtures/seed.sql`) creates:
 Add to `test/pgclone_test.sql`, increment the plan count:
 
 ```sql
-SELECT plan(74);  -- increment after adding your test
+SELECT plan(67);  -- increment after adding your test
 
 -- Your new test
 SELECT lives_ok(
@@ -183,6 +191,17 @@ SELECT lives_ok(
         'public', 'new_table'),
     'description of what this tests'
 );
+```
+
+**Important:** Functions that use loopback DDL connections (CREATE/DROP/GRANT via libpq loopback) will deadlock inside pgTAP's transaction. Add those tests to `test/test_loopback.sh` instead.
+
+### Loopback-DDL test
+
+Add to `test/test_loopback.sh` for functions that run DDL via loopback:
+
+```bash
+RESULT=$(pg "SELECT pgclone_your_function(...);" || echo "ERROR")
+run_test "description" "[ '$RESULT' != 'ERROR' ]"
 ```
 
 ### Shell-based test

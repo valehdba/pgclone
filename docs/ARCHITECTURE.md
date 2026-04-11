@@ -32,10 +32,11 @@ pgclone/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
 │   ├── fixtures/seed.sql  # Test data
-│   ├── pgclone_test.sql   # 89 pgTAP tests
+│   ├── pgclone_test.sql   # 66 pgTAP tests (groups 1–20)
+│   ├── test_loopback.sh   # 21 loopback-DDL tests (roles, verify, report, DDM)
 │   ├── run_tests.sh       # Test orchestrator
 │   ├── run_all.sh         # Multi-version runner
-│   ├── test_async.sh      # Async test suite (8 tests incl. worker pool)
+│   ├── test_async.sh      # Async test suite (21 tests incl. worker pool)
 │   └── test_database_create.sh
 ├── .github/workflows/ci.yml  # GitHub Actions CI (PG 14–18 matrix)
 ├── Dockerfile             # Multi-version build container
