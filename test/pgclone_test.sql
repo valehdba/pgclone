@@ -498,59 +498,6 @@ SELECT results_eq(
 );
 
 -- ============================================================
--- TEST GROUP 21: Dynamic data masking (create/drop policy)
--- ============================================================
-
--- First: clone employees for dynamic masking test
-SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L)',
-        current_setting('app.source_conninfo'),
-        'test_schema', 'employees', 'employees_ddm'),
-    'clone employees table for dynamic masking'
-);
-
--- Create a masking policy
-SELECT lives_ok(
-    $$SELECT pgclone_create_masking_policy(
-        'test_schema', 'employees_ddm',
-        '{"email": "email", "full_name": "name", "ssn": "null"}',
-        'postgres')$$,
-    'pgclone_create_masking_policy runs without error'
-);
-
--- Verify the masked view was created
-SELECT has_view(
-    'test_schema', 'employees_ddm_masked',
-    'masked view employees_ddm_masked exists'
-);
-
--- Verify masked view returns masked data
-SELECT results_eq(
-    $$SELECT count(*)::integer FROM test_schema.employees_ddm_masked
-      WHERE full_name = 'XXXX'$$,
-    ARRAY[5],
-    'masked view shows XXXX for all names'
-);
-
-SELECT results_eq(
-    $$SELECT count(*)::integer FROM test_schema.employees_ddm_masked
-      WHERE ssn IS NULL$$,
-    ARRAY[5],
-    'masked view shows NULL for all SSNs'
-);
-
--- Verify row count preserved
-SELECT results_eq(
-    'SELECT count(*)::integer FROM test_schema.employees_ddm_masked',
-    ARRAY[5],
-    'masked view has 5 rows'
-);
-
--- NOTE: pgclone_drop_masking_policy is tested in test_database_create.sh
--- because it uses DROP VIEW via loopback which deadlocks inside pgTAP's
--- transaction (tests 70-72 hold AccessShareLock on the masked view).
-
--- ============================================================
 -- TEST GROUP 22: Clone roles with permissions
 -- ============================================================
 
@@ -679,6 +626,60 @@ SELECT results_eq(
     ARRAY['UNMASKED'::text],
     'email shows UNMASKED when no masked view exists'
 );
+
+-- ============================================================
+-- TEST GROUP 21: Dynamic data masking (create/drop policy)
+-- ============================================================
+
+-- First: clone employees for dynamic masking test
+SELECT lives_ok(
+    format('SELECT pgclone_table(%L, %L, %L, true, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'employees', 'employees_ddm'),
+    'clone employees table for dynamic masking'
+);
+
+-- Create a masking policy
+SELECT lives_ok(
+    $$SELECT pgclone_create_masking_policy(
+        'test_schema', 'employees_ddm',
+        '{"email": "email", "full_name": "name", "ssn": "null"}',
+        'postgres')$$,
+    'pgclone_create_masking_policy runs without error'
+);
+
+-- Verify the masked view was created
+SELECT has_view(
+    'test_schema', 'employees_ddm_masked',
+    'masked view employees_ddm_masked exists'
+);
+
+-- Verify masked view returns masked data
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_ddm_masked
+      WHERE full_name = 'XXXX'$$,
+    ARRAY[5],
+    'masked view shows XXXX for all names'
+);
+
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.employees_ddm_masked
+      WHERE ssn IS NULL$$,
+    ARRAY[5],
+    'masked view shows NULL for all SSNs'
+);
+
+-- Verify row count preserved
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.employees_ddm_masked',
+    ARRAY[5],
+    'masked view has 5 rows'
+);
+
+-- NOTE: pgclone_drop_masking_policy is tested in test_database_create.sh
+-- because it uses DROP VIEW via loopback which deadlocks inside pgTAP's
+-- transaction (tests 70-72 hold AccessShareLock on the masked view).
+
 
 SELECT * FROM finish();
 ROLLBACK;
