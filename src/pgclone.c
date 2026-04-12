@@ -1827,8 +1827,11 @@ pgclone_schema(PG_FUNCTION_ARGS)
     int         i, ntables;
     char      **table_names = NULL;
 
-    /* Arg 3: JSON options (optional) */
-    if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
+    /* Arg 3: JSON options (only for the 4-arg overload where arg 3 is TEXT).
+     * MUST use == 4, NOT >= 4:  when called from pgclone_schema_ex with
+     * 6 args, arg 3 is a BOOLEAN — calling PG_GETARG_TEXT_PP on it would
+     * dereference an invalid pointer and crash the server (SIGSEGV). */
+    if (PG_NARGS() == 4 && !PG_ARGISNULL(3))
     {
         char *options_json = text_to_cstring(PG_GETARG_TEXT_PP(3));
         opts = pgclone_parse_options(options_json);
