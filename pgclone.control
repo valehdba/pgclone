@@ -3,5 +3,4 @@ comment = 'Clone PostgreSQL databases, schemas, tables, roles and permissions wi
 default_version = '4.0.0'
 module_pathname = '$libdir/pgclone'
 relocatable = false
-schema = pgclone
 superuser = true
