@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# pgclone_database_create test
+# pgclone.database_create test
 # Tests creating a new database and cloning into it
 # Must run outside pgTAP transaction (CREATE DATABASE)
 # ============================================================
@@ -8,7 +8,7 @@
 set -e
 
 echo "============================================"
-echo "Testing pgclone_database_create"
+echo "Testing pgclone.database_create"
 echo "============================================"
 
 SOURCE_CONNINFO="host=source-db dbname=source_db user=postgres password=testpass"
@@ -25,16 +25,16 @@ psql -U postgres -d postgres -c "DROP DATABASE IF EXISTS clone_test_db;" 2>/dev/
 
 # ---- TEST 1: Create new database and clone ----
 echo ""
-echo "TEST 1: pgclone_database_create creates DB and clones"
+echo "TEST 1: pgclone.database_create creates DB and clones"
 psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
-    SELECT pgclone_database_create(
+    SELECT pgclone.database_create(
         '${SOURCE_CONNINFO}',
         'clone_test_db',
         true
     );
 SQL
 
-echo "PASS: pgclone_database_create completed without error"
+echo "PASS: pgclone.database_create completed without error"
 
 # ---- TEST 2: Verify database was created ----
 DB_EXISTS=$(psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'clone_test_db'")
@@ -77,16 +77,16 @@ fi
 
 # ---- TEST 6: Run again on existing DB — structure only (no PK conflicts) ----
 echo ""
-echo "TEST 6: pgclone_database_create on existing DB (idempotent, structure only)"
+echo "TEST 6: pgclone.database_create on existing DB (idempotent, structure only)"
 psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
-    SELECT pgclone_database_create(
+    SELECT pgclone.database_create(
         '${SOURCE_CONNINFO}',
         'clone_test_db',
         false
     );
 SQL
 
-echo "PASS: pgclone_database_create works on existing database"
+echo "PASS: pgclone.database_create works on existing database"
 
 # ---- TEST 7: Verify simple_test table in public schema ----
 SIMPLE_EXISTS=$(psql -U postgres -d clone_test_db -tAc "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename = 'simple_test'")
@@ -104,5 +104,5 @@ psql -U postgres -d postgres -c "DROP DATABASE IF EXISTS clone_test_db;" 2>/dev/
 
 echo ""
 echo "============================================"
-echo "ALL pgclone_database_create TESTS PASSED"
+echo "ALL pgclone.database_create TESTS PASSED"
 echo "============================================"

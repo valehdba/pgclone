@@ -22,19 +22,19 @@ SELECT lives_ok(
 );
 
 SELECT matches(
-    pgclone_version(),
+    pgclone.version(),
     '^pgclone ',
-    'pgclone_version() returns version string'
+    'pgclone.version() returns version string'
 );
 -- ============================================================
 -- TEST GROUP 2: Clone single table (structure + data)
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true)',
+    format('SELECT pgclone.table(%L, %L, %L, true)',
         current_setting('app.source_conninfo'),
         'public', 'simple_test'),
-    'pgclone_table clones simple_test with data'
+    'pgclone.table clones simple_test with data'
 );
 
 SELECT has_table('public', 'simple_test', 'simple_test table exists locally');
@@ -50,10 +50,10 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L)',
         current_setting('app.source_conninfo'),
         'public', 'simple_test', 'simple_test_copy'),
-    'pgclone_table clones with different target name'
+    'pgclone.table clones with different target name'
 );
 
 SELECT has_table('public', 'simple_test_copy', 'simple_test_copy table exists');
@@ -69,10 +69,10 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, false, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, false, %L)',
         current_setting('app.source_conninfo'),
         'public', 'simple_test', 'simple_test_empty'),
-    'pgclone_table clones structure only'
+    'pgclone.table clones structure only'
 );
 
 SELECT has_table('public', 'simple_test_empty', 'simple_test_empty table exists');
@@ -88,10 +88,10 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_schema(%L, %L, true)',
+    format('SELECT pgclone.schema(%L, %L, true)',
         current_setting('app.source_conninfo'),
         'test_schema'),
-    'pgclone_schema clones test_schema'
+    'pgclone.schema clones test_schema'
 );
 
 SELECT has_schema('test_schema', 'test_schema exists');
@@ -167,11 +167,11 @@ SELECT has_function(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'customers_lite',
         '{"columns": ["id", "name", "email"]}'),
-    'pgclone_table with selective columns'
+    'pgclone.table with selective columns'
 );
 
 SELECT has_table('test_schema', 'customers_lite', 'customers_lite created');
@@ -188,11 +188,11 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'active_only',
         '{"where": "status = ''active''"}'),
-    'pgclone_table with WHERE filter'
+    'pgclone.table with WHERE filter'
 );
 
 SELECT results_eq(
@@ -207,7 +207,7 @@ SELECT results_eq(
 
 -- Test: semicolon in WHERE clause must be rejected
 SELECT throws_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'inject_test1',
         '{"where": "1=1; DROP TABLE customers; --"}'),
@@ -218,7 +218,7 @@ SELECT throws_ok(
 
 -- Test: DROP keyword in WHERE clause must be rejected
 SELECT throws_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'inject_test2',
         '{"where": "1=1 OR DROP TABLE customers"}'),
@@ -229,7 +229,7 @@ SELECT throws_ok(
 
 -- Test: INSERT keyword in WHERE clause must be rejected
 SELECT throws_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'inject_test3',
         '{"where": "1=1 OR INSERT INTO customers VALUES(999)"}'),
@@ -240,7 +240,7 @@ SELECT throws_ok(
 
 -- Test: valid WHERE with column named 'created_at' must NOT trigger false positive on CREATE
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'customers', 'no_false_positive',
         '{"where": "created_at IS NOT NULL"}'),
@@ -252,11 +252,11 @@ SELECT lives_ok(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'employees', 'employees_masked_email',
         '{"mask": {"email": "email"}}'),
-    'pgclone_table with email mask'
+    'pgclone.table with email mask'
 );
 
 SELECT has_table('test_schema', 'employees_masked_email', 'masked email table created');
@@ -288,11 +288,11 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'employees', 'employees_masked_name',
         '{"mask": {"full_name": "name"}}'),
-    'pgclone_table with name mask'
+    'pgclone.table with name mask'
 );
 
 -- All names should be XXXX
@@ -308,11 +308,11 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'employees', 'employees_masked_null',
         '{"mask": {"ssn": "null"}}'),
-    'pgclone_table with null mask on ssn'
+    'pgclone.table with null mask on ssn'
 );
 
 SELECT results_eq(
@@ -327,11 +327,11 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'employees', 'employees_masked_hash',
         '{"mask": {"email": "hash"}}'),
-    'pgclone_table with hash mask on email'
+    'pgclone.table with hash mask on email'
 );
 
 -- Hashed emails should be 32-char hex strings (md5)
@@ -347,11 +347,11 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'employees', 'employees_masked_const',
         '{"mask": {"notes": {"type": "constant", "value": "REDACTED"}}}'),
-    'pgclone_table with constant mask on notes'
+    'pgclone.table with constant mask on notes'
 );
 
 -- Non-null notes should be REDACTED (NULL notes stay NULL is acceptable too)
@@ -367,11 +367,11 @@ SELECT results_eq(
 -- ============================================================
 
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'employees', 'employees_masked_combo',
         '{"mask": {"email": "email", "full_name": "name", "ssn": "null"}, "where": "salary > 60000"}'),
-    'pgclone_table with combined masks and WHERE filter'
+    'pgclone.table with combined masks and WHERE filter'
 );
 
 -- WHERE salary > 60000 should give 4 rows (Alice=95k, Bob=82k, Charlie=67k, Diana=120k)
@@ -395,44 +395,44 @@ SELECT results_eq(
 
 -- Discover sensitive columns in test_schema (from source)
 SELECT lives_ok(
-    format('SELECT pgclone_discover_sensitive(%L, %L)',
+    format('SELECT pgclone.discover_sensitive(%L, %L)',
         current_setting('app.source_conninfo'),
         'test_schema'),
-    'pgclone_discover_sensitive runs without error'
+    'pgclone.discover_sensitive runs without error'
 );
 
 -- Result should contain JSON with employees table detected columns
 -- The employees table has: full_name, email, phone, salary, ssn
 SELECT ok(
-    (SELECT pgclone_discover_sensitive(
+    (SELECT pgclone.discover_sensitive(
         current_setting('app.source_conninfo'),
         'test_schema')::text LIKE '%email%'),
     'discover detects email column'
 );
 
 SELECT ok(
-    (SELECT pgclone_discover_sensitive(
+    (SELECT pgclone.discover_sensitive(
         current_setting('app.source_conninfo'),
         'test_schema')::text LIKE '%full_name%'),
     'discover detects full_name column'
 );
 
 SELECT ok(
-    (SELECT pgclone_discover_sensitive(
+    (SELECT pgclone.discover_sensitive(
         current_setting('app.source_conninfo'),
         'test_schema')::text LIKE '%phone%'),
     'discover detects phone column'
 );
 
 SELECT ok(
-    (SELECT pgclone_discover_sensitive(
+    (SELECT pgclone.discover_sensitive(
         current_setting('app.source_conninfo'),
         'test_schema')::text LIKE '%salary%'),
     'discover detects salary column'
 );
 
 SELECT ok(
-    (SELECT pgclone_discover_sensitive(
+    (SELECT pgclone.discover_sensitive(
         current_setting('app.source_conninfo'),
         'test_schema')::text LIKE '%ssn%'),
     'discover detects ssn column'
@@ -444,7 +444,7 @@ SELECT ok(
 
 -- First: clone employees table without masking
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true, %L)',
+    format('SELECT pgclone.table(%L, %L, %L, true, %L)',
         current_setting('app.source_conninfo'),
         'test_schema', 'employees', 'employees_inplace'),
     'clone employees table for in-place masking'
@@ -460,10 +460,10 @@ SELECT results_eq(
 
 -- Apply in-place masking
 SELECT lives_ok(
-    $$SELECT pgclone_mask_in_place(
+    $$SELECT pgclone.mask_in_place(
         'test_schema', 'employees_inplace',
         '{"email": "email", "full_name": "name", "ssn": "null"}')$$,
-    'pgclone_mask_in_place runs without error'
+    'pgclone.mask_in_place runs without error'
 );
 
 -- Verify emails are masked

@@ -2451,18 +2451,18 @@ pgclone_database_create(PG_FUNCTION_ARGS)
 
     if (options_json != NULL)
     {
-        /* 3-arg: pgclone_database(conninfo, include_data, options) */
+        /* 3-arg: pgclone.database(conninfo, include_data, options) */
         appendStringInfo(&buf,
-            "SELECT pgclone_database(%s, %s, %s)",
+            "SELECT pgclone.database(%s, %s, %s)",
             quote_literal_cstr(source_conninfo),
             include_data ? "true" : "false",
             quote_literal_cstr(options_json));
     }
     else
     {
-        /* 2-arg: pgclone_database(conninfo, include_data) */
+        /* 2-arg: pgclone.database(conninfo, include_data) */
         appendStringInfo(&buf,
-            "SELECT pgclone_database(%s, %s)",
+            "SELECT pgclone.database(%s, %s)",
             quote_literal_cstr(source_conninfo),
             include_data ? "true" : "false");
     }
@@ -3981,7 +3981,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 3.6.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.0.0"));
 }
 
 /* ===============================================================

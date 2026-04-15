@@ -54,7 +54,7 @@ postgresql://username:password@hostname:5432/database
 ### Clone a table with data
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres password=secret',
     'public',           -- schema name
     'customers',        -- table name
@@ -65,7 +65,7 @@ SELECT pgclone_table(
 ### Clone structure only (no data)
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres password=secret',
     'public',
     'customers',
@@ -76,7 +76,7 @@ SELECT pgclone_table(
 ### Clone with a different target name
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres password=secret',
     'public',
     'customers',        -- source table name
@@ -92,7 +92,7 @@ SELECT pgclone_table(
 Clone an entire schema including tables, views, functions, sequences, materialized views, indexes, constraints, and triggers:
 
 ```sql
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=source-server dbname=mydb user=postgres password=secret',
     'sales',            -- schema to clone
     true                -- include table data
@@ -102,7 +102,7 @@ SELECT pgclone_schema(
 ### Clone only functions from a schema
 
 ```sql
-SELECT pgclone_functions(
+SELECT pgclone.functions(
     'host=source-server dbname=mydb user=postgres password=secret',
     'utils'             -- schema containing functions
 );
@@ -117,7 +117,7 @@ SELECT pgclone_functions(
 Clone all user schemas from a remote database into the current database:
 
 ```sql
-SELECT pgclone_database(
+SELECT pgclone.database(
     'host=source-server dbname=mydb user=postgres password=secret',
     true                -- include data
 );
@@ -128,20 +128,20 @@ SELECT pgclone_database(
 Create a new local database and clone everything from a remote source. Run this from the `postgres` database:
 
 ```sql
-SELECT pgclone_database_create(
+SELECT pgclone.database_create(
     'host=source-server dbname=production user=postgres password=secret',
     'staging_db'            -- target database name (created if not exists)
 );
 
 -- Structure only
-SELECT pgclone_database_create(
+SELECT pgclone.database_create(
     'host=source-server dbname=production user=postgres password=secret',
     'staging_db',
     false                   -- include_data = false
 );
 
 -- With options
-SELECT pgclone_database_create(
+SELECT pgclone.database_create(
     'host=source-server dbname=production user=postgres password=secret',
     'staging_db',
     true,
@@ -161,21 +161,21 @@ By default, all indexes, constraints (PK, UNIQUE, CHECK, FK, EXCLUDE), and trigg
 
 ```sql
 -- Clone table without indexes and triggers
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres password=secret',
     'public', 'orders', true, 'orders',
     '{"indexes": false, "triggers": false}'
 );
 
 -- Clone schema without any constraints
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=source-server dbname=mydb user=postgres password=secret',
     'sales', true,
     '{"constraints": false}'
 );
 
 -- Clone database without triggers
-SELECT pgclone_database(
+SELECT pgclone.database(
     'host=source-server dbname=mydb user=postgres password=secret',
     true,
     '{"triggers": false}'
@@ -185,9 +185,9 @@ SELECT pgclone_database(
 ### Boolean parameters format
 
 ```sql
--- pgclone_table_ex(conninfo, schema, table, include_data, target_name,
+-- pgclone.table_ex(conninfo, schema, table, include_data, target_name,
 --                  include_indexes, include_constraints, include_triggers)
-SELECT pgclone_table_ex(
+SELECT pgclone.table_ex(
     'host=source-server dbname=mydb user=postgres',
     'public', 'orders', true, 'orders_copy',
     false,   -- skip indexes
@@ -195,9 +195,9 @@ SELECT pgclone_table_ex(
     false    -- skip triggers
 );
 
--- pgclone_schema_ex(conninfo, schema, include_data,
+-- pgclone.schema_ex(conninfo, schema, include_data,
 --                   include_indexes, include_constraints, include_triggers)
-SELECT pgclone_schema_ex(
+SELECT pgclone.schema_ex(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
     true,    -- include indexes
@@ -213,7 +213,7 @@ SELECT pgclone_schema_ex(
 Clone only specific columns from a table:
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres',
     'public', 'users', true, 'users_lite',
     '{"columns": ["id", "name", "email"]}'
@@ -230,14 +230,14 @@ Clone only rows matching a condition:
 
 ```sql
 -- Clone only active users
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres',
     'public', 'users', true, 'active_users',
     '{"where": "status = ''active''"}'
 );
 
 -- Combine columns + WHERE + disable triggers
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres',
     'public', 'orders', true, 'recent_orders',
     '{"columns": ["id", "customer_id", "total", "created_at"],
@@ -254,22 +254,22 @@ Control what happens when a target table already exists:
 
 ```sql
 -- Error if exists (default)
-SELECT pgclone_table(..., '{"conflict": "error"}');
+SELECT pgclone.table(..., '{"conflict": "error"}');
 
 -- Skip if exists
-SELECT pgclone_table(..., '{"conflict": "skip"}');
+SELECT pgclone.table(..., '{"conflict": "skip"}');
 
 -- Drop and re-create
-SELECT pgclone_table(..., '{"conflict": "replace"}');
+SELECT pgclone.table(..., '{"conflict": "replace"}');
 
 -- Rename existing to tablename_old
-SELECT pgclone_table(..., '{"conflict": "rename"}');
+SELECT pgclone.table(..., '{"conflict": "rename"}');
 ```
 
 Conflict strategy can be combined with other options:
 
 ```sql
-SELECT pgclone_schema_async(conn, 'sales', true,
+SELECT pgclone.schema_async(conn, 'sales', true,
     '{"conflict": "replace", "indexes": false, "triggers": false}');
 ```
 
@@ -280,7 +280,7 @@ SELECT pgclone_schema_async(conn, 'sales', true,
 Materialized views are cloned automatically during schema clone, including their indexes and data. Disable with:
 
 ```sql
-SELECT pgclone_schema(conn, 'analytics', true,
+SELECT pgclone.schema(conn, 'analytics', true,
     '{"matviews": false}');
 ```
 
@@ -300,23 +300,23 @@ Clone tables with column-level data anonymization. Masking is applied server-sid
 
 ```sql
 -- Mask email addresses: alice@example.com → a***@example.com
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"email": "email"}}');
 
 -- Replace names with XXXX
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"full_name": "name"}}');
 
 -- Keep last 4 digits of phone: +1-555-123-4567 → ***-4567
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"phone": "phone"}}');
 
 -- Deterministic MD5 hash (preserves referential integrity across tables)
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"email": "hash"}}');
 
 -- Replace with NULL
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"ssn": "null"}}');
 ```
 
@@ -325,15 +325,15 @@ SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
 ```sql
 -- Partial masking: keep first 2 and last 3 chars
 -- "Johnson" → "Jo***son"
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"last_name": {"type": "partial", "prefix": 2, "suffix": 3}}}');
 
 -- Random integer in range
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"salary": {"type": "random_int", "min": 30000, "max": 150000}}}');
 
 -- Fixed replacement value
-SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
+SELECT pgclone.table(conn, 'public', 'users', true, 'users_safe',
     '{"mask": {"notes": {"type": "constant", "value": "REDACTED"}}}');
 ```
 
@@ -342,7 +342,7 @@ SELECT pgclone_table(conn, 'public', 'users', true, 'users_safe',
 Masks compose with `columns`, `where`, and all other options:
 
 ```sql
-SELECT pgclone_table(conn, 'hr', 'employees', true, 'employees_dev',
+SELECT pgclone.table(conn, 'hr', 'employees', true, 'employees_dev',
     '{"mask": {"email": "email", "full_name": "name", "ssn": "null", "salary": {"type": "random_int", "min": 40000, "max": 200000}}, "where": "status = ''active''"}');
 ```
 
@@ -373,7 +373,7 @@ SELECT pgclone_table(conn, 'hr', 'employees', true, 'employees_dev',
 Automatically scan a source schema for columns that look like sensitive data:
 
 ```sql
-SELECT pgclone_discover_sensitive(
+SELECT pgclone.discover_sensitive(
     'host=source-server dbname=mydb user=postgres',
     'public'
 );
@@ -395,7 +395,7 @@ Apply masking to an already-cloned local table without needing the source connec
 
 ```sql
 -- Mask an existing table in place
-SELECT pgclone_mask_in_place(
+SELECT pgclone.mask_in_place(
     'public', 'employees',
     '{"email": "email", "full_name": "name", "ssn": "null"}'
 );
@@ -419,7 +419,7 @@ Create role-based masking policies that **preserve original data** while present
 ### Create a masking policy
 
 ```sql
-SELECT pgclone_create_masking_policy(
+SELECT pgclone.create_masking_policy(
     'public', 'employees',
     '{"email": "email", "full_name": "name", "ssn": "null"}',
     'data_admin'   -- this role can see unmasked data
@@ -438,7 +438,7 @@ After this, regular users query `employees_masked` and see anonymized data. The 
 ### Drop a masking policy
 
 ```sql
-SELECT pgclone_drop_masking_policy('public', 'employees');
+SELECT pgclone.drop_masking_policy('public', 'employees');
 ```
 
 This drops the `employees_masked` view and re-grants `SELECT` on the base table to `PUBLIC`.
@@ -447,13 +447,13 @@ This drops the `employees_masked` view and re-grants `SELECT` on the base table 
 
 ```sql
 -- 1. Clone production data
-SELECT pgclone_table(conn, 'public', 'employees', true);
+SELECT pgclone.table(conn, 'public', 'employees', true);
 
 -- 2. Discover sensitive columns
-SELECT pgclone_discover_sensitive(conn, 'public');
+SELECT pgclone.discover_sensitive(conn, 'public');
 
 -- 3. Apply dynamic masking policy
-SELECT pgclone_create_masking_policy(
+SELECT pgclone.create_masking_policy(
     'public', 'employees',
     '{"email": "email", "full_name": "name", "salary": {"type": "random_int", "min": 40000, "max": 200000}, "ssn": "null"}',
     'dba_team'
@@ -488,7 +488,7 @@ Clone database roles from a source PostgreSQL instance to the local target, incl
 ### Import all roles
 
 ```sql
-SELECT pgclone_clone_roles(
+SELECT pgclone.clone_roles(
     'host=source-server dbname=mydb user=postgres password=secret'
 );
 -- OK: 8 roles created, 2 roles updated, 45 grants applied
@@ -497,7 +497,7 @@ SELECT pgclone_clone_roles(
 ### Import specific roles
 
 ```sql
-SELECT pgclone_clone_roles(
+SELECT pgclone.clone_roles(
     'host=source-server dbname=mydb user=postgres password=secret',
     'app_user, reporting_user, api_service'
 );
@@ -507,7 +507,7 @@ SELECT pgclone_clone_roles(
 ### Import a single role
 
 ```sql
-SELECT pgclone_clone_roles(
+SELECT pgclone.clone_roles(
     'host=source-server dbname=mydb user=postgres password=secret',
     'app_user'
 );
@@ -538,13 +538,13 @@ If a role already exists on the target:
 
 ```sql
 -- 1. Clone the database structure and data
-SELECT pgclone_database(
+SELECT pgclone.database(
     'host=prod dbname=myapp user=postgres',
     true
 );
 
 -- 2. Clone all roles and their permissions
-SELECT pgclone_clone_roles(
+SELECT pgclone.clone_roles(
     'host=prod dbname=myapp user=postgres'
 );
 ```
@@ -563,7 +563,7 @@ Compare row counts between source and target databases to verify clone completen
 ### Verify a specific schema
 
 ```sql
-SELECT * FROM pgclone_verify(
+SELECT * FROM pgclone.verify(
     'host=source-server dbname=prod user=postgres',
     'app_schema'
 );
@@ -581,7 +581,7 @@ SELECT * FROM pgclone_verify(
 ### Verify all schemas
 
 ```sql
-SELECT * FROM pgclone_verify(
+SELECT * FROM pgclone.verify(
     'host=source-server dbname=prod user=postgres'
 );
 ```
@@ -600,7 +600,7 @@ Returns one row per table across all user schemas.
 
 - Row counts use `pg_class.reltuples` for fast approximate counts — no full table scans. Run `ANALYZE` on both source and target for accurate results.
 - Works with regular and partitioned tables.
-- Useful after `pgclone_schema()` or `pgclone_database()` to confirm all data was transferred.
+- Useful after `pgclone.schema()` or `pgclone.database()` to confirm all data was transferred.
 
 ---
 
@@ -609,7 +609,7 @@ Returns one row per table across all user schemas.
 Generate an audit report listing all sensitive columns in a schema, their masking status, and recommended actions.
 
 ```sql
-SELECT * FROM pgclone_masking_report('public');
+SELECT * FROM pgclone.masking_report('public');
 ```
 
 ```
@@ -636,24 +636,24 @@ SELECT * FROM pgclone_masking_report('public');
 
 ```sql
 -- 1. Clone production data
-SELECT pgclone_database('host=prod dbname=myapp user=postgres', true);
+SELECT pgclone.database('host=prod dbname=myapp user=postgres', true);
 
 -- 2. Run masking report — find unmasked PII
-SELECT * FROM pgclone_masking_report('public') WHERE mask_status = 'UNMASKED';
+SELECT * FROM pgclone.masking_report('public') WHERE mask_status = 'UNMASKED';
 
 -- 3. Apply masking policies to unmasked tables
-SELECT pgclone_create_masking_policy('public', 'employees',
+SELECT pgclone.create_masking_policy('public', 'employees',
     '{"email": "email", "full_name": "name", "ssn": "null"}', 'dba_team');
 
 -- 4. Re-run report — confirm all sensitive columns are now masked
-SELECT * FROM pgclone_masking_report('public');
+SELECT * FROM pgclone.masking_report('public');
 ```
 
 ### Notes
 
 - Only sensitive columns appear in the report (non-sensitive columns are filtered out).
-- The report checks for masked views created by `pgclone_create_masking_policy()`.
-- Uses the same ~40 sensitivity patterns as `pgclone_discover_sensitive()`.
+- The report checks for masked views created by `pgclone.create_masking_policy()`.
+- Uses the same ~40 sensitivity patterns as `pgclone.discover_sensitive()`.
 
 ---
 
@@ -677,36 +677,36 @@ SELECT * FROM pgclone_masking_report('public');
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `pgclone_version()` | text | Extension version string |
-| `pgclone_table(conninfo, schema, table, include_data)` | text | Clone a single table |
-| `pgclone_table(conninfo, schema, table, include_data, target_name, options)` | text | Clone table with options |
-| `pgclone_table_ex(conninfo, schema, table, data, target, idx, constr, trig)` | text | Clone table with boolean flags |
-| `pgclone_schema(conninfo, schema, include_data)` | text | Clone entire schema |
-| `pgclone_schema(conninfo, schema, include_data, options)` | text | Clone schema with options |
-| `pgclone_schema_ex(conninfo, schema, data, idx, constr, trig)` | text | Clone schema with boolean flags |
-| `pgclone_functions(conninfo, schema)` | text | Clone functions only |
-| `pgclone_database(conninfo, include_data)` | text | Clone database into current DB |
-| `pgclone_database(conninfo, include_data, options)` | text | Clone database with options |
-| `pgclone_database_create(conninfo, target_db)` | text | Create new DB and clone |
-| `pgclone_database_create(conninfo, target_db, include_data, options)` | text | Create new DB and clone with options |
-| `pgclone_discover_sensitive(conninfo, schema)` | text | Scan source for sensitive columns, return mask suggestions as JSON |
-| `pgclone_mask_in_place(schema, table, mask_json)` | text | Apply masking to existing local table via UPDATE |
-| `pgclone_create_masking_policy(schema, table, mask_json, role)` | text | Create dynamic masking view + role-based access |
-| `pgclone_drop_masking_policy(schema, table)` | text | Drop masking view + restore base table access |
-| `pgclone_clone_roles(conninfo)` | text | Clone all non-system roles with passwords, attributes, memberships, and permissions |
-| `pgclone_clone_roles(conninfo, role_names)` | text | Clone specific roles (comma-separated) with passwords, attributes, and permissions |
-| `pgclone_verify(conninfo)` | table | Compare row counts for all tables across source and target |
-| `pgclone_verify(conninfo, schema)` | table | Compare row counts for tables in a specific schema |
-| `pgclone_masking_report(schema)` | table | GDPR/compliance audit: sensitive columns, mask status, recommendations |
-| `pgclone_table_async(...)` | int | Async table clone (returns job_id) |
-| `pgclone_schema_async(...)` | int | Async schema clone (returns job_id) |
-| `pgclone_progress(job_id)` | json | Job progress as JSON |
-| `pgclone_jobs()` | json | All jobs as JSON array |
-| `pgclone_cancel(job_id)` | bool | Cancel a running job |
-| `pgclone_resume(job_id)` | int | Resume failed job (returns new job_id) |
-| `pgclone_clear_jobs()` | int | Clear completed/failed jobs |
-| `pgclone_progress_detail()` | setof record | All jobs as table-returning function |
-| `pgclone_jobs_view` | view | All jobs with progress bar and elapsed time |
+| `pgclone.version()` | text | Extension version string |
+| `pgclone.table(conninfo, schema, table, include_data)` | text | Clone a single table |
+| `pgclone.table(conninfo, schema, table, include_data, target_name, options)` | text | Clone table with options |
+| `pgclone.table_ex(conninfo, schema, table, data, target, idx, constr, trig)` | text | Clone table with boolean flags |
+| `pgclone.schema(conninfo, schema, include_data)` | text | Clone entire schema |
+| `pgclone.schema(conninfo, schema, include_data, options)` | text | Clone schema with options |
+| `pgclone.schema_ex(conninfo, schema, data, idx, constr, trig)` | text | Clone schema with boolean flags |
+| `pgclone.functions(conninfo, schema)` | text | Clone functions only |
+| `pgclone.database(conninfo, include_data)` | text | Clone database into current DB |
+| `pgclone.database(conninfo, include_data, options)` | text | Clone database with options |
+| `pgclone.database_create(conninfo, target_db)` | text | Create new DB and clone |
+| `pgclone.database_create(conninfo, target_db, include_data, options)` | text | Create new DB and clone with options |
+| `pgclone.discover_sensitive(conninfo, schema)` | text | Scan source for sensitive columns, return mask suggestions as JSON |
+| `pgclone.mask_in_place(schema, table, mask_json)` | text | Apply masking to existing local table via UPDATE |
+| `pgclone.create_masking_policy(schema, table, mask_json, role)` | text | Create dynamic masking view + role-based access |
+| `pgclone.drop_masking_policy(schema, table)` | text | Drop masking view + restore base table access |
+| `pgclone.clone_roles(conninfo)` | text | Clone all non-system roles with passwords, attributes, memberships, and permissions |
+| `pgclone.clone_roles(conninfo, role_names)` | text | Clone specific roles (comma-separated) with passwords, attributes, and permissions |
+| `pgclone.verify(conninfo)` | table | Compare row counts for all tables across source and target |
+| `pgclone.verify(conninfo, schema)` | table | Compare row counts for tables in a specific schema |
+| `pgclone.masking_report(schema)` | table | GDPR/compliance audit: sensitive columns, mask status, recommendations |
+| `pgclone.table_async(...)` | int | Async table clone (returns job_id) |
+| `pgclone.schema_async(...)` | int | Async schema clone (returns job_id) |
+| `pgclone.progress(job_id)` | json | Job progress as JSON |
+| `pgclone.jobs()` | json | All jobs as JSON array |
+| `pgclone.cancel(job_id)` | bool | Cancel a running job |
+| `pgclone.resume(job_id)` | int | Resume failed job (returns new job_id) |
+| `pgclone.clear_jobs()` | int | Clear completed/failed jobs |
+| `pgclone.progress_detail()` | setof record | All jobs as table-returning function |
+| `pgclone.jobs_view` | view | All jobs with progress bar and elapsed time |
 
 ## Current Limitations
 

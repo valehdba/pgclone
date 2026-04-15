@@ -128,7 +128,7 @@ typedef struct PgcloneSharedState {
 
 - Allocated once during `_PG_init()` via shared memory hooks
 - Protected by a lightweight lock (`LWLock`) for concurrent access
-- Read by `pgclone_progress()`, `pgclone_jobs()`, and `pgclone_jobs_view`
+- Read by `pgclone.progress()`, `pgclone.jobs()`, and `pgclone.jobs_view`
 - Written by background workers as they progress
 
 ---
@@ -189,7 +189,7 @@ PostgreSQL 17 removed the `die` signal handler, replacing it with `SignalHandler
 
 ## Background Worker Lifecycle
 
-1. **Registration:** `pgclone_table_async()` or `pgclone_schema_async()` allocates a job slot in shared memory, populates connection info and parameters, then calls `RegisterDynamicBackgroundWorker()`.
+1. **Registration:** `pgclone.table_async()` or `pgclone.schema_async()` allocates a job slot in shared memory, populates connection info and parameters, then calls `RegisterDynamicBackgroundWorker()`.
 
 2. **Startup:** The worker process starts via `pgclone_bgw_main()`, which:
    - Sets up signal handlers
@@ -198,7 +198,7 @@ PostgreSQL 17 removed the `die` signal handler, replacing it with `SignalHandler
 
 3. **Execution:** The worker calls the same core clone functions used by sync operations, with periodic updates to shared memory (rows copied, current table, elapsed time).
 
-4. **Worker Pool mode (v2.2.0):** For `pgclone_schema_async` with `"parallel": N`, the parent process:
+4. **Worker Pool mode (v2.2.0):** For `pgclone.schema_async` with `"parallel": N`, the parent process:
    - Queries the source for the list of tables
    - Populates a shared-memory task queue (`PgclonePoolQueue`)
    - Launches exactly N pool workers via `pgclone_pool_worker_main()`

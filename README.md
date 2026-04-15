@@ -3,7 +3,7 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-3.6.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v3.6.0)
+[![Version](https://img.shields.io/badge/version-4.0.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.0.0)
 
 A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 
@@ -36,19 +36,19 @@ sudo make install
 CREATE EXTENSION pgclone;
 
 -- Clone a table
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=source-server dbname=mydb user=postgres password=secret',
     'public', 'customers', true
 );
 
 -- Clone an entire schema
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=source-server dbname=mydb user=postgres password=secret',
     'sales', true
 );
 
 -- Clone a full database
-SELECT pgclone_database(
+SELECT pgclone.database(
     'host=source-server dbname=mydb user=postgres password=secret',
     true
 );
@@ -96,7 +96,7 @@ sudo make install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 
 ```sql
 CREATE EXTENSION pgclone;
-SELECT pgclone_version();
+SELECT pgclone.version();
 ```
 
 For async operations, add to `postgresql.conf` and restart:
@@ -127,8 +127,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
     - [x] v1.1.0: Selective column cloning and data filtering
     - [x] v1.2.0: Materialized views and exclusion constraints
 - [x] v2.0.0: True multi-worker parallel cloning
-    - [x] v2.0.1: `pgclone_database_create()` — create + clone database
-    - [x] v2.1.0: Progress tracking view (`pgclone_jobs_view`)
+    - [x] v2.0.1: `pgclone.database_create()` — create + clone database
+    - [x] v2.1.0: Progress tracking view (`pgclone.jobs_view`)
     - [x] v2.1.1: Visual progress bar
     - [x] v2.1.3: Elapsed time tracking
     - [x] v2.1.4: Unix domain socket auth (no more pg_hba.conf trust requirement)
@@ -141,7 +141,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
     - [x] v3.4.0: Clone roles with permissions and passwords
 - [x] v3.5.0: Clone verification — compare row counts across source and target
 - [x] v3.6.0: GDPR/Compliance masking report
-- [ ] v4.0.0: Copy-on-Write (CoW) mode for local cloning
+- [x] v4.0.0: Schema namespace — all functions under `pgclone` schema (`pgclone.table()`, `pgclone.schema()`, etc.)
+- [ ] v5.0.0: Copy-on-Write (CoW) mode for local cloning
 
 ## License
 

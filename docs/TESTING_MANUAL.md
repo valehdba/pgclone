@@ -43,7 +43,7 @@ This creates `test_schema` with tables (`customers`, `orders`, `order_items`, `e
 psql -h 172.17.0.3 -p 5433 -U postgres -d db2
 
 CREATE EXTENSION IF NOT EXISTS pgclone;
-SELECT pgclone_version();
+SELECT pgclone.version();
 -- Expected: pgclone 3.6.0
 ```
 
@@ -52,7 +52,7 @@ SELECT pgclone_version();
 ## Test 1: Extension Installation & Version
 
 ```sql
-SELECT pgclone_version();
+SELECT pgclone.version();
 ```
 
 **Expected:** `pgclone 3.6.0`
@@ -70,7 +70,7 @@ SELECT * FROM pg_extension WHERE extname = 'pgclone';
 ### 2.1 Clone table with data
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true
 );
@@ -87,7 +87,7 @@ SELECT COUNT(*) FROM test_schema.customers;
 ### 2.2 Clone structure only (no data)
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'orders', false
 );
@@ -102,7 +102,7 @@ SELECT COUNT(*) FROM test_schema.orders;
 ### 2.3 Clone with different target name
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'customers_backup'
@@ -118,7 +118,7 @@ SELECT COUNT(*) FROM test_schema.customers_backup;
 ### 2.4 Selective column cloning
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'customers_lite',
@@ -137,7 +137,7 @@ ORDER BY ordinal_position;
 ### 2.5 Clone with WHERE filter
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'active_customers_copy',
@@ -155,7 +155,7 @@ SELECT DISTINCT status FROM test_schema.active_customers_copy;
 ### 2.6 Columns + WHERE combined
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'high_scorers',
@@ -178,7 +178,7 @@ SELECT * FROM test_schema.high_scorers ORDER BY score DESC;
 ```sql
 DROP TABLE IF EXISTS test_schema.customers CASCADE;
 
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'customers',
@@ -199,7 +199,7 @@ WHERE schemaname = 'test_schema' AND tablename = 'customers';
 DROP TABLE IF EXISTS test_schema.order_items CASCADE;
 DROP TABLE IF EXISTS test_schema.orders CASCADE;
 
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'orders', true,
     'orders',
@@ -219,7 +219,7 @@ WHERE conrelid = 'test_schema.orders'::regclass;
 ```sql
 DROP TABLE IF EXISTS test_schema.orders CASCADE;
 
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'orders', true,
     'orders',
@@ -234,12 +234,12 @@ WHERE tgrelid = 'test_schema.orders'::regclass AND NOT tgisinternal;
 
 **Expected:** No triggers
 
-### 3.4 pgclone_table_ex() with boolean parameters
+### 3.4 pgclone.table_ex() with boolean parameters
 
 ```sql
 DROP TABLE IF EXISTS test_schema.orders CASCADE;
 
-SELECT pgclone_table_ex(
+SELECT pgclone.table_ex(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'orders', true, 'orders',
     false,  -- skip indexes
@@ -264,7 +264,7 @@ SELECT tgname FROM pg_trigger WHERE tgrelid = 'test_schema.orders'::regclass AND
 
 ```sql
 -- Table already exists from previous tests
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true
 );
@@ -275,7 +275,7 @@ SELECT pgclone_table(
 ### 4.2 Skip
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'customers',
@@ -288,7 +288,7 @@ SELECT pgclone_table(
 ### 4.3 Replace
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'customers',
@@ -305,7 +305,7 @@ SELECT COUNT(*) FROM test_schema.customers;
 ### 4.4 Rename
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'customers',
@@ -330,7 +330,7 @@ ORDER BY tablename;
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true
 );
@@ -378,7 +378,7 @@ SELECT indexname FROM pg_indexes WHERE schemaname = 'test_schema' ORDER BY index
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', false
 );
@@ -396,7 +396,7 @@ UNION ALL SELECT 'orders', COUNT(*) FROM test_schema.orders;
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true,
     '{"triggers": false, "indexes": false}'
@@ -412,12 +412,12 @@ WHERE n.nspname = 'test_schema' AND NOT t.tgisinternal;
 
 **Expected:** Trigger count = 0. Only PK indexes present.
 
-### 5.4 pgclone_schema_ex() with boolean parameters
+### 5.4 pgclone.schema_ex() with boolean parameters
 
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema_ex(
+SELECT pgclone.schema_ex(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true,
     true,   -- include indexes
@@ -436,7 +436,7 @@ SELECT pgclone_schema_ex(
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 CREATE SCHEMA test_schema;
 
-SELECT pgclone_functions(
+SELECT pgclone.functions(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema'
 );
@@ -459,7 +459,7 @@ WHERE routine_schema = 'test_schema' ORDER BY routine_name;
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 DROP TABLE IF EXISTS public.simple_test CASCADE;
 
-SELECT pgclone_database(
+SELECT pgclone.database(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     true
 );
@@ -480,7 +480,7 @@ GROUP BY schemaname ORDER BY schemaname;
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 DROP TABLE IF EXISTS public.simple_test CASCADE;
 
-SELECT pgclone_database(
+SELECT pgclone.database(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     true,
     '{"triggers": false}'
@@ -489,7 +489,7 @@ SELECT pgclone_database(
 
 **Expected:** All data cloned, no triggers on any table.
 
-### 7.3 Clone into a new database (pgclone_database_create)
+### 7.3 Clone into a new database (pgclone.database_create)
 
 > **Run from the `postgres` database on Server 2, not `db2`.**
 
@@ -498,7 +498,7 @@ psql -h 172.17.0.3 -p 5433 -U postgres -d postgres
 
 CREATE EXTENSION IF NOT EXISTS pgclone;
 
-SELECT pgclone_database_create(
+SELECT pgclone.database_create(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'db1_clone',
     true
@@ -525,7 +525,7 @@ Masking is applied server-side during COPY — source data never stored unmasked
 ### 8.1 Email masking
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_email_masked',
@@ -540,7 +540,7 @@ SELECT id, full_name, email FROM test_schema.emp_email_masked ORDER BY id;
 ### 8.2 Name masking
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_name_masked',
@@ -555,7 +555,7 @@ SELECT id, full_name FROM test_schema.emp_name_masked ORDER BY id;
 ### 8.3 Phone masking
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_phone_masked',
@@ -570,7 +570,7 @@ SELECT id, phone FROM test_schema.emp_phone_masked ORDER BY id;
 ### 8.4 Hash masking (MD5)
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_hash_masked',
@@ -585,7 +585,7 @@ SELECT id, email FROM test_schema.emp_hash_masked ORDER BY id;
 ### 8.5 Null masking
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_null_masked',
@@ -600,7 +600,7 @@ SELECT id, ssn FROM test_schema.emp_null_masked ORDER BY id;
 ### 8.6 Partial masking
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_partial_masked',
@@ -615,7 +615,7 @@ SELECT id, full_name FROM test_schema.emp_partial_masked ORDER BY id;
 ### 8.7 Random integer masking
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_rand_masked',
@@ -630,7 +630,7 @@ SELECT id, salary FROM test_schema.emp_rand_masked ORDER BY id;
 ### 8.8 Constant masking
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_const_masked',
@@ -645,7 +645,7 @@ SELECT id, notes FROM test_schema.emp_const_masked ORDER BY id;
 ### 8.9 Multiple masks combined
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_full_masked',
@@ -662,7 +662,7 @@ SELECT * FROM test_schema.emp_full_masked ORDER BY id;
 ## Test 9: Auto-Discovery of Sensitive Data (v3.1.0)
 
 ```sql
-SELECT pgclone_discover_sensitive(
+SELECT pgclone.discover_sensitive(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema'
 );
@@ -687,7 +687,7 @@ Apply masking to an already-existing local table.
 ```sql
 DROP TABLE IF EXISTS test_schema.emp_for_static_mask;
 
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_for_static_mask'
@@ -702,7 +702,7 @@ SELECT full_name, email, ssn FROM test_schema.emp_for_static_mask ORDER BY id;
 ### 10.2 Apply in-place masking
 
 ```sql
-SELECT pgclone_mask_in_place(
+SELECT pgclone.mask_in_place(
     'test_schema', 'emp_for_static_mask',
     '{"email": "email", "full_name": "name", "ssn": "null"}'
 );
@@ -727,7 +727,7 @@ Role-based masking policies that preserve original data.
 ```sql
 DROP TABLE IF EXISTS test_schema.employees CASCADE;
 
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true
 );
@@ -743,7 +743,7 @@ END $$;
 ### 11.2 Create masking policy
 
 ```sql
-SELECT pgclone_create_masking_policy(
+SELECT pgclone.create_masking_policy(
     'test_schema', 'employees',
     '{"email": "email", "full_name": "name", "ssn": "null", "salary": {"type": "random_int", "min": 40000, "max": 200000}}',
     'data_admin'
@@ -781,7 +781,7 @@ RESET ROLE;
 ### 11.6 Drop masking policy
 
 ```sql
-SELECT pgclone_drop_masking_policy('test_schema', 'employees');
+SELECT pgclone.drop_masking_policy('test_schema', 'employees');
 
 SELECT viewname FROM pg_views
 WHERE schemaname = 'test_schema' AND viewname = 'employees_masked';
@@ -796,7 +796,7 @@ WHERE schemaname = 'test_schema' AND viewname = 'employees_masked';
 ### 12.1 Clone all roles
 
 ```sql
-SELECT pgclone_clone_roles(
+SELECT pgclone.clone_roles(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654'
 );
 ```
@@ -817,7 +817,7 @@ ORDER BY rolname;
 DROP ROLE IF EXISTS test_reader;
 DROP ROLE IF EXISTS test_writer;
 
-SELECT pgclone_clone_roles(
+SELECT pgclone.clone_roles(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_reader, test_writer'
 );
@@ -843,7 +843,7 @@ ORDER BY table_name, privilege_type;
 ### 12.4 Existing role update
 
 ```sql
-SELECT pgclone_clone_roles(
+SELECT pgclone.clone_roles(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_admin'
 );
@@ -860,7 +860,7 @@ SELECT pgclone_clone_roles(
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true
 );
@@ -869,7 +869,7 @@ SELECT pgclone_schema(
 ### 13.2 Verify specific schema
 
 ```sql
-SELECT * FROM pgclone_verify(
+SELECT * FROM pgclone.verify(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema'
 );
@@ -880,7 +880,7 @@ SELECT * FROM pgclone_verify(
 ### 13.3 Verify all schemas
 
 ```sql
-SELECT * FROM pgclone_verify(
+SELECT * FROM pgclone.verify(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654'
 );
 ```
@@ -893,7 +893,7 @@ SELECT * FROM pgclone_verify(
 DELETE FROM test_schema.customers WHERE id > 5;
 ANALYZE test_schema.customers;
 
-SELECT * FROM pgclone_verify(
+SELECT * FROM pgclone.verify(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema'
 );
@@ -908,7 +908,7 @@ SELECT * FROM pgclone_verify(
 ### 14.1 Report on unmasked schema
 
 ```sql
-SELECT * FROM pgclone_masking_report('test_schema');
+SELECT * FROM pgclone.masking_report('test_schema');
 ```
 
 **Expected:** Lists sensitive columns with sensitivity categories (`Email`, `PII - Name`, `Phone`, `Financial`, `National ID`), `mask_status = UNMASKED`, and recommended strategies.
@@ -916,20 +916,20 @@ SELECT * FROM pgclone_masking_report('test_schema');
 ### 14.2 Apply policy then re-check
 
 ```sql
-SELECT pgclone_create_masking_policy(
+SELECT pgclone.create_masking_policy(
     'test_schema', 'employees',
     '{"email": "email", "full_name": "name", "ssn": "null"}',
     'data_admin'
 );
 
-SELECT * FROM pgclone_masking_report('test_schema');
+SELECT * FROM pgclone.masking_report('test_schema');
 ```
 
 **Expected:** Employee columns now show `mask_status = MASKED (view)`.
 
 ```sql
 -- Cleanup
-SELECT pgclone_drop_masking_policy('test_schema', 'employees');
+SELECT pgclone.drop_masking_policy('test_schema', 'employees');
 ```
 
 ---
@@ -943,7 +943,7 @@ SELECT pgclone_drop_masking_policy('test_schema', 'employees');
 ```sql
 DROP TABLE IF EXISTS test_schema.customers CASCADE;
 
-SELECT pgclone_table_async(
+SELECT pgclone.table_async(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true
 );
@@ -954,9 +954,9 @@ SELECT pgclone_table_async(
 ### 15.2 Check progress
 
 ```sql
-SELECT pgclone_progress(1);
+SELECT pgclone.progress(1);
 
-SELECT * FROM pgclone_jobs_view;
+SELECT * FROM pgclone.jobs_view;
 ```
 
 **Expected:** Shows status (`pending`/`running`/`completed`), `rows_copied`, `progress_bar`, `elapsed_time`.
@@ -966,12 +966,12 @@ SELECT * FROM pgclone_jobs_view;
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true
 );
 
-SELECT job_id, status, schema_name, progress_bar FROM pgclone_jobs_view;
+SELECT job_id, status, schema_name, progress_bar FROM pgclone.jobs_view;
 ```
 
 **Expected:** Schema clone progress with table-level tracking.
@@ -979,7 +979,7 @@ SELECT job_id, status, schema_name, progress_bar FROM pgclone_jobs_view;
 ### 15.4 List all jobs
 
 ```sql
-SELECT pgclone_jobs();
+SELECT pgclone.jobs();
 ```
 
 **Expected:** JSON array of all jobs.
@@ -987,7 +987,7 @@ SELECT pgclone_jobs();
 ### 15.5 Async with conflict strategy
 
 ```sql
-SELECT pgclone_table_async(
+SELECT pgclone.table_async(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'customers',
@@ -1001,15 +1001,15 @@ SELECT pgclone_table_async(
 
 ```sql
 -- Start a clone and cancel it (use the returned job_id)
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true,
     '{"conflict": "replace"}'
 );
 
-SELECT pgclone_cancel(3);  -- use actual job_id
+SELECT pgclone.cancel(3);  -- use actual job_id
 
-SELECT status FROM pgclone_jobs_view WHERE job_id = 3;
+SELECT status FROM pgclone.jobs_view WHERE job_id = 3;
 ```
 
 **Expected:** `status = 'cancelled'`
@@ -1017,9 +1017,9 @@ SELECT status FROM pgclone_jobs_view WHERE job_id = 3;
 ### 15.7 Clear completed jobs
 
 ```sql
-SELECT pgclone_clear_jobs();
+SELECT pgclone.clear_jobs();
 
-SELECT * FROM pgclone_jobs_view;
+SELECT * FROM pgclone.jobs_view;
 ```
 
 **Expected:** Returns count of cleared jobs. Only running/pending jobs remain.
@@ -1033,21 +1033,21 @@ SELECT * FROM pgclone_jobs_view;
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true,
     '{"parallel": 4}'
 );
 
 SELECT job_id, status, op_type, table_name, progress_bar
-FROM pgclone_jobs_view ORDER BY job_id;
+FROM pgclone.jobs_view ORDER BY job_id;
 ```
 
 **Expected:** Parent job + up to 4 pool worker jobs visible.
 
 ```sql
 -- After completion, verify
-SELECT * FROM pgclone_verify(
+SELECT * FROM pgclone.verify(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema'
 );
@@ -1060,7 +1060,7 @@ SELECT * FROM pgclone_verify(
 ```sql
 DROP SCHEMA IF EXISTS test_schema CASCADE;
 
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true,
     '{"parallel": 4, "conflict": "replace", "triggers": false}'
@@ -1074,23 +1074,23 @@ SELECT pgclone_schema_async(
 ## Test 17: Progress Tracking View
 
 ```sql
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', true,
     '{"conflict": "replace"}'
 );
 
 -- Detailed progress function
-SELECT * FROM pgclone_progress_detail();
+SELECT * FROM pgclone.progress_detail();
 
 -- Convenience view
 SELECT job_id, status, schema_name, table_name,
        pct_complete, progress_bar, elapsed_time
-FROM pgclone_jobs_view;
+FROM pgclone.jobs_view;
 
 -- Filter by status
-SELECT job_id, status, elapsed_time FROM pgclone_jobs_view WHERE status = 'running';
-SELECT job_id, error_message FROM pgclone_jobs_view WHERE status = 'failed';
+SELECT job_id, status, elapsed_time FROM pgclone.jobs_view WHERE status = 'running';
+SELECT job_id, error_message FROM pgclone.jobs_view WHERE status = 'failed';
 ```
 
 **Expected:** All columns visible — `job_id`, `status`, `op_type`, `schema_name`, `table_name`, `current_phase`, `tables_total`, `tables_completed`, `rows_copied`, `bytes_copied`, `elapsed_ms`, `start_time`, `end_time`, `pct_complete`, `progress_bar`, `elapsed_time`.
@@ -1102,7 +1102,7 @@ SELECT job_id, error_message FROM pgclone_jobs_view WHERE status = 'failed';
 ### 18.1 Invalid connection string
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=192.168.99.99 dbname=nonexistent user=postgres password=wrong',
     'public', 'test', true
 );
@@ -1113,7 +1113,7 @@ SELECT pgclone_table(
 ### 18.2 Non-existent table
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'this_table_does_not_exist', true
 );
@@ -1124,7 +1124,7 @@ SELECT pgclone_table(
 ### 18.3 Non-existent schema
 
 ```sql
-SELECT pgclone_schema(
+SELECT pgclone.schema(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'nonexistent_schema', true
 );
@@ -1135,7 +1135,7 @@ SELECT pgclone_schema(
 ### 18.4 SQL injection in WHERE clause
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'injection_test',
@@ -1148,7 +1148,7 @@ SELECT pgclone_table(
 ### 18.5 Invalid mask strategy
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'employees', true,
     'emp_bad_mask',
@@ -1161,7 +1161,7 @@ SELECT pgclone_table(
 ### 18.6 Invalid JSON options
 
 ```sql
-SELECT pgclone_table(
+SELECT pgclone.table(
     'host=172.17.0.2 port=5432 dbname=db1 user=postgres password=123654',
     'test_schema', 'customers', true,
     'json_test',
@@ -1185,7 +1185,7 @@ DROP ROLE IF EXISTS test_writer;
 DROP ROLE IF EXISTS test_admin;
 DROP ROLE IF EXISTS data_admin;
 
-SELECT pgclone_clear_jobs();
+SELECT pgclone.clear_jobs();
 
 -- To drop the cloned database (connect to postgres db first):
 -- \c postgres
