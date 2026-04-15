@@ -2,6 +2,37 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.0.0] — BREAKING
+
+### Changed
+- **Schema namespace**: All pgclone functions now live under the `pgclone` schema, created automatically by the extension
+  - `pgclone_table(...)` → `pgclone.table(...)`
+  - `pgclone_schema(...)` → `pgclone.schema(...)`
+  - `pgclone_database(...)` → `pgclone.database(...)`
+  - `pgclone_database_create(...)` → `pgclone.database_create(...)`
+  - `pgclone_table_async(...)` → `pgclone.table_async(...)`
+  - `pgclone_schema_async(...)` → `pgclone.schema_async(...)`
+  - `pgclone_progress(...)` → `pgclone.progress(...)`
+  - `pgclone_cancel(...)` → `pgclone.cancel(...)`
+  - `pgclone_resume(...)` → `pgclone.resume(...)`
+  - `pgclone_jobs()` → `pgclone.jobs()`
+  - `pgclone_clear_jobs()` → `pgclone.clear_jobs()`
+  - `pgclone_progress_detail()` → `pgclone.progress_detail()`
+  - `pgclone_jobs_view` → `pgclone.jobs_view`
+  - `pgclone_discover_sensitive(...)` → `pgclone.discover_sensitive(...)`
+  - `pgclone_mask_in_place(...)` → `pgclone.mask_in_place(...)`
+  - `pgclone_create_masking_policy(...)` → `pgclone.create_masking_policy(...)`
+  - `pgclone_drop_masking_policy(...)` → `pgclone.drop_masking_policy(...)`
+  - `pgclone_clone_roles(...)` → `pgclone.clone_roles(...)`
+  - `pgclone_verify(...)` → `pgclone.verify(...)`
+  - `pgclone_masking_report(...)` → `pgclone.masking_report(...)`
+  - `pgclone_version()` → `pgclone.version()`
+  - `pgclone_table_ex(...)` → `pgclone.table_ex(...)`
+  - `pgclone_schema_ex(...)` → `pgclone.schema_ex(...)`
+  - `pgclone_functions(...)` → `pgclone.functions(...)`
+- Extension control file now specifies `schema = pgclone`
+- **Upgrade path**: This is a breaking change. Users must `DROP EXTENSION pgclone; CREATE EXTENSION pgclone;` to upgrade from v3.x. All application queries must be updated to use the new `pgclone.` prefix.
+
 ## [3.6.0]
 
 ### Added

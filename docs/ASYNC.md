@@ -31,21 +31,21 @@ Without `shared_preload_libraries`, async functions will not be available.
 
 ```sql
 -- Returns a job_id (integer)
-SELECT pgclone_table_async(
+SELECT pgclone.table_async(
     'host=source-server dbname=mydb user=postgres',
     'public', 'large_table', true
 );
 -- Returns: 1
 ```
 
-All options available for `pgclone_table` also work with `pgclone_table_async`, including target name, JSON options, conflict strategy, selective columns, and WHERE filters.
+All options available for `pgclone.table` also work with `pgclone.table_async`, including target name, JSON options, conflict strategy, selective columns, and WHERE filters.
 
 ---
 
 ## Async Schema Clone
 
 ```sql
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=source-server dbname=mydb user=postgres',
     'sales', true
 );
@@ -59,14 +59,14 @@ Clone tables in parallel using a fixed-size worker pool. Instead of spawning one
 
 ```sql
 -- Clone schema with 4 pool workers
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
     '{"parallel": 4}'
 );
 
 -- Combine parallel with other options
-SELECT pgclone_schema_async(
+SELECT pgclone.schema_async(
     'host=source-server dbname=mydb user=postgres',
     'sales', true,
     '{"parallel": 8, "conflict": "replace", "triggers": false}'
@@ -95,7 +95,7 @@ SELECT pgclone_schema_async(
 
 - Maximum 512 tables per pool operation (`PGCLONE_MAX_POOL_TASKS`).
 - Only one pool operation can run at a time per database cluster.
-- Pool workers are visible in `pgclone_jobs_view` as individual table-type jobs.
+- Pool workers are visible in `pgclone.jobs_view` as individual table-type jobs.
 
 ---
 
@@ -104,7 +104,7 @@ SELECT pgclone_schema_async(
 ### Check a specific job
 
 ```sql
-SELECT pgclone_progress(1);
+SELECT pgclone.progress(1);
 ```
 
 Returns JSON:
@@ -125,7 +125,7 @@ Returns JSON:
 ### List all jobs
 
 ```sql
-SELECT pgclone_jobs();
+SELECT pgclone.jobs();
 -- Returns JSON array of all active/recent jobs
 ```
 
@@ -136,7 +136,7 @@ SELECT pgclone_jobs();
 Query live progress of all async clone jobs as a standard PostgreSQL view with visual progress bar and elapsed time:
 
 ```sql
-SELECT job_id, status, schema_name, progress_bar FROM pgclone_jobs_view;
+SELECT job_id, status, schema_name, progress_bar FROM pgclone.jobs_view;
 ```
 
 ```
@@ -152,22 +152,22 @@ SELECT job_id, status, schema_name, progress_bar FROM pgclone_jobs_view;
 ```sql
 -- Running jobs with elapsed time
 SELECT job_id, status, elapsed_time, pct_complete
-FROM pgclone_jobs_view
+FROM pgclone.jobs_view
 WHERE status = 'running';
 
 -- Failed jobs with error messages
 SELECT job_id, schema_name, error_message
-FROM pgclone_jobs_view
+FROM pgclone.jobs_view
 WHERE status = 'failed';
 ```
 
 ### Full detail
 
 ```sql
-SELECT * FROM pgclone_jobs_view;
+SELECT * FROM pgclone.jobs_view;
 
 -- Or via the underlying function:
-SELECT * FROM pgclone_progress_detail();
+SELECT * FROM pgclone.progress_detail();
 ```
 
 ---
@@ -177,7 +177,7 @@ SELECT * FROM pgclone_progress_detail();
 ### Cancel a running job
 
 ```sql
-SELECT pgclone_cancel(1);
+SELECT pgclone.cancel(1);
 ```
 
 ### Resume a failed job
@@ -185,14 +185,14 @@ SELECT pgclone_cancel(1);
 Resumes from the last checkpoint, returns a new job_id:
 
 ```sql
-SELECT pgclone_resume(1);
+SELECT pgclone.resume(1);
 -- Returns: 2
 ```
 
 ### Clear completed/failed jobs
 
 ```sql
-SELECT pgclone_clear_jobs();
+SELECT pgclone.clear_jobs();
 -- Returns: number of jobs cleared
 ```
 
@@ -204,15 +204,15 @@ All conflict strategies work with async functions:
 
 ```sql
 -- Skip if table exists
-SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
+SELECT pgclone.table_async(conn, 'public', 'orders', true, 'orders',
     '{"conflict": "skip"}');
 
 -- Drop and re-create
-SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
+SELECT pgclone.table_async(conn, 'public', 'orders', true, 'orders',
     '{"conflict": "replace"}');
 
 -- Rename existing table
-SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
+SELECT pgclone.table_async(conn, 'public', 'orders', true, 'orders',
     '{"conflict": "rename"}');
 ```
 
@@ -223,7 +223,7 @@ SELECT pgclone_table_async(conn, 'public', 'orders', true, 'orders',
 1. When you call an async function, pgclone registers a background worker with PostgreSQL's `BackgroundWorker` API.
 2. The background worker starts in a separate process, connects to both source and target databases using `libpq`, and performs the clone operation.
 3. Progress is tracked in shared memory (`pgclone_state`), which is allocated via `shmem_request_hook` (PG 15+) or `RequestAddinShmemSpace` (PG 14).
-4. The `pgclone_jobs_view` reads shared memory to display real-time progress.
+4. The `pgclone.jobs_view` reads shared memory to display real-time progress.
 5. For parallel cloning (v2.2.0+), the parent process populates a shared-memory task queue and launches exactly N pool workers. Each worker pulls tasks from the queue until it's empty — providing dynamic load balancing with O(N) resource usage.
 
 **Tip:** Verbose per-table/per-row NOTICE messages have been moved to DEBUG1 level. To see them:

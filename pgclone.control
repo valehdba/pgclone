@@ -1,6 +1,7 @@
 # pgclone extension
 comment = 'Clone PostgreSQL databases, schemas, tables, roles and permissions with selective columns, data filtering, data masking/anonymization, async, parallel cloning, materialized views, resume, and conflict resolution'
-default_version = '3.6.0'
+default_version = '4.0.0'
 module_pathname = '$libdir/pgclone'
 relocatable = false
+schema = pgclone
 superuser = true

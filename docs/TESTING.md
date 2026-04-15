@@ -46,19 +46,19 @@ Located in `test/test_loopback.sh`. These tests call functions that use loopback
 
 ### 3. Database Create Tests (7 tests)
 
-Located in `test/test_database_create.sh` — verifies `pgclone_database_create()` creates a new database, clones data into it, and supports idempotent re-cloning.
+Located in `test/test_database_create.sh` — verifies `pgclone.database_create()` creates a new database, clones data into it, and supports idempotent re-cloning.
 
 ### 4. Async Tests (21 tests)
 
 Located in `test/test_async.sh` — covers background worker operations (8 tests):
 
-- TEST 1: `pgclone_table_async` — basic async table clone
-- TEST 2: `pgclone_table_async` — with different target name
-- TEST 3: `pgclone_schema_async` — sequential mode
-- TEST 4: `pgclone_progress` — check progress JSON
-- TEST 5: `pgclone_jobs` — list all jobs
-- TEST 6: `pgclone_jobs_view` — progress tracking view
-- TEST 7: `pgclone_clear_jobs` — cleanup completed/failed jobs
+- TEST 1: `pgclone.table_async` — basic async table clone
+- TEST 2: `pgclone.table_async` — with different target name
+- TEST 3: `pgclone.schema_async` — sequential mode
+- TEST 4: `pgclone.progress` — check progress JSON
+- TEST 5: `pgclone.jobs` — list all jobs
+- TEST 6: `pgclone.jobs_view` — progress tracking view
+- TEST 7: `pgclone.clear_jobs` — cleanup completed/failed jobs
 - TEST 8: Worker Pool — parallel schema clone with pool workers (v2.2.0)
 
 ---
@@ -186,7 +186,7 @@ SELECT plan(67);  -- increment after adding your test
 
 -- Your new test
 SELECT lives_ok(
-    format('SELECT pgclone_table(%L, %L, %L, true)',
+    format('SELECT pgclone.table(%L, %L, %L, true)',
         current_setting('app.source_conninfo'),
         'public', 'new_table'),
     'description of what this tests'
@@ -200,7 +200,7 @@ SELECT lives_ok(
 Add to `test/test_loopback.sh` for functions that run DDL via loopback:
 
 ```bash
-RESULT=$(pg "SELECT pgclone_your_function(...);" || echo "ERROR")
+RESULT=$(pg "SELECT pgclone.your_function(...);" || echo "ERROR")
 run_test "description" "[ '$RESULT' != 'ERROR' ]"
 ```
 

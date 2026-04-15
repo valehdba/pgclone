@@ -34,7 +34,7 @@ echo "Installing extensions..."
 psql -U postgres -d target_db <<SQL
     CREATE EXTENSION IF NOT EXISTS pgtap;
     CREATE EXTENSION IF NOT EXISTS pgclone;
-    SELECT pgclone_version();
+    SELECT pgclone.version();
 SQL
 
 # Set conninfo as a GUC so tests can access it
@@ -65,10 +65,10 @@ if [ $LOOPBACK_EXIT -ne 0 ]; then
     TEST_EXIT=1
 fi
 
-# Run pgclone_database_create tests (outside transaction)
+# Run pgclone.database_create tests (outside transaction)
 echo ""
 echo "============================================"
-echo "Running pgclone_database_create tests..."
+echo "Running pgclone.database_create tests..."
 echo "============================================"
 
 bash /build/pgclone/test/test_database_create.sh 2>&1

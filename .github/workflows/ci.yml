@@ -102,7 +102,7 @@ jobs:
           psql -h localhost -p 5434 -U postgres -d target_db <<SQL
             CREATE EXTENSION IF NOT EXISTS pgtap;
             CREATE EXTENSION IF NOT EXISTS pgclone;
-            SELECT pgclone_version();
+            SELECT pgclone.version();
           SQL
 
           psql -h localhost -p 5434 -U postgres -d target_db \
@@ -129,7 +129,7 @@ jobs:
           }
 
           # Clone roles
-          RESULT=$(pg "SELECT pgclone_clone_roles('${SOURCE_CONNINFO}');" || echo "ERROR")
+          RESULT=$(pg "SELECT pgclone.clone_roles('${SOURCE_CONNINFO}');" || echo "ERROR")
           run_test "clone_roles runs" "[ '$RESULT' != 'ERROR' ]"
           R1=$(pg "SELECT 1 FROM pg_roles WHERE rolname = 'test_reader';" || echo "0")
           run_test "test_reader exists" "[ '$R1' = '1' ]"
@@ -139,27 +139,27 @@ jobs:
           run_test "test_admin exists" "[ '$R3' = '1' ]"
 
           # Verify
-          VC=$(pg "SELECT count(*) FROM pgclone_verify('${SOURCE_CONNINFO}', 'test_schema');" || echo "0")
+          VC=$(pg "SELECT count(*) FROM pgclone.verify('${SOURCE_CONNINFO}', 'test_schema');" || echo "0")
           run_test "verify returns rows" "[ '$VC' -ge 1 ]"
 
           # Masking report
-          RC=$(pg "SELECT count(*) FROM pgclone_masking_report('test_schema') WHERE table_name = 'employees' AND column_name = 'email';" || echo "0")
+          RC=$(pg "SELECT count(*) FROM pgclone.masking_report('test_schema') WHERE table_name = 'employees' AND column_name = 'email';" || echo "0")
           run_test "report detects email" "[ '$RC' = '1' ]"
 
           # DDM
           pg "DROP TABLE IF EXISTS test_schema.employees_ddm CASCADE;" || true
-          pg "SELECT pgclone_table('${SOURCE_CONNINFO}', 'test_schema', 'employees', true, 'employees_ddm');" || true
-          RESULT=$(pg "SELECT pgclone_create_masking_policy('test_schema', 'employees_ddm', '{\"email\": \"email\", \"full_name\": \"name\", \"ssn\": \"null\"}', 'postgres');" || echo "ERROR")
+          pg "SELECT pgclone.table('${SOURCE_CONNINFO}', 'test_schema', 'employees', true, 'employees_ddm');" || true
+          RESULT=$(pg "SELECT pgclone.create_masking_policy('test_schema', 'employees_ddm', '{\"email\": \"email\", \"full_name\": \"name\", \"ssn\": \"null\"}', 'postgres');" || echo "ERROR")
           run_test "create_masking_policy" "[ '$RESULT' != 'ERROR' ]"
           MASKED=$(pg "SELECT count(*) FROM test_schema.employees_ddm_masked WHERE full_name = 'XXXX';" || echo "0")
           run_test "masked view works" "[ '$MASKED' = '5' ]"
-          pg "SELECT pgclone_drop_masking_policy('test_schema', 'employees_ddm');" || true
+          pg "SELECT pgclone.drop_masking_policy('test_schema', 'employees_ddm');" || true
           pg "DROP TABLE IF EXISTS test_schema.employees_ddm CASCADE;" || true
 
           echo "LOOPBACK: $PASS passed, $FAIL failed"
           [ $FAIL -eq 0 ] || exit 1
 
-      - name: "Test: pgclone_database_create"
+      - name: "Test: pgclone.database_create"
         run: |
           SOURCE_CONNINFO="host=localhost port=5433 dbname=source_db user=postgres password=testpass"
 
@@ -170,7 +170,7 @@ jobs:
 
           # Create and clone
           psql -h localhost -p 5434 -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -c "SELECT pgclone_database_create('${SOURCE_CONNINFO}', 'clone_test_db', true);"
+            -c "SELECT pgclone.database_create('${SOURCE_CONNINFO}', 'clone_test_db', true);"
 
           # Verify
           DB_EXISTS=$(psql -h localhost -p 5434 -U postgres -d postgres -tAc \
@@ -183,7 +183,7 @@ jobs:
 
           # Idempotent re-clone
           psql -h localhost -p 5434 -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -c "SELECT pgclone_database_create('${SOURCE_CONNINFO}', 'clone_test_db', false);"
+            -c "SELECT pgclone.database_create('${SOURCE_CONNINFO}', 'clone_test_db', false);"
 
           # Cleanup
           psql -h localhost -p 5434 -U postgres -d postgres \
@@ -206,7 +206,7 @@ jobs:
           }
 
           # Clean slate — drop leftover tables from sync tests
-          $PG -c "SELECT pgclone_clear_jobs();" 2>/dev/null || true
+          $PG -c "SELECT pgclone.clear_jobs();" 2>/dev/null || true
           $PG <<SQL 2>/dev/null
             DROP TABLE IF EXISTS public.simple_test CASCADE;
             DROP TABLE IF EXISTS public.simple_test_copy CASCADE;
@@ -218,10 +218,10 @@ jobs:
 
           # 1: table_async basic
           echo "---- Async: table_async basic ----"
-          JOB=$($PG -tAc "SELECT pgclone_table_async('${SOURCE_CONNINFO}', 'public', 'simple_test', true);")
+          JOB=$($PG -tAc "SELECT pgclone.table_async('${SOURCE_CONNINFO}', 'public', 'simple_test', true);")
           run_test "returns job_id" "[ -n '$JOB' ] && [ '$JOB' -gt 0 ]"
           for i in $(seq 1 30); do
-            S=$($PG -tAc "SELECT status FROM pgclone_jobs_view WHERE job_id=$JOB;" 2>/dev/null | tr -d '[:space:]')
+            S=$($PG -tAc "SELECT status FROM pgclone.jobs_view WHERE job_id=$JOB;" 2>/dev/null | tr -d '[:space:]')
             [ "$S" = "completed" ] || [ "$S" = "failed" ] && break; sleep 1
           done
           run_test "job completed" "[ '$S' = 'completed' ]"
@@ -230,9 +230,9 @@ jobs:
 
           # 2: table_async with target name
           echo "---- Async: table_async target name ----"
-          JOB2=$($PG -tAc "SELECT pgclone_table_async('${SOURCE_CONNINFO}', 'public', 'simple_test', true, 'async_renamed');")
+          JOB2=$($PG -tAc "SELECT pgclone.table_async('${SOURCE_CONNINFO}', 'public', 'simple_test', true, 'async_renamed');")
           for i in $(seq 1 30); do
-            S2=$($PG -tAc "SELECT status FROM pgclone_jobs_view WHERE job_id=$JOB2;" 2>/dev/null | tr -d '[:space:]')
+            S2=$($PG -tAc "SELECT status FROM pgclone.jobs_view WHERE job_id=$JOB2;" 2>/dev/null | tr -d '[:space:]')
             [ "$S2" = "completed" ] || [ "$S2" = "failed" ] && break; sleep 1
           done
           run_test "renamed job completed" "[ '$S2' = 'completed' ]"
@@ -242,9 +242,9 @@ jobs:
           # 3: schema_async
           echo "---- Async: schema_async ----"
           $PG -c "DROP SCHEMA IF EXISTS test_schema CASCADE;" 2>/dev/null || true
-          JOB3=$($PG -tAc "SELECT pgclone_schema_async('${SOURCE_CONNINFO}', 'test_schema', true);")
+          JOB3=$($PG -tAc "SELECT pgclone.schema_async('${SOURCE_CONNINFO}', 'test_schema', true);")
           for i in $(seq 1 60); do
-            S3=$($PG -tAc "SELECT status FROM pgclone_jobs_view WHERE job_id=$JOB3;" 2>/dev/null | tr -d '[:space:]')
+            S3=$($PG -tAc "SELECT status FROM pgclone.jobs_view WHERE job_id=$JOB3;" 2>/dev/null | tr -d '[:space:]')
             [ "$S3" = "completed" ] || [ "$S3" = "failed" ] && break; sleep 1
           done
           run_test "schema_async completed" "[ '$S3' = 'completed' ]"
@@ -253,16 +253,16 @@ jobs:
 
           # 4: progress/jobs/view
           echo "---- Async: progress & jobs ----"
-          PR=$($PG -tAc "SELECT pgclone_progress($JOB);" 2>/dev/null)
+          PR=$($PG -tAc "SELECT pgclone.progress($JOB);" 2>/dev/null)
           run_test "progress returns JSON" "echo '$PR' | grep -q 'job_id'"
-          JJ=$($PG -tAc "SELECT pgclone_jobs();" 2>/dev/null)
+          JJ=$($PG -tAc "SELECT pgclone.jobs();" 2>/dev/null)
           run_test "jobs returns JSON" "echo '$JJ' | grep -q 'job_id'"
-          VC=$($PG -tAc "SELECT count(*) FROM pgclone_jobs_view;" 2>/dev/null | tr -d '[:space:]')
+          VC=$($PG -tAc "SELECT count(*) FROM pgclone.jobs_view;" 2>/dev/null | tr -d '[:space:]')
           run_test "jobs_view has rows" "[ '$VC' -ge 1 ]"
 
           # 5: clear_jobs
           echo "---- Async: clear_jobs ----"
-          CL=$($PG -tAc "SELECT pgclone_clear_jobs();" 2>/dev/null | tr -d '[:space:]')
+          CL=$($PG -tAc "SELECT pgclone.clear_jobs();" 2>/dev/null | tr -d '[:space:]')
           run_test "clear_jobs works" "[ '$CL' -ge 1 ]"
 
           echo ""
