@@ -1,0 +1,165 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in pgclone
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in the fields below so we can reproduce and fix the issue quickly.
+
+        Before submitting, please check that:
+        - The bug is reproducible on the latest released version of pgclone
+        - There isn't already an [open issue](https://github.com/valehdba/pgclone/issues?q=is%3Aissue) for this
+        - For **security vulnerabilities**, do **not** open a public issue — see [SECURITY.md](https://github.com/valehdba/pgclone/blob/main/SECURITY.md)
+
+  - type: input
+    id: pgclone-version
+    attributes:
+      label: pgclone version
+      description: Run `SELECT pgclone_version();` in psql, or check `\dx pgclone`
+      placeholder: "e.g. 4.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pg-version
+    attributes:
+      label: PostgreSQL version
+      description: Both the source and target version, if different (mention in the description)
+      options:
+        - "18"
+        - "17"
+        - "16"
+        - "15"
+        - "14"
+        - "Other (specify in description)"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. Ubuntu 22.04, Debian 12, RHEL 9, macOS 14, Docker (postgres:17-bookworm)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Installation method
+      options:
+        - "Built from source (make install)"
+        - "Docker image"
+        - "Package manager (apt/yum/dnf)"
+        - "PGXN"
+        - "Other (specify in description)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature-area
+    attributes:
+      label: Feature area
+      description: Which part of pgclone is affected?
+      options:
+        - "Table clone (pgclone_clone_table)"
+        - "Schema clone (pgclone_clone_schema)"
+        - "Database clone (pgclone_clone_database)"
+        - "Function clone (pgclone_clone_functions)"
+        - "Role clone (pgclone_clone_roles)"
+        - "Async / background worker"
+        - "Parallel cloning (worker pool)"
+        - "Progress tracking / pgclone_jobs_view"
+        - "Data masking — clone-time"
+        - "Data masking — static (mask_in_place)"
+        - "Data masking — dynamic (masking policies)"
+        - "Sensitive column discovery"
+        - "Clone verification (pgclone_verify)"
+        - "Conflict resolution (skip/replace/rename)"
+        - "Build / install"
+        - "Other (specify in description)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sync-or-async
+    attributes:
+      label: Sync or async?
+      options:
+        - "Synchronous (foreground call)"
+        - "Asynchronous (background worker)"
+        - "Not applicable"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected vs what actually happened.
+      placeholder: |
+        I called pgclone_clone_schema(...) and expected ... but got ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: |
+        Minimal SQL to reproduce. Include the source schema/table definitions if relevant.
+        The smaller and more self-contained, the faster we can fix it.
+      render: sql
+      placeholder: |
+        -- Source DB setup
+        CREATE TABLE src.t (id int, val text);
+        INSERT INTO src.t SELECT g, 'x' FROM generate_series(1,10) g;
+
+        -- Call that triggers the bug
+        SELECT pgclone_clone_table(
+          'host=src port=5432 dbname=src user=postgres',
+          'host=tgt port=5432 dbname=tgt user=postgres',
+          'src', 't',
+          '{"on_conflict": "replace"}'::jsonb
+        );
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: PostgreSQL logs
+      description: |
+        Relevant entries from `postgresql.log` (or `docker logs <container>`) on **both** source and target.
+        **Redact passwords** from any connection strings before pasting.
+      render: shell
+      placeholder: |
+        2026-04-28 12:34:56 UTC [12345] ERROR: ...
+        2026-04-28 12:34:56 UTC [12345] CONTEXT: ...
+
+  - type: textarea
+    id: jobs-view
+    attributes:
+      label: pgclone_jobs_view (async only)
+      description: For async issues, the output of `SELECT * FROM pgclone_jobs_view WHERE job_id = <id>;`
+      render: shell
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Anything else — non-default GUCs, network topology (Unix socket vs TCP), shared_preload_libraries config, source DB size, etc.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I've redacted any passwords from connection strings and logs
+          required: true
+        - label: I've checked existing issues for duplicates
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md)
+          required: true

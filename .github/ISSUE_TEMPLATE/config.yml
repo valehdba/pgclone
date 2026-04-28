@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Security vulnerability
+    url: https://github.com/valehdba/pgclone/blob/main/SECURITY.md
+    about: Please report security vulnerabilities privately — do not open a public issue. See SECURITY.md for the disclosure process.
+  - name: 💬 Question or usage help
+    url: https://github.com/valehdba/pgclone/discussions
+    about: For "how do I…" questions, use GitHub Discussions instead of opening an issue.
+  - name: 📖 Documentation
+    url: https://github.com/valehdba/pgclone/tree/main/docs
+    about: Check USAGE.md, ASYNC.md, and ARCHITECTURE.md before opening an issue — your question may already be answered.

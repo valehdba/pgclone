@@ -1,0 +1,66 @@
+name: Documentation Issue
+description: Report a problem with the docs (README, USAGE, ASYNC, ARCHITECTURE, TESTING)
+title: "[Docs]: "
+labels: ["documentation", "needs-triage"]
+body:
+  - type: dropdown
+    id: doc-page
+    attributes:
+      label: Which document?
+      options:
+        - "README.md"
+        - "docs/USAGE.md"
+        - "docs/ASYNC.md"
+        - "docs/ARCHITECTURE.md"
+        - "docs/TESTING.md"
+        - "CHANGELOG.md"
+        - "CONTRIBUTING.md"
+        - "SECURITY.md"
+        - "Inline SQL COMMENT ON / function help"
+        - "Other (specify in description)"
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Section / heading or line number
+      placeholder: "e.g. 'Quick Start' section, or line 142"
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Type of issue
+      options:
+        - "Incorrect / outdated information"
+        - "Missing information"
+        - "Unclear / confusing wording"
+        - "Broken link or example"
+        - "Typo / grammar"
+        - "Other (specify in description)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What's the problem?
+      description: Quote the current text if relevant, and explain what's wrong or missing.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix
+      description: A proposed wording, code example, or new section. Optional but very helpful.
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Are you willing to submit a PR?
+      options:
+        - "Yes"
+        - "No, just reporting"
+    validations:
+      required: true

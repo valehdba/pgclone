@@ -1,0 +1,89 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for pgclone
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement to pgclone.
+
+        Before submitting, please check that:
+        - The feature isn't already on the [Roadmap](https://github.com/valehdba/pgclone/blob/main/README.md#roadmap)
+        - There isn't already an [open request](https://github.com/valehdba/pgclone/issues?q=is%3Aissue+label%3Aenhancement) for it
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case / problem
+      description: What are you trying to accomplish? What's the pain point with the current behavior?
+      placeholder: |
+        When cloning a 200 GB schema between staging and prod, I need ... but currently pgclone ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like pgclone to behave? A function signature, JSON option, or behavior change is helpful.
+      placeholder: |
+        Add a new option `"compression": "lz4"` to the clone JSON params, which would ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds you've tried, or other approaches you've thought through?
+
+  - type: dropdown
+    id: feature-area
+    attributes:
+      label: Feature area
+      options:
+        - "Cloning (table/schema/database)"
+        - "Async / background worker"
+        - "Parallel / worker pool"
+        - "Data masking"
+        - "Role / permission cloning"
+        - "Progress tracking / observability"
+        - "Conflict resolution"
+        - "Performance"
+        - "Security / auth"
+        - "Documentation / examples"
+        - "Build / packaging / CI"
+        - "Other (specify above)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: How important is this to you?
+      options:
+        - "Nice to have"
+        - "Would significantly improve my workflow"
+        - "Blocking my use of pgclone"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Are you willing to contribute?
+      description: No pressure — but it helps with prioritization
+      options:
+        - "Yes, I can submit a PR"
+        - "Yes, with guidance on the C/PostgreSQL internals"
+        - "I can help with tests or docs"
+        - "No, just proposing the idea"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Links to related issues, PostgreSQL docs, similar features in other tools (pg_dump, foreign data wrappers, logical replication), etc.
