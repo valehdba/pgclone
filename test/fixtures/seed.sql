@@ -203,3 +203,74 @@ GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA test_schema TO test_writer;
 
 GRANT ALL PRIVILEGES ON SCHEMA test_schema TO test_admin;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA test_schema TO test_admin;
+
+-- ============================================================
+-- Fixtures for issue #3: schema clone dependency ordering
+--
+-- Reproduces three failure modes from the bug report:
+--   (a) SQL-language function whose body references a table in
+--       the same schema (LANGUAGE sql validates references at
+--       CREATE FUNCTION time, unlike plpgsql).
+--   (b) Standalone sequence used as a column DEFAULT — pg_get_expr
+--       emits unqualified nextval() when the schema is on
+--       search_path, which fails on the target.
+--   (c) Trigger whose ON-clause is rendered unqualified by
+--       pg_get_triggerdef() under the same search_path conditions.
+--
+-- Tables are deliberately named so a naive alphabetic clone would
+-- create the function before its referenced table.
+-- ============================================================
+CREATE SCHEMA IF NOT EXISTS dep_test;
+
+-- (b) Sequence created BEFORE the table that uses it as DEFAULT.
+CREATE SEQUENCE dep_test.documents_to_resend_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE dep_test.documents_to_resend (
+    id      INTEGER NOT NULL DEFAULT nextval('dep_test.documents_to_resend_id_seq'),
+    payload TEXT
+);
+
+-- (a) Forward-referenced table — alphabetically AFTER the function
+-- that depends on it, so the broken ordering would create the
+-- function first and fail.
+CREATE TABLE dep_test.inbox_messages (
+    message_id    BIGINT NOT NULL,
+    "type"        VARCHAR(10) NOT NULL,
+    creation_date TIMESTAMP NOT NULL,
+    CONSTRAINT inbox_messages_pkey PRIMARY KEY (message_id, creation_date)
+);
+
+-- SQL-language function (NOT plpgsql — that's what makes the bug
+-- visible: SQL functions parse references at CREATE time).
+CREATE OR REPLACE FUNCTION dep_test.inbox_messages_fct_ck(p_id BIGINT)
+RETURNS BOOLEAN
+LANGUAGE sql
+PARALLEL SAFE
+AS $function$
+    SELECT EXISTS (SELECT 1 FROM dep_test.inbox_messages WHERE message_id = p_id);
+$function$;
+
+-- (c) Trigger function + trigger on the table.
+CREATE TABLE dep_test.city_street (
+    id   INTEGER PRIMARY KEY,
+    name TEXT
+);
+
+CREATE OR REPLACE FUNCTION dep_test.city_street_insert_nextval()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER city_street_insert_trigger
+    BEFORE INSERT ON dep_test.city_street
+    FOR EACH ROW
+    EXECUTE FUNCTION dep_test.city_street_insert_nextval();
+
+-- Insert a sample row so we can verify DEFAULT nextval() works after clone.
+INSERT INTO dep_test.documents_to_resend (payload) VALUES ('seed');
+INSERT INTO dep_test.inbox_messages (message_id, "type", creation_date)
+    VALUES (1, 'EMAIL', '2025-01-01 00:00:00');

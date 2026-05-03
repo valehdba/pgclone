@@ -3,7 +3,7 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-4.0.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.0.0)
+[![Version](https://img.shields.io/badge/version-4.0.1-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.0.1)
 
 A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 

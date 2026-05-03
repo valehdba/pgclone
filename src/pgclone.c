@@ -589,6 +589,38 @@ pgclone_find_mask_rule(const CloneOptions *opts, const char *col_name)
 }
 
 /* ---------------------------------------------------------------
+ * Internal helper: pin the source session to a deterministic search_path.
+ *
+ * pg_get_triggerdef(), pg_get_expr() (used for column DEFAULTs), and
+ * pg_get_indexdef() all call generate_relation_name() internally, which
+ * SUPPRESSES the schema prefix when the relation's namespace appears on
+ * the current session's search_path.  When source DBs have an application
+ * schema on search_path (a common production pattern, e.g. via
+ * "ALTER DATABASE ... SET search_path = app, public"), every DDL we
+ * extract for that schema comes back with bare relation names.  Replaying
+ * those on the target loopback connection — whose search_path does not
+ * include that schema — fails with "relation X does not exist".
+ *
+ * Pinning to pg_catalog forces full schema-qualification of every
+ * non-pg_catalog object reference.  Built-in types stay unqualified
+ * (so type names in DDL remain readable) because pg_catalog *is* on
+ * search_path.  This matches what pg_dump --no-search-path does.
+ *
+ * Failure here is logged at WARNING and not propagated — the worst case
+ * is the original behaviour, not a hard error.
+ * --------------------------------------------------------------- */
+static void
+pgclone_normalize_session(PGconn *conn)
+{
+    PGresult *res = PQexec(conn, "SET search_path = pg_catalog");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        ereport(WARNING,
+                (errmsg("pgclone: could not set source search_path: %s",
+                        PQerrorMessage(conn))));
+    PQclear(res);
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: connect to a remote PostgreSQL host
  * --------------------------------------------------------------- */
 static PGconn *
@@ -606,6 +638,8 @@ pgclone_connect(const char *conninfo)
                 (errcode(ERRCODE_CONNECTION_FAILURE),
                  errmsg("pgclone: could not connect to remote host: %s", conn_errmsg)));
     }
+
+    pgclone_normalize_session(conn);
 
     return conn;
 }
@@ -1858,26 +1892,15 @@ pgclone_schema(PG_FUNCTION_ARGS)
                      quote_identifier(schema_name));
     pgclone_exec_conn(local_conn, buf.data);
 
-    /* ---- Step 2: Clone all functions/procedures ---- */
-    resetStringInfo(&buf);
-    appendStringInfo(&buf,
-        "SELECT pg_get_functiondef(p.oid) AS funcdef "
-        "FROM pg_catalog.pg_proc p "
-        "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
-        "WHERE n.nspname = %s",
-        quote_literal_cstr(schema_name));
-
-    res = pgclone_exec(source_conn, buf.data);
-
-    for (i = 0; i < PQntuples(res); i++)
-    {
-        pgclone_exec_conn(local_conn, PQgetvalue(res, i, 0));
-    }
-    elog(DEBUG1, "pgclone: cloned %d functions from schema %s",
-         PQntuples(res), schema_name);
-    PQclear(res);
-
-    /* ---- Step 3: Clone sequences ---- */
+    /* ---- Step 2: Clone sequences ----
+     *
+     * Sequences must be created before tables because a column DEFAULT
+     * may use nextval('seq_name') and that reference is resolved at
+     * CREATE TABLE time (against the local connection's search_path).
+     * Functions used to be cloned here too — they have been moved to
+     * Step 7 (after tables and views exist) to avoid SQL-language
+     * function bodies referencing tables that don't yet exist.
+     */
     resetStringInfo(&buf);
     appendStringInfo(&buf,
         "SELECT sequence_name, data_type, start_value, increment, "
@@ -1911,7 +1934,17 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
     PQfinish(local_conn);
 
-    /* ---- Step 4: Clone tables ---- */
+    /* ---- Step 3: Clone tables ----
+     *
+     * Triggers are deferred to Step 8 by passing triggers=false through
+     * to each pgclone_table() call.  This avoids two ordering hazards:
+     *   1. A trigger's EXECUTE FUNCTION target may live in the same
+     *      schema and only get cloned in Step 7.
+     *   2. A trigger may be on a partitioned parent whose partition
+     *      hasn't been cloned yet.
+     * The user-requested include_triggers flag is preserved in
+     * `opts.include_triggers` and consulted again in Step 8.
+     */
     resetStringInfo(&buf);
     appendStringInfo(&buf,
         "SELECT tablename FROM pg_catalog.pg_tables "
@@ -1931,15 +1964,17 @@ pgclone_schema(PG_FUNCTION_ARGS)
     PQclear(res);
     PQfinish(source_conn);
 
-    /* Build options JSON to pass through to pgclone_table */
+    /* Build options JSON to pass through to pgclone_table.
+     * triggers is forced to false here regardless of opts.include_triggers
+     * — Step 8 handles the user-requested trigger pass after functions
+     * exist. */
     {
         StringInfoData opts_json;
         initStringInfo(&opts_json);
         appendStringInfo(&opts_json,
-            "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s}",
+            "{\"indexes\": %s, \"constraints\": %s, \"triggers\": false}",
             opts.include_indexes ? "true" : "false",
-            opts.include_constraints ? "true" : "false",
-            opts.include_triggers ? "true" : "false");
+            opts.include_constraints ? "true" : "false");
 
         for (i = 0; i < ntables; i++)
         {
@@ -1962,7 +1997,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
     elog(DEBUG1, "pgclone: cloned %d tables from schema %s",
          ntables, schema_name);
 
-    /* ---- Step 5: Retry FK constraints if constraints enabled ---- */
+    /* ---- Step 4: Retry FK constraints if constraints enabled ---- */
     if (opts.include_constraints)
     {
         PGconn *src_retry  = pgclone_connect(source_conninfo);
@@ -2018,7 +2053,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
         PQfinish(src_retry);
     }
 
-    /* ---- Step 6: Clone views ---- */
+    /* ---- Step 5: Clone views ---- */
     {
         PGconn *src_views = pgclone_connect(source_conninfo);
         PGconn *lcl_views = pgclone_connect_local();
@@ -2046,7 +2081,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
              PQntuples(res), schema_name);
         PQclear(res);
 
-        /* ---- Step 7: Clone materialized views ---- */
+        /* ---- Step 6: Clone materialized views ---- */
         if (opts.include_matviews)
         {
             resetStringInfo(&buf);
@@ -2116,6 +2151,72 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
         PQfinish(lcl_views);
         PQfinish(src_views);
+    }
+
+    /* ---- Step 7: Clone functions/procedures ----
+     *
+     * Deferred until tables, views, and matviews exist so that
+     * SQL-language function bodies (which validate object references
+     * at CREATE FUNCTION time) don't fail on forward references to
+     * objects in this schema.  pg_get_functiondef() already emits the
+     * CREATE OR REPLACE FUNCTION header schema-qualified; the body is
+     * reproduced verbatim from pg_proc.prosrc, so qualification of
+     * references inside the body is whatever the original author wrote.
+     */
+    {
+        PGconn *src_funcs = pgclone_connect(source_conninfo);
+        PGconn *lcl_funcs = pgclone_connect_local();
+        int     fcount;
+
+        resetStringInfo(&buf);
+        appendStringInfo(&buf,
+            "SELECT pg_get_functiondef(p.oid) AS funcdef "
+            "FROM pg_catalog.pg_proc p "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = %s",
+            quote_literal_cstr(schema_name));
+
+        res = pgclone_exec(src_funcs, buf.data);
+        fcount = PQntuples(res);
+
+        for (i = 0; i < fcount; i++)
+            pgclone_exec_conn(lcl_funcs, PQgetvalue(res, i, 0));
+
+        elog(DEBUG1, "pgclone: cloned %d functions from schema %s",
+             fcount, schema_name);
+        PQclear(res);
+
+        PQfinish(lcl_funcs);
+        PQfinish(src_funcs);
+    }
+
+    /* ---- Step 8: Triggers (deferred from Step 3) ----
+     *
+     * Functions exist now (Step 7), so trigger DDLs that reference an
+     * EXECUTE FUNCTION target in the same schema can be replayed safely.
+     * We loop over the same table_names[] gathered in Step 3, opening
+     * a single source/local pair to amortize connection cost.
+     */
+    if (opts.include_triggers && ntables > 0)
+    {
+        PGconn *src_trig = pgclone_connect(source_conninfo);
+        PGconn *lcl_trig = pgclone_connect_local();
+        int     trig_total = 0;
+
+        for (i = 0; i < ntables; i++)
+        {
+            int n = pgclone_triggers(src_trig, lcl_trig,
+                                       schema_name, table_names[i],
+                                       table_names[i]);
+            trig_total += n;
+        }
+
+        if (trig_total > 0)
+            elog(DEBUG1, "pgclone: trigger pass: created %d triggers in schema %s",
+                 trig_total, schema_name);
+
+        PQfinish(lcl_trig);
+        PQfinish(src_trig);
     }
 
     if (table_names)
@@ -3981,7 +4082,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.0.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.0.1"));
 }
 
 /* ===============================================================
