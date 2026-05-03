@@ -215,7 +215,7 @@ echo "── Test files ──"
 if [[ -f test/pgclone_test.sql ]]; then
     PLAN=$(sed -n 's/.*SELECT plan(\([0-9]*\)).*/\1/p' test/pgclone_test.sql 2>/dev/null | head -1)
     [[ -z "$PLAN" ]] && PLAN=0
-    TEST_COUNT=$(grep -cE "^[[:space:]]*SELECT[[:space:]]+(ok|is|isnt|matches|doesnt_match|has_function|has_extension|has_table|has_schema|has_index|has_view|has_column|has_trigger|col_is_pk|col_is_fk|fk_ok|results_eq|lives_ok|throws_ok|cmp_ok|pass)[[:space:]]*\(" test/pgclone_test.sql 2>/dev/null || echo "0")
+    TEST_COUNT=$(grep -cE "^[[:space:]]*SELECT[[:space:]]+(ok|is|isnt|matches|doesnt_match|has_function|has_extension|has_table|has_schema|has_index|has_view|has_column|has_trigger|has_sequence|trigger_is|col_is_pk|col_is_fk|fk_ok|results_eq|lives_ok|throws_ok|cmp_ok|pass)[[:space:]]*\(" test/pgclone_test.sql 2>/dev/null || echo "0")
     if [[ "$PLAN" -eq "$TEST_COUNT" ]]; then
         pass "pgTAP plan($PLAN) matches test count ($TEST_COUNT)"
     else

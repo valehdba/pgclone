@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(66);
+SELECT plan(77);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -496,6 +496,70 @@ SELECT results_eq(
     ARRAY[5],
     'row count unchanged after mask_in_place'
 );
+
+-- ============================================================
+-- TEST GROUP 21: Schema clone dependency ordering (issue #3)
+--
+-- Regression test: clone the dep_test fixture schema using a
+-- conninfo that pins the source connection's search_path to
+-- include dep_test. Under that condition pg_get_triggerdef() and
+-- pg_get_expr() emit UNQUALIFIED relation references; without the
+-- v4.0.1 fix, the trigger and DEFAULT-nextval clones would fail.
+--
+-- Also verifies that a SQL-language function whose body references
+-- a same-schema table is created successfully (was previously
+-- created BEFORE the table existed and failed with
+-- "relation does not exist" at CREATE FUNCTION time).
+-- ============================================================
+
+-- 11 tests below — keep in sync with plan() above.
+
+SELECT lives_ok(
+    format($q$SELECT pgclone.schema(%L, %L, true)$q$,
+        current_setting('app.source_conninfo')
+            || $$ options='-c search_path=dep_test,public'$$,
+        'dep_test'),
+    'pgclone.schema clones dep_test under app-style search_path'
+);
+
+SELECT has_schema('dep_test', 'dep_test schema exists');
+
+SELECT has_table('dep_test', 'inbox_messages',
+    'inbox_messages table cloned (forward-referenced by SQL function)');
+
+SELECT has_table('dep_test', 'documents_to_resend',
+    'documents_to_resend table cloned with DEFAULT nextval intact');
+
+SELECT has_table('dep_test', 'city_street',
+    'city_street table cloned (target of trigger)');
+
+SELECT has_sequence('dep_test', 'documents_to_resend_id_seq',
+    'sequence used as column DEFAULT cloned');
+
+SELECT has_function('dep_test', 'inbox_messages_fct_ck', ARRAY['bigint'],
+    'SQL-language function with table reference cloned');
+
+SELECT has_function('dep_test', 'city_street_insert_nextval',
+    'trigger function cloned');
+
+SELECT trigger_is(
+    'dep_test', 'city_street', 'city_street_insert_trigger',
+    'dep_test', 'city_street_insert_nextval',
+    'trigger wired to its function on cloned city_street');
+
+-- The cloned function body references dep_test.inbox_messages.
+-- Calling it exercises the path that previously failed at CREATE
+-- FUNCTION time. Seeded row id=1 must exist; id=999 must not.
+SELECT results_eq(
+    $$SELECT dep_test.inbox_messages_fct_ck(1)$$,
+    ARRAY[true],
+    'cloned SQL function returns true for seeded row');
+
+-- Row count and DEFAULT pulling from the cloned sequence.
+SELECT results_eq(
+    'SELECT count(*)::integer FROM dep_test.documents_to_resend',
+    ARRAY[1],
+    'documents_to_resend data preserved through clone');
 
 SELECT * FROM finish();
 ROLLBACK;

@@ -2,6 +2,16 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.0.1]
+
+### Fixed
+- **Schema clone dependency ordering** (issue #3): `pgclone.schema()` now creates objects in dependency-respecting order — sequences → tables (no triggers) → FK retry → views → matviews → functions → triggers — instead of the previous order which cloned functions before tables. SQL-language functions whose body references a table in the same schema no longer fail with `relation "schema.table" does not exist` at `CREATE FUNCTION` time.
+- **Unqualified relation references in extracted DDL** (issue #3): all source libpq connections now `SET search_path = pg_catalog` immediately after connect. This forces `pg_get_triggerdef()`, `pg_get_expr()` (column DEFAULTs), and `pg_get_indexdef()` to emit fully schema-qualified relation names. Previously, source DBs with an application schema on their default `search_path` (a common production pattern) produced DDL like `CREATE TRIGGER ... ON city_street ...` and `DEFAULT nextval('documents_to_resend_id_seq')` that failed when replayed on the target loopback connection. Affects sync paths and both bgworker async paths (sequential and pool).
+
+### Internal
+- New `pgclone_normalize_session()` helper in `src/pgclone.c` invoked from `pgclone_connect()`; equivalent inline `SET search_path` calls added at the two `PQconnectdb(job->source_conninfo)` sites in `src/pgclone_bgw.c`.
+- `pgclone_schema()` now passes `triggers=false` through to each per-table `pgclone_table()` call and runs a single trigger pass at the end after functions are cloned.
+
 ## [4.0.0] — BREAKING
 
 ### Changed

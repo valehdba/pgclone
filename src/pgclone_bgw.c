@@ -625,6 +625,18 @@ pgclone_bgw_main(Datum main_arg)
         goto cleanup;
     }
 
+    /* Pin source search_path to pg_catalog so pg_get_triggerdef(),
+     * pg_get_expr() and friends emit fully schema-qualified relation
+     * names regardless of the source DB's default search_path.
+     * See pgclone_normalize_session() in pgclone.c for the rationale. */
+    {
+        PGresult *sp_res = PQexec(source_conn, "SET search_path = pg_catalog");
+        if (PQresultStatus(sp_res) != PGRES_COMMAND_OK)
+            elog(WARNING, "pgclone bgw: could not set source search_path: %s",
+                 PQerrorMessage(source_conn));
+        PQclear(sp_res);
+    }
+
     local_conn = bgw_connect_local(dbname, port, job->username);
     if (!local_conn)
     {
@@ -855,6 +867,15 @@ pgclone_pool_worker_main(Datum main_arg)
         job->end_time = GetCurrentTimestamp();
         LWLockRelease(pgclone_state->lock);
         goto pool_cleanup;
+    }
+
+    /* Pin source search_path — see comment in pgclone_bgw_main(). */
+    {
+        PGresult *sp_res = PQexec(source_conn, "SET search_path = pg_catalog");
+        if (PQresultStatus(sp_res) != PGRES_COMMAND_OK)
+            elog(WARNING, "pgclone pool worker: could not set source search_path: %s",
+                 PQerrorMessage(source_conn));
+        PQclear(sp_res);
     }
 
     local_conn = bgw_connect_local(dbname, port, job->username);
