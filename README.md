@@ -142,7 +142,6 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v3.5.0: Clone verification — compare row counts across source and target
 - [x] v3.6.0: GDPR/Compliance masking report
 - [x] v4.0.0: Schema namespace — all functions under `pgclone` schema (`pgclone.table()`, `pgclone.schema()`, etc.)
-- [ ] v5.0.0: Copy-on-Write (CoW) mode for local cloning
 
 ## License
 
