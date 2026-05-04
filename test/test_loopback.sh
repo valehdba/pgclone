@@ -111,6 +111,54 @@ run_test "drop_masking_policy runs" "[ '$RESULT' != 'ERROR' ]"
 
 pg "DROP TABLE IF EXISTS test_schema.employees_ddm CASCADE;" || true
 
+# ---- Schema diff (v4.1.0) ----
+echo ""
+echo "---- Schema diff ----"
+
+# Function exists under pgclone schema
+DIFF_EXISTS=$(pg "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pgclone' AND p.proname = 'diff' AND pg_catalog.pg_get_function_arguments(p.oid) = 'source_conninfo text, schema_name text';" || echo "0")
+run_test "pgclone.diff(text, text) is registered" "[ '$DIFF_EXISTS' = '1' ]"
+
+# Returns parseable JSON with the documented top-level keys
+HAS_TABLES=$(pg "SELECT pgclone.diff('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'tables';" || echo "f")
+run_test "diff JSON contains 'tables' key" "[ '$HAS_TABLES' = 't' ]"
+
+HAS_INDEXES=$(pg "SELECT pgclone.diff('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'indexes';" || echo "f")
+run_test "diff JSON contains 'indexes' key" "[ '$HAS_INDEXES' = 't' ]"
+
+HAS_SUMMARY=$(pg "SELECT pgclone.diff('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'summary';" || echo "f")
+run_test "diff JSON contains 'summary' key" "[ '$HAS_SUMMARY' = 't' ]"
+
+# Schema name echoed back
+SCHEMA_FIELD=$(pg "SELECT pgclone.diff('${SOURCE_CONNINFO}', 'test_schema')::jsonb ->> 'schema';" || echo "")
+run_test "diff echoes the requested schema" "[ '$SCHEMA_FIELD' = 'test_schema' ]"
+
+# in_sync is a boolean
+IN_SYNC=$(pg "SELECT jsonb_typeof(pgclone.diff('${SOURCE_CONNINFO}', 'test_schema')::jsonb -> 'in_sync');" || echo "")
+run_test "diff in_sync is a boolean" "[ '$IN_SYNC' = 'boolean' ]"
+
+# Fabricate a target-only table; diff must surface it under tables.only_in_target
+pg "DROP TABLE IF EXISTS test_schema.pgclone_diff_probe CASCADE;" || true
+pg "CREATE TABLE test_schema.pgclone_diff_probe (id int);" || true
+ONLY_TGT=$(pg "SELECT (pgclone.diff('${SOURCE_CONNINFO}', 'test_schema')::jsonb #> '{tables,only_in_target}') ? 'pgclone_diff_probe';" || echo "f")
+run_test "diff detects fabricated target-only table" "[ '$ONLY_TGT' = 't' ]"
+
+# diff_count must reflect the fabricated drift (>= 1)
+DC=$(pg "SELECT (pgclone.diff('${SOURCE_CONNINFO}', 'test_schema')::jsonb ->> 'diff_count')::int;" || echo "0")
+run_test "diff_count is positive when drift exists" "[ '$DC' -ge 1 ]"
+
+pg "DROP TABLE IF EXISTS test_schema.pgclone_diff_probe CASCADE;" || true
+
+# Read-only invariant: diff must not change relation count on either side
+COUNT_BEFORE=$(pg "SELECT count(*)::int FROM information_schema.tables WHERE table_schema = 'test_schema';" || echo "0")
+pg "SELECT pgclone.diff('${SOURCE_CONNINFO}', 'test_schema');" >/dev/null || true
+COUNT_AFTER=$(pg "SELECT count(*)::int FROM information_schema.tables WHERE table_schema = 'test_schema';" || echo "0")
+run_test "diff does not modify target catalog" "[ '$COUNT_BEFORE' = '$COUNT_AFTER' ]"
+
+# NULL schema_name argument must error (function is STRICT — psql returns no row)
+NULL_RES=$(pg "SELECT pgclone.diff('${SOURCE_CONNINFO}', NULL);" || echo "ERROR")
+run_test "diff is STRICT (NULL arg yields no result)" "[ -z '$NULL_RES' -o '$NULL_RES' = 'ERROR' ]"
+
 echo ""
 echo "============================================"
 echo "LOOPBACK TESTS: $PASS passed, $FAIL failed"

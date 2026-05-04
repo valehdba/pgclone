@@ -3,7 +3,7 @@
 
 EXTENSION    = pgclone
 MODULE_big   = pgclone
-OBJS         = src/pgclone.o src/pgclone_bgw.o
+OBJS         = src/pgclone.o src/pgclone_bgw.o src/pgclone_diff.o
 DATA         = $(wildcard sql/pgclone--*.sql)
 
 PG_CPPFLAGS  = -I$(shell $(PG_CONFIG) --includedir) -Isrc
