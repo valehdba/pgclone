@@ -657,6 +657,112 @@ SELECT * FROM pgclone.masking_report('public');
 
 ---
 
+## Schema Diff (v4.1.0)
+
+Detect DDL drift between a source database and the local target without
+modifying either side. Useful for answering "is dev still in sync with prod?"
+before a release, after a hotfix, or as a scheduled health check.
+
+### Usage
+
+```sql
+SELECT pgclone.diff(
+    'host=source-server dbname=prod user=postgres password=secret',
+    'app_schema'
+)::jsonb;
+```
+
+The function compares the named schema on the source against the same-named
+schema on the database the call is issued from. It returns a single JSON
+document — pipe through `::jsonb` (as above) or `jsonb_pretty()` for
+readability.
+
+### What is compared
+
+| Category    | Compared by                                     | Drift detected on            |
+|-------------|--------------------------------------------------|------------------------------|
+| Tables      | `relname`                                        | (presence)                   |
+| Columns     | `(table, column)`                                | type, `NOT NULL`, default    |
+| Indexes     | `index name`                                     | `pg_get_indexdef`            |
+| Constraints | `constraint name`                                | `pg_get_constraintdef`       |
+| Triggers    | `trigger name` (user-defined only)               | `pg_get_triggerdef`          |
+| Views       | `relname` (regular + materialized)               | `pg_get_viewdef`             |
+| Sequences   | `relname`                                        | (presence)                   |
+
+Indexes that back a primary key or unique constraint are reported under the
+**constraints** category, not the indexes category, to avoid double-counting.
+
+### Output shape
+
+```json
+{
+  "schema": "app_schema",
+  "in_sync": false,
+  "diff_count": 4,
+  "summary": {
+    "tables_only_in_source": 1, "tables_only_in_target": 0, "tables_modified": 1,
+    "indexes_only_in_source": 1, "indexes_only_in_target": 0, "indexes_modified": 0,
+    "constraints_only_in_source": 0, "constraints_only_in_target": 0, "constraints_modified": 0,
+    "triggers_only_in_source": 0, "triggers_only_in_target": 0, "triggers_modified": 0,
+    "views_only_in_source": 0, "views_only_in_target": 0, "views_modified": 0,
+    "sequences_only_in_source": 1, "sequences_only_in_target": 0
+  },
+  "tables": {
+    "only_in_source": ["audit_log"],
+    "only_in_target": [],
+    "modified": [
+      {
+        "name": "customers",
+        "columns_only_in_source": [
+          {"name": "loyalty_tier", "type": "text", "not_null": false, "default": null}
+        ],
+        "columns_only_in_target": [],
+        "columns_drift": [
+          {"name": "id",
+           "source_type": "bigint", "target_type": "integer",
+           "source_not_null": true, "target_not_null": true,
+           "source_default": "nextval('customers_id_seq'::regclass)",
+           "target_default": "nextval('customers_id_seq'::regclass)"}
+        ]
+      }
+    ]
+  },
+  "indexes":     { "only_in_source": [...], "only_in_target": [], "modified": [] },
+  "constraints": { "only_in_source": [],    "only_in_target": [], "modified": [] },
+  "triggers":    { "only_in_source": [],    "only_in_target": [], "modified": [] },
+  "views":       { "only_in_source": [],    "only_in_target": [], "modified": [] },
+  "sequences":   { "only_in_source": ["audit_log_seq"], "only_in_target": [] }
+}
+```
+
+`in_sync` is `true` only when `diff_count` is `0`.
+
+### Quick boolean check
+
+```sql
+SELECT (pgclone.diff(:src, 'app_schema')::jsonb ->> 'in_sync')::boolean AS in_sync;
+```
+
+### Notes
+
+- **Read-only on both sides.** Both source and local connections run inside a
+  `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` transaction; the function
+  never executes DDL or DML.
+- **Permissions.** The calling role only needs read access to `pg_catalog`
+  on both sides — the same access required by `\d` in psql.
+- **Sort stability.** Catalog rows are ordered with `COLLATE "C"` so the
+  comparison is deterministic regardless of the cluster's `lc_collate`.
+- **Schema must exist on the source.** If it does not exist on the target,
+  every source object is reported under `only_in_source` (and vice versa).
+- **Currently scoped to a single schema per call.** Loop in SQL to compare
+  multiple schemas:
+  ```sql
+  SELECT n, pgclone.diff(:src, n)::jsonb
+  FROM   unnest(ARRAY['public','app','reporting']) AS n;
+  ```
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -698,6 +804,7 @@ SELECT * FROM pgclone.masking_report('public');
 | `pgclone.verify(conninfo)` | table | Compare row counts for all tables across source and target |
 | `pgclone.verify(conninfo, schema)` | table | Compare row counts for tables in a specific schema |
 | `pgclone.masking_report(schema)` | table | GDPR/compliance audit: sensitive columns, mask status, recommendations |
+| `pgclone.diff(conninfo, schema)` | text (JSON) | DDL drift report: tables, columns, indexes, constraints, triggers, views, sequences |
 | `pgclone.table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone.schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone.progress(job_id)` | json | Job progress as JSON |

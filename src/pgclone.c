@@ -4082,7 +4082,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.0.1"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.1.0"));
 }
 
 /* ===============================================================

@@ -2,6 +2,15 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.1.0]
+
+### Added
+- **Schema diff (`pgclone.diff(source_conninfo, schema_name)`)** — read-only DDL drift detection between source and the local target. Returns a JSON document with summary counts plus per-category arrays of `only_in_source` / `only_in_target` / `modified` for tables (with per-column `type` / `not_null` / `default` drift), indexes (excluding those backing constraints), constraints, user-defined triggers, views and materialized views, and sequences. Both source and local connections run inside `BEGIN ... READ ONLY` transactions; the function never executes DDL or DML on either side.
+
+### Internal
+- New isolated translation unit `src/pgclone_diff.c`. The diff feature does not share helpers with `src/pgclone.c`, keeping the surface area additive and trivially auditable.
+- Catalog queries explicitly use `ORDER BY ... COLLATE "C"` to guarantee identical sort order on both sides regardless of the local lc_collate setting, so the merge-walk comparison is deterministic.
+
 ## [4.0.1]
 
 ### Fixed

@@ -3,7 +3,7 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-4.0.1-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.0.1)
+[![Version](https://img.shields.io/badge/version-4.1.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.1.0)
 
 A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 
@@ -141,10 +141,10 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
     - [x] v3.4.0: Clone roles with permissions and passwords
 - [x] v3.5.0: Clone verification - compare row counts across source and target
 - [x] v3.6.0: GDPR/Compliance masking report
-- [x] v4.0.0: Schema namespace - all functions under `pgclone` schema (`pgclone.table()`, `pgclone.schema()`, etc.)
-- [ ] v4.1.0: Schema diff - DDL drift detection between source and target (`pgclone.diff`)
-- [ ] v4.2.0: Pre-flight validator - connection, space, permissions, version, name-conflict checks before clone (`pgclone.preflight`)
-- [ ] v4.3.0: FK-aware referential sampling - sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
+- [x] v4.0.0: Schema namespace — all functions under `pgclone` schema (`pgclone.table()`, `pgclone.schema()`, etc.)
+- [x] v4.1.0: Schema diff — DDL drift detection between source and target (`pgclone.diff`)
+- [ ] v4.2.0: Pre-flight validator — connection, space, permissions, version, name-conflict checks before clone (`pgclone.preflight`)
+- [ ] v4.3.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License
 
