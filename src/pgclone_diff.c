@@ -25,7 +25,6 @@
 #include "funcapi.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
-#include "utils/jsonapi.h"
 #include "libpq-fe.h"
 #include "miscadmin.h"
 #include "utils/guc.h"
@@ -232,16 +231,51 @@ pgclone_diff_validate_identifier(const char *ident, const char *what)
 }
 
 /* ---------------------------------------------------------------
- * JSON helpers. We use PostgreSQL's escape_json() for strings.
- * For NULL-able values we emit the JSON literal `null` directly.
+ * JSON helpers. We ship our own RFC 8259 string escaper to avoid
+ * cross-version churn around utils/jsonapi.h vs utils/json.h
+ * (header location moved between PostgreSQL releases). The output
+ * is a JSON string literal — the caller passes a bare C string,
+ * we wrap it in double quotes and escape per spec.
  * --------------------------------------------------------------- */
+static void
+pgd_escape_json(StringInfo out, const char *s)
+{
+    const char *p;
+
+    appendStringInfoChar(out, '"');
+    for (p = s; *p != '\0'; p++)
+    {
+        unsigned char c = (unsigned char) *p;
+        switch (c)
+        {
+            case '"':  appendStringInfoString(out, "\\\""); break;
+            case '\\': appendStringInfoString(out, "\\\\"); break;
+            case '\b': appendStringInfoString(out, "\\b");  break;
+            case '\f': appendStringInfoString(out, "\\f");  break;
+            case '\n': appendStringInfoString(out, "\\n");  break;
+            case '\r': appendStringInfoString(out, "\\r");  break;
+            case '\t': appendStringInfoString(out, "\\t");  break;
+            default:
+                if (c < 0x20)
+                    appendStringInfo(out, "\\u%04x", c);
+                else
+                    appendStringInfoChar(out, (char) c);
+                break;
+        }
+    }
+    appendStringInfoChar(out, '"');
+}
+
+/*
+ * For NULL-able values we emit the JSON literal `null` directly.
+ */
 static void
 emit_json_str(StringInfo out, const char *s)
 {
     if (s == NULL)
         appendStringInfoString(out, "null");
     else
-        escape_json(out, s);
+        pgd_escape_json(out, s);
 }
 
 static void
