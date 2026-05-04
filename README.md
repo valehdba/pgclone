@@ -139,12 +139,12 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
     - [x] v3.2.0: Applying Static Data Masking to cloned data
     - [x] v3.3.0: Applying Dynamic Data Masking to cloned data
     - [x] v3.4.0: Clone roles with permissions and passwords
-- [x] v3.5.0: Clone verification — compare row counts across source and target
+- [x] v3.5.0: Clone verification - compare row counts across source and target
 - [x] v3.6.0: GDPR/Compliance masking report
-- [x] v4.0.0: Schema namespace — all functions under `pgclone` schema (`pgclone.table()`, `pgclone.schema()`, etc.)
-- [ ] v4.1.0: Schema diff — DDL drift detection between source and target (`pgclone.diff`)
-- [ ] v4.2.0: Pre-flight validator — connection, space, permissions, version, name-conflict checks before clone (`pgclone.preflight`)
-- [ ] v4.3.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
+- [x] v4.0.0: Schema namespace - all functions under `pgclone` schema (`pgclone.table()`, `pgclone.schema()`, etc.)
+- [ ] v4.1.0: Schema diff - DDL drift detection between source and target (`pgclone.diff`)
+- [ ] v4.2.0: Pre-flight validator - connection, space, permissions, version, name-conflict checks before clone (`pgclone.preflight`)
+- [ ] v4.3.0: FK-aware referential sampling - sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License
 
