@@ -9,17 +9,17 @@ A PostgreSQL extension that clones databases, schemas, tables, and functions bet
 
 ## Key Features
 
-- **Clone anything** — tables, schemas, functions, entire databases, roles and permissions
-- **Fast data transfer** — uses PostgreSQL COPY protocol
-- **Data masking** — anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
-- **Auto-discovery** — scan source schemas for sensitive columns and get suggested mask rules
+- **Clone anything** - tables, schemas, functions, entire databases, roles and permissions
+- **Fast data transfer** - uses PostgreSQL COPY protocol
+- **Data masking** - anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
+- **Auto-discovery** - scan source schemas for sensitive columns and get suggested mask rules
 - **Static & dynamic masking** — mask existing tables in-place, or create role-based masked views
-- **Async operations** — background workers with progress tracking and visual progress bar
-- **Parallel cloning** — multiple background workers for concurrent table cloning
-- **Selective cloning** — filter columns and rows with `columns` and `WHERE` options
-- **Full DDL support** — indexes, constraints (PK, UNIQUE, CHECK, FK, EXCLUDE), triggers, views, materialized views, sequences
-- **Conflict resolution** — error, skip, replace, or rename strategies
-- **Cross-version** — tested on PostgreSQL 14, 15, 16, 17, and 18
+- **Async operations** - background workers with progress tracking and visual progress bar
+- **Parallel cloning** - multiple background workers for concurrent table cloning
+- **Selective cloning** - filter columns and rows with `columns` and `WHERE` options
+- **Full DDL support** - indexes, constraints (PK, UNIQUE, CHECK, FK, EXCLUDE), triggers, views, materialized views, sequences
+- **Conflict resolution** - error, skip, replace, or rename strategies
+- **Cross-version** - tested on PostgreSQL 14, 15, 16, 17, and 18
 
 ## Quick Start
 
