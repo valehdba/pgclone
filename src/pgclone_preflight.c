@@ -850,7 +850,7 @@ check_missing_roles(PreflightCtx *ctx, PGconn *src, PGconn *tgt,
         ") "
         "SELECT DISTINCT rolname FROM all_roles "
         "WHERE rolname IS NOT NULL "
-        "ORDER BY rolname COLLATE \"C\"",
+        "ORDER BY rolname",
         quote_literal_cstr(schema));
     res = pf_select(src, q.data);
     pfree(q.data);
@@ -933,7 +933,7 @@ check_missing_tablespaces(PreflightCtx *ctx, PGconn *src, PGconn *tgt,
         "WHERE n.nspname = %s "
         "  AND c.reltablespace <> 0 "
         "  AND t.spcname NOT IN ('pg_default','pg_global') "
-        "ORDER BY t.spcname COLLATE \"C\"",
+        "ORDER BY t.spcname",
         quote_literal_cstr(schema));
     res = pf_select(src, q.data);
     pfree(q.data);
