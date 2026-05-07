@@ -763,6 +763,110 @@ SELECT (pgclone.diff(:src, 'app_schema')::jsonb ->> 'in_sync')::boolean AS in_sy
 
 ---
 
+## Pre-flight Validator (v4.2.0)
+
+Validate that a clone is likely to succeed *before* you run it. The
+pre-flight check connects to source and target read-only and inspects
+versions, permissions, capacity, and naming conflicts. Returns a JSON
+report with `errors`, `warnings`, and `info` arrays plus a per-check
+breakdown.
+
+### Usage
+
+```sql
+SELECT pgclone.preflight(
+    'host=source-server dbname=prod user=postgres password=secret',
+    'app_schema'
+)::jsonb;
+```
+
+`ready` is `true` only when zero errors are recorded. Any single error
+means the clone will almost certainly fail; warnings indicate issues
+that can be resolved (e.g. by using a `conflict_resolution` option or
+running `pgclone.clone_roles()` first).
+
+### Checks performed
+
+| Check | Severity on failure | What it catches |
+|-------|--------------------|-----------------|
+| `source_connection`     | error | bad conninfo, unreachable host, auth failure |
+| `target_connection`     | error | local socket / pg_hba misconfiguration |
+| `source_version`        | info  | reports source PG version |
+| `target_version`        | info  | reports target PG version |
+| `version_compat`        | warn  | source major > target major |
+| `schema_exists_source`  | error | source schema does not exist |
+| `schema_exists_target`  | info  | target schema absent → will be created |
+| `source_permissions`    | error | role lacks USAGE on schema or SELECT on tables |
+| `target_permissions`    | error | role lacks CREATE on target schema (or DB if creating it) |
+| `estimated_size`        | info  | sum of `pg_total_relation_size` on source |
+| `target_database_size`  | info  | current target DB size for capacity reasoning |
+| `object_counts`         | info  | tables / views / sequences / indexes counts |
+| `name_conflicts`        | warn  | object names already present in target schema |
+| `missing_extensions`    | warn  | extensions installed on source but not target |
+| `missing_roles`         | warn  | owner / grantee roles not present on target |
+| `missing_tablespaces`   | warn  | non-default tablespaces referenced by source |
+
+### Output shape
+
+```json
+{
+  "schema": "app_schema",
+  "ready": false,
+  "summary": { "errors": 1, "warnings": 2, "info": 0, "checks_run": 16 },
+  "errors":   ["target role lacks CREATE on schema \"app_schema\""],
+  "warnings": [
+    "2 object name(s) already exist on target schema \"app_schema\"; use a conflict_resolution option (skip / replace / rename) when cloning",
+    "3 role(s) referenced by source schema do not exist on target — consider running pgclone.clone_roles() first"
+  ],
+  "info": [],
+  "checks": {
+    "source_connection":     { "status": "pass" },
+    "target_connection":     { "status": "pass" },
+    "source_version":        { "status": "info", "value": "16.3", "major": 16 },
+    "target_version":        { "status": "info", "value": "16.4", "major": 16 },
+    "version_compat":        { "status": "pass" },
+    "schema_exists_source":  { "status": "pass" },
+    "schema_exists_target":  { "status": "info", "value": true },
+    "source_permissions":    { "status": "pass" },
+    "target_permissions":    { "status": "fail", "message": "..." },
+    "estimated_size":        { "status": "info", "bytes": 1234567890 },
+    "target_database_size":  { "status": "info", "bytes": 9876543210 },
+    "object_counts":         { "status": "info", "tables": 42, "views": 5, "sequences": 12, "indexes": 78 },
+    "name_conflicts":        { "status": "warn", "count": 2,
+                               "items": [{"name":"orders","kind":"r"},{"name":"v_summary","kind":"v"}] },
+    "missing_extensions":    { "status": "pass", "items": [] },
+    "missing_roles":         { "status": "warn", "count": 3, "items": ["app_user","reporting","etl_runner"] },
+    "missing_tablespaces":   { "status": "pass", "items": [] }
+  }
+}
+```
+
+### Quick boolean gate
+
+```sql
+SELECT (pgclone.preflight(:src, 'app_schema')::jsonb ->> 'ready')::boolean
+       AS clone_safe;
+```
+
+### Notes
+
+- **Read-only on both sides.** Both source and local connections wrap
+  every query in `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+  the function never executes DDL or DML.
+- **Required privileges.** Only the same privileges that you would need
+  to perform the clone — `USAGE`+`SELECT` on source, `CREATE` on
+  target. The pre-flight uses `has_*_privilege()` to test these
+  without attempting any actual write.
+- **Disk free space is *not* directly available** through standard SQL
+  catalog access. The report exposes `estimated_size` (source) and
+  `target_database_size` for you to reason about capacity. If you have
+  a custom function that reads filesystem stats (e.g. via
+  `pg_proctab` or a sidecar), wire it into your wrapper.
+- **Composes with `pgclone.diff()`.** Run pre-flight before a fresh
+  clone; run diff after to catch drift over time.
+
+---
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |
@@ -805,6 +909,7 @@ SELECT (pgclone.diff(:src, 'app_schema')::jsonb ->> 'in_sync')::boolean AS in_sy
 | `pgclone.verify(conninfo, schema)` | table | Compare row counts for tables in a specific schema |
 | `pgclone.masking_report(schema)` | table | GDPR/compliance audit: sensitive columns, mask status, recommendations |
 | `pgclone.diff(conninfo, schema)` | text (JSON) | DDL drift report: tables, columns, indexes, constraints, triggers, views, sequences |
+| `pgclone.preflight(conninfo, schema)` | text (JSON) | Pre-flight checks: connection, versions, permissions, name conflicts, missing roles/extensions/tablespaces |
 | `pgclone.table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone.schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone.progress(job_id)` | json | Job progress as JSON |

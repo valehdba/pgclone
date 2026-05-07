@@ -151,7 +151,7 @@ jobs:
           psql -h localhost -p 5434 -U postgres -d target_db \
             -f test/pgclone_test.sql
 
-      - name: "Test: Loopback-DDL (roles, verify, report, DDM, diff)"
+      - name: "Test: Loopback-DDL (roles, verify, report, DDM, diff, preflight)"
         env:
           PGHOST: localhost
           PGPORT: 5434

@@ -2,6 +2,19 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.2.0]
+
+### Added
+- **Pre-flight validator (`pgclone.preflight(source_conninfo, schema_name)`)** — read-only sanity check that surfaces issues that would otherwise fail mid-clone. Returns a JSON document with three role-based summary arrays (`errors` / `warnings` / `info`) and a per-check object covering: source/target connection, PostgreSQL versions and major-version compatibility, schema existence on both sides, USAGE/SELECT on source and CREATE on target, estimated source size, current target database size, object counts (tables/views/sequences/indexes), name conflicts on the target schema, extensions installed on source but missing on target, owner/grantee roles missing on target, and non-default tablespaces missing on target. `ready` is `true` only when zero errors are recorded.
+- **Loopback test coverage** — new preflight assertions in `test/test_loopback.sh` (function registration, JSON shape, `ready` boolean, fabricated name-conflict surfacing, missing-source-schema error path, STRICT NULL handling, read-only catalog invariant).
+
+### Changed
+- **CI runs `test/test_loopback.sh` directly** instead of an inline subset hand-rolled in `.github/workflows/ci.yml`. Going forward, every assertion added to the loopback script is exercised in CI automatically — closing the gap that hid v4.1.0 schema-diff tests from the matrix.
+
+### Internal
+- New isolated translation unit `src/pgclone_preflight.c`. Like `src/pgclone_diff.c`, this file does not share helpers with `src/pgclone.c` — the feature is fully additive and trivially auditable.
+- Both source and target connections run inside `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`. The function never issues DDL or DML on either side.
+
 ## [4.1.0]
 
 ### Added

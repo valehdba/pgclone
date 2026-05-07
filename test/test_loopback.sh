@@ -159,6 +159,72 @@ run_test "diff does not modify target catalog" "[ '$COUNT_BEFORE' = '$COUNT_AFTE
 NULL_RES=$(pg "SELECT pgclone.diff('${SOURCE_CONNINFO}', NULL);" || echo "ERROR")
 run_test "diff is STRICT (NULL arg yields no result)" "[ -z '$NULL_RES' -o '$NULL_RES' = 'ERROR' ]"
 
+# ---- Pre-flight validator (v4.2.0) ----
+echo ""
+echo "---- Pre-flight validator ----"
+
+# Function exists with the documented (text, text) signature
+PF_EXISTS=$(pg "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pgclone' AND p.proname = 'preflight' AND pg_catalog.pg_get_function_arguments(p.oid) = 'source_conninfo text, schema_name text';" || echo "0")
+run_test "pgclone.preflight(text, text) is registered" "[ '$PF_EXISTS' = '1' ]"
+
+# Top-level keys present
+HAS_SCHEMA=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'schema';" || echo "f")
+run_test "preflight JSON contains 'schema' key" "[ '$HAS_SCHEMA' = 't' ]"
+
+HAS_READY=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'ready';" || echo "f")
+run_test "preflight JSON contains 'ready' key" "[ '$HAS_READY' = 't' ]"
+
+HAS_SUMMARY=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'summary';" || echo "f")
+run_test "preflight JSON contains 'summary' key" "[ '$HAS_SUMMARY' = 't' ]"
+
+HAS_CHECKS=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'checks';" || echo "f")
+run_test "preflight JSON contains 'checks' key" "[ '$HAS_CHECKS' = 't' ]"
+
+# ready must be a boolean
+READY_TYPE=$(pg "SELECT jsonb_typeof(pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb -> 'ready');" || echo "")
+run_test "preflight 'ready' is boolean" "[ '$READY_TYPE' = 'boolean' ]"
+
+# summary contains the four documented integer counters
+SUMMARY_KEYS=$(pg "SELECT (pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb -> 'summary') ?& ARRAY['errors','warnings','info','checks_run'];" || echo "f")
+run_test "preflight summary has errors/warnings/info/checks_run" "[ '$SUMMARY_KEYS' = 't' ]"
+
+# checks must include the connection + version + schema-existence checks
+CONN_CHECK=$(pg "SELECT (pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb -> 'checks') ?& ARRAY['source_connection','target_connection','source_version','target_version','schema_exists_source','schema_exists_target'];" || echo "f")
+run_test "preflight checks include conn/version/schema_exists entries" "[ '$CONN_CHECK' = 't' ]"
+
+# Schema name echoed back
+SCHEMA_FIELD=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb ->> 'schema';" || echo "")
+run_test "preflight echoes the requested schema" "[ '$SCHEMA_FIELD' = 'test_schema' ]"
+
+# A non-existent source schema must report not-ready with an error message
+NOTREADY=$(pg "SELECT (pgclone.preflight('${SOURCE_CONNINFO}', 'no_such_schema_pgclone_pf')::jsonb ->> 'ready')::boolean;" || echo "t")
+run_test "preflight reports ready=false for missing source schema" "[ '$NOTREADY' = 'f' ]"
+
+ERR_COUNT=$(pg "SELECT jsonb_array_length((pgclone.preflight('${SOURCE_CONNINFO}', 'no_such_schema_pgclone_pf')::jsonb -> 'errors'));" || echo "0")
+run_test "preflight errors[] non-empty for missing source schema" "[ '$ERR_COUNT' -ge 1 ]"
+
+# name_conflicts.items must always be a JSON array (empty or populated)
+ITEMS_TYPE=$(pg "SELECT jsonb_typeof(pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb #> '{checks,name_conflicts,items}');" || echo "")
+run_test "preflight name_conflicts.items is an array" "[ '$ITEMS_TYPE' = 'array' ]"
+
+# object_counts must report non-negative integers for tables / views / sequences / indexes
+OC_TABLES=$(pg "SELECT (pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb #>> '{checks,object_counts,tables}')::int;" || echo "-1")
+run_test "preflight object_counts.tables is a non-negative integer" "[ '$OC_TABLES' -ge 0 ]"
+
+# version_compat status must be one of pass / warn (never error/skip in this env)
+VC_STATUS=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb #>> '{checks,version_compat,status}';" || echo "")
+run_test "preflight version_compat status is pass or warn" "[ '$VC_STATUS' = 'pass' -o '$VC_STATUS' = 'warn' ]"
+
+# Read-only invariant on the target catalog
+COUNT_BEFORE=$(pg "SELECT count(*)::int FROM information_schema.tables WHERE table_schema = 'test_schema';" || echo "0")
+pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema');" >/dev/null || true
+COUNT_AFTER=$(pg "SELECT count(*)::int FROM information_schema.tables WHERE table_schema = 'test_schema';" || echo "0")
+run_test "preflight does not modify target catalog" "[ '$COUNT_BEFORE' = '$COUNT_AFTER' ]"
+
+# STRICT: NULL schema_name argument yields no row (psql returns empty string)
+NULL_RES=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', NULL);" || echo "ERROR")
+run_test "preflight is STRICT (NULL arg yields no result)" "[ -z '$NULL_RES' -o '$NULL_RES' = 'ERROR' ]"
+
 echo ""
 echo "============================================"
 echo "LOOPBACK TESTS: $PASS passed, $FAIL failed"
