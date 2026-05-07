@@ -167,6 +167,11 @@ echo "---- Pre-flight validator ----"
 PF_EXISTS=$(pg "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pgclone' AND p.proname = 'preflight' AND pg_catalog.pg_get_function_arguments(p.oid) = 'source_conninfo text, schema_name text';" || echo "0")
 run_test "pgclone.preflight(text, text) is registered" "[ '$PF_EXISTS' = '1' ]"
 
+# Diagnostic: dump preflight output WITH stderr so any internal error is visible.
+echo "---- preflight diagnostic dump ----"
+psql -U postgres -d target_db -c "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema');" 2>&1 | head -40 || true
+echo "---- end diagnostic ----"
+
 # Top-level keys present
 HAS_SCHEMA=$(pg "SELECT pgclone.preflight('${SOURCE_CONNINFO}', 'test_schema')::jsonb ? 'schema';" || echo "f")
 run_test "preflight JSON contains 'schema' key" "[ '$HAS_SCHEMA' = 't' ]"
