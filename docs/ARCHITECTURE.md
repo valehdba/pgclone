@@ -23,11 +23,21 @@ pgclone/
 │   │                      #   - Async table/schema clone workers
 │   │                      #   - Worker pool (pgclone_pool_worker_main)
 │   │                      #   - Shared memory progress updates
-│   └── pgclone_bgw.h      # Shared definitions
-│                          #   - Job state struct, status enums
-│                          #   - Shared memory layout (pgclone_state)
-│                          #   - Pool queue struct (PgclonePoolQueue)
-│                          #   - MAX_JOBS, MAX_POOL_TASKS, progress fields
+│   ├── pgclone_bgw.h      # Shared definitions
+│   │                      #   - Job state struct, status enums
+│   │                      #   - Shared memory layout (pgclone_state)
+│   │                      #   - Pool queue struct (PgclonePoolQueue)
+│   │                      #   - MAX_JOBS, MAX_POOL_TASKS, progress fields
+│   ├── pgclone_diff.c     # v4.1.0 — schema drift / DDL diff (~600 lines)
+│   │                      #   - pgclone_diff(): JSON drift report
+│   │                      #   - Read-only on both sides; isolated unit
+│   │                      #   - Self-contained connect helpers + JSON escaper
+│   └── pgclone_preflight.c # v4.2.0 — pre-flight validator (~700 lines)
+│                          #   - pgclone_preflight(): JSON readiness report
+│                          #   - Checks: connection, version, permissions,
+│                          #     capacity, name conflicts, missing
+│                          #     extensions/roles/tablespaces
+│                          #   - Read-only on both sides; isolated unit
 ├── sql/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
@@ -62,6 +72,33 @@ pgclone uses **loopback libpq connections** to the local target database for all
 - Background worker registration requires C (`RegisterDynamicBackgroundWorker`)
 - Shared memory allocation for progress tracking requires C hooks
 - Fine-grained error handling and resource cleanup with `PG_TRY` / `PG_CATCH`
+
+### Isolated Translation Units for Read-Only Features (v4.1.0+)
+
+Read-only feature additions live in their own `.c` files and do **not**
+share helpers with `src/pgclone.c`:
+
+- `src/pgclone_diff.c` (v4.1.0) — `pgclone.diff()`
+- `src/pgclone_preflight.c` (v4.2.0) — `pgclone.preflight()`
+
+Each such file:
+
+1. **Re-implements** the connect / READ ONLY / `quote_literal_cstr` / JSON
+   escape helpers it needs. Duplication is intentional: a bug or
+   refactor in `pgclone.c` cannot regress these features, and the
+   reverse is also true.
+2. **Wraps both source and local connections** in
+   `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` and ends with
+   `ROLLBACK`. The function never executes DDL or DML.
+3. **Returns a single JSON document** assembled with `StringInfo`
+   appends and a local RFC 8259 string escaper (`pgd_escape_json` /
+   `pf_escape_json`) so the feature has zero dependency on
+   `utils/jsonapi.h` (whose location varies across PG versions).
+
+When adding the next read-only feature (e.g. `pgclone.table_sample()`
+in v4.3.0), follow the same pattern: a new `src/pgclone_<name>.c`,
+appended to `OBJS` in the Makefile, with its SQL function declared in
+both the per-version full-install file and the upgrade script.
 
 ### COPY Protocol Data Transfer
 
