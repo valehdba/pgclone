@@ -2,6 +2,30 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.3.0]
+
+### Added
+- **Consistent-snapshot clones** — every clone now reads the source under a `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` transaction, so all per-table COPY commands within a single clone observe the same point-in-time view of the source database. This eliminates the foreign-key violations and partial-state anomalies that v4.2.x and earlier could produce when cloning a live OLTP source. Enabled by default for `pgclone.table()`, `pgclone.schema()`, `pgclone.database()`, `pgclone.table_async()`, `pgclone.schema_async()` (sequential and parallel pool modes).
+- **Cross-connection snapshot sharing** for multi-connection paths — schema and database clones, and parallel pool mode, use `pg_export_snapshot()` / `SET TRANSACTION SNAPSHOT` so every libpq connection involved in a single clone (per-table sub-calls, FK retry, views, matviews, functions, triggers, and every pool worker) binds to one shared snapshot. Same correctness model as `pg_dump -j`.
+- **Snapshot-coordinator background worker** (`pgclone_pool_coordinator_main`) — a dedicated bgworker spawned by `pgclone.schema_async(... '{"parallel": N}')` that opens its own source connection, exports the snapshot, publishes the ID into shared memory for pool workers to import, and sits idle in transaction until every importer has bound, then COMMITs.
+- **Opt-out option** — `'{"consistent": false}'` in any options-JSON disables the wrapping for callers who want lower source-side lock pressure or prefer the v4.2.x behaviour.
+
+### Changed
+- `pgclone.table()` source connection now runs at REPEATABLE READ READ ONLY for the entire clone (was: no transaction, except for an inner READ ONLY wrap when `WHERE` was set). The old per-table inner `BEGIN TRANSACTION READ ONLY` is now a no-op when an outer snapshot transaction is already open, preserving SQL-injection containment in both call paths.
+- `pgclone.schema()` keeps its initial source connection open across all sub-phases as a snapshot keeper. Previously it closed the connection after the table-list read and each sub-phase opened independent connections that could see different points in time.
+- `pgclone.database()` follows the same keeper pattern at one level higher; the snapshot ID is propagated to every per-schema sub-call and on through to per-table sub-calls.
+- `pgclone.schema_async(... '{"parallel": N}')` now launches `N + 1` background workers (one coordinator plus N pool workers) when in consistent mode. The coordinator job appears in `pgclone.jobs_view` like any other job for full progress visibility.
+
+### Tradeoffs documented
+- Long-running clones now hold an open transaction on the source for the entire clone duration, which delays VACUUM cleanup of dead tuples and WAL recycling proportional to clone time. For very long clones on busy sources this may cause table/index bloat and WAL accumulation; opt out with `'{"consistent": false}'` if that is more important than cross-table consistency.
+- Hot-standby sources are supported on PostgreSQL ≥ 10 (where `pg_export_snapshot()` works on hot standby).
+
+### Internal
+- New `CloneOptions.consistent` (bool) and `CloneOptions.snapshot_id[64]` fields plus parser support for `"consistent": false` and `"snapshot_id": "..."` in options JSON.
+- New helpers `pgclone_begin_repeatable_read()`, `pgclone_commit_source()`, `pgclone_export_snapshot()`, `pgclone_begin_with_imported_snapshot()`, `pgclone_setup_source_txn()`, `pgclone_setup_source_txn_done()` in `src/pgclone.c`. Mirror helpers `bgw_begin_repeatable_read()`, `bgw_commit_source()`, `bgw_export_snapshot()`, `bgw_begin_with_imported_snapshot()` in `src/pgclone_bgw.c`.
+- New `PgclonePoolQueue` shared-memory fields: `consistent`, `snapshot_ready`, `snapshot_failed`, `snapshot_imported_count`, `snapshot_expected_workers`, `launch_complete`, `snapshot_id[64]`, `coordinator_job_id`.
+- New `PgcloneJob.consistent` field so the single-worker async path knows whether to wrap in REPEATABLE READ READ ONLY.
+
 ## [4.2.0]
 
 ### Added
