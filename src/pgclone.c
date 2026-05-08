@@ -37,6 +37,11 @@ PG_MODULE_MAGIC;
 #define PGCLONE_MAX_WHERE     2048
 #define PGCLONE_MAX_MASKS     64
 
+/* Snapshot identifiers exported by pg_export_snapshot() are short
+ * (well under 32 bytes in practice — e.g. "00000003-00000ABC-1"); 64
+ * bytes is comfortable padding. */
+#define PGCLONE_SNAPSHOT_ID_LEN  64
+
 /* Mask strategy types */
 typedef enum PgcloneMaskType
 {
@@ -83,6 +88,21 @@ typedef struct CloneOptions
     /* Data masking rules: column-level anonymization */
     int  num_masks;
     MaskRule masks[PGCLONE_MAX_MASKS];
+
+    /* v4.3.0: Consistent snapshot across all source reads.
+     * When true, every source connection runs inside a
+     * REPEATABLE READ READ ONLY transaction; multi-connection
+     * operations (schema, database, parallel pool) share one
+     * snapshot via pg_export_snapshot()/SET TRANSACTION SNAPSHOT
+     * so cross-table reads are FK-consistent. Default true. */
+    bool consistent;
+
+    /* Snapshot ID to import on every source connection. When set
+     * by a parent operation that already exported a snapshot, all
+     * sub-operations import it via SET TRANSACTION SNAPSHOT.
+     * When empty and consistent=true, the operation is a leaf and
+     * just runs in REPEATABLE READ READ ONLY without exporting. */
+    char snapshot_id[PGCLONE_SNAPSHOT_ID_LEN];
 } CloneOptions;
 
 /* Default: everything enabled, no column/where/mask filter */
@@ -99,6 +119,8 @@ pgclone_default_options(void)
     opts.where_clause[0]     = '\0';
     opts.parallel_workers    = 0;
     opts.num_masks           = 0;
+    opts.consistent          = true;     /* v4.3.0: consistent snapshot by default */
+    opts.snapshot_id[0]      = '\0';
     return opts;
 }
 
@@ -135,6 +157,42 @@ pgclone_parse_options(const char *json_str)
     if (strstr(json_str, "\"matviews\": false") != NULL ||
         strstr(json_str, "\"matviews\":false") != NULL)
         opts.include_matviews = false;
+
+    /* v4.3.0: opt-out of consistent-snapshot wrapping */
+    if (strstr(json_str, "\"consistent\": false") != NULL ||
+        strstr(json_str, "\"consistent\":false") != NULL)
+        opts.consistent = false;
+
+    /* v4.3.0: import an externally exported snapshot ID. Parent
+     * operations exporting a snapshot inject this key into the
+     * options JSON they pass to sub-DirectFunctionCalls so every
+     * source connection in the tree shares one snapshot. */
+    {
+        const char *sp = strstr(json_str, "\"snapshot_id\"");
+        if (sp != NULL)
+        {
+            const char *colon = strchr(sp, ':');
+            if (colon != NULL)
+            {
+                const char *qs = strchr(colon, '"');
+                if (qs != NULL)
+                {
+                    const char *qe;
+                    qs++;
+                    qe = strchr(qs, '"');
+                    if (qe != NULL)
+                    {
+                        int len = qe - qs;
+                        if (len > 0 && len < PGCLONE_SNAPSHOT_ID_LEN)
+                        {
+                            memcpy(opts.snapshot_id, qs, len);
+                            opts.snapshot_id[len] = '\0';
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /* Parse "parallel": N */
     {
@@ -645,6 +703,161 @@ pgclone_connect(const char *conninfo)
 }
 
 /* ---------------------------------------------------------------
+ * v4.3.0 Source-side snapshot management
+ *
+ * Every data-reading source connection runs inside a REPEATABLE READ
+ * READ ONLY transaction so that all COPY operations see the same
+ * snapshot of the source database. For multi-connection operations
+ * (schema clone, database clone, parallel pool) the top-level
+ * "keeper" connection exports a snapshot via pg_export_snapshot()
+ * and every other source connection imports it via SET TRANSACTION
+ * SNAPSHOT — the same pattern pg_dump -j uses to give a parallel
+ * dump cross-table consistency.
+ *
+ * The keeper transaction MUST stay alive (idle in transaction) until
+ * every importer has issued SET TRANSACTION SNAPSHOT; once imported,
+ * the importing transaction owns the snapshot independently and the
+ * keeper may safely COMMIT.
+ * --------------------------------------------------------------- */
+
+/* Open BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY on the source
+ * connection. No-op if a transaction is already open on this conn
+ * (e.g. caller already imported a snapshot). */
+static void
+pgclone_begin_repeatable_read(PGconn *conn)
+{
+    PGresult *res;
+
+    if (PQtransactionStatus(conn) == PQTRANS_INTRANS)
+        return;
+
+    res = PQexec(conn, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        char *errmsg_copy = pstrdup(PQerrorMessage(conn));
+        PQclear(res);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not start REPEATABLE READ transaction on source: %s",
+                        errmsg_copy)));
+    }
+    PQclear(res);
+}
+
+/* COMMIT the source transaction. Safe to call when no transaction is
+ * open (becomes a no-op with WARNING suppressed). */
+static void
+pgclone_commit_source(PGconn *conn)
+{
+    PGresult *res;
+
+    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
+        return;
+
+    res = PQexec(conn, "COMMIT");
+    /* Errors here are non-fatal — the connection is about to be
+     * closed anyway. Log at DEBUG so we don't spam normal runs. */
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        elog(DEBUG1, "pgclone: COMMIT on source returned: %s",
+             PQerrorMessage(conn));
+    PQclear(res);
+}
+
+/* Export a snapshot ID from a connection that is already inside a
+ * REPEATABLE READ READ ONLY transaction. Writes the ID into out_id.
+ * The exporting transaction must stay open until all importers have
+ * imported. */
+static void
+pgclone_export_snapshot(PGconn *conn, char *out_id, size_t out_id_len)
+{
+    PGresult *res;
+    const char *snap;
+    size_t      slen;
+
+    res = PQexec(conn, "SELECT pg_catalog.pg_export_snapshot()");
+    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1)
+    {
+        char *errmsg_copy = pstrdup(PQerrorMessage(conn));
+        PQclear(res);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not export snapshot from source: %s",
+                        errmsg_copy)));
+    }
+
+    snap = PQgetvalue(res, 0, 0);
+    slen = strlen(snap);
+    if (slen >= out_id_len)
+    {
+        PQclear(res);
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("pgclone: exported snapshot id is %zu bytes, buffer is %zu",
+                        slen, out_id_len)));
+    }
+    memcpy(out_id, snap, slen);
+    out_id[slen] = '\0';
+    PQclear(res);
+}
+
+/* Open BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY then SET
+ * TRANSACTION SNAPSHOT '<id>'. The keeper that exported this snapshot
+ * must still be alive (idle in transaction) at this point. */
+static void
+pgclone_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
+{
+    PGresult       *res;
+    StringInfoData  cmd;
+
+    pgclone_begin_repeatable_read(conn);
+
+    initStringInfo(&cmd);
+    appendStringInfo(&cmd, "SET TRANSACTION SNAPSHOT %s",
+                     quote_literal_cstr(snapshot_id));
+    res = PQexec(conn, cmd.data);
+    pfree(cmd.data);
+
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        char *errmsg_copy = pstrdup(PQerrorMessage(conn));
+        PQclear(res);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not import snapshot %s on source: %s",
+                        snapshot_id, errmsg_copy)));
+    }
+    PQclear(res);
+}
+
+/* High-level helper: set up the source-side transaction state for a
+ * just-opened source connection according to the CloneOptions:
+ *   - opts NULL or opts->consistent == false: do nothing.
+ *   - opts->snapshot_id non-empty: BEGIN + SET TRANSACTION SNAPSHOT.
+ *   - else: BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY (leaf op).
+ *
+ * Always pair with pgclone_setup_source_txn_done() before PQfinish. */
+static void
+pgclone_setup_source_txn(PGconn *conn, const CloneOptions *opts)
+{
+    if (opts == NULL || !opts->consistent)
+        return;
+    if (opts->snapshot_id[0] != '\0')
+        pgclone_begin_with_imported_snapshot(conn, opts->snapshot_id);
+    else
+        pgclone_begin_repeatable_read(conn);
+}
+
+/* Counterpart to pgclone_setup_source_txn(): COMMIT if a txn was
+ * opened. Always safe to call. */
+static void
+pgclone_setup_source_txn_done(PGconn *conn, const CloneOptions *opts)
+{
+    if (opts == NULL || !opts->consistent)
+        return;
+    pgclone_commit_source(conn);
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: execute a query on a remote connection
  * Returns the PGresult (caller must PQclear it)
  * --------------------------------------------------------------- */
@@ -885,32 +1098,38 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     int64           bytes_transferred = 0;
     int64           row_count = 0;
     bool            use_query_copy;
+    bool            began_local_txn = false;
 
     /* Determine if we need query-based COPY (for columns/WHERE/masks) */
     use_query_copy = (opts != NULL &&
                       (opts->num_columns > 0 || opts->where_clause[0] != '\0' ||
                        opts->num_masks > 0));
 
-    /* Validate and sandbox WHERE clause if present */
+    /* Validate WHERE clause if present. The READ ONLY guarantee that
+     * sandboxes a possibly-injected expression is provided either by
+     * the caller's outer REPEATABLE READ READ ONLY snapshot transaction
+     * (v4.3.0+) or, if the caller didn't open one, by an inner BEGIN
+     * here. began_local_txn tracks which path we took so we can match
+     * BEGIN with COMMIT. */
     if (opts != NULL && opts->where_clause[0] != '\0')
     {
-        PGresult *txres;
-
         pgclone_validate_where_clause(opts->where_clause);
 
-        /* Wrap source query in READ ONLY transaction — prevents any
-         * side effects even if validation is bypassed */
-        txres = PQexec(source_conn, "BEGIN TRANSACTION READ ONLY");
-        if (PQresultStatus(txres) != PGRES_COMMAND_OK)
+        if (PQtransactionStatus(source_conn) != PQTRANS_INTRANS)
         {
-            char *tx_errmsg = pstrdup(PQerrorMessage(source_conn));
+            PGresult *txres = PQexec(source_conn, "BEGIN TRANSACTION READ ONLY");
+            if (PQresultStatus(txres) != PGRES_COMMAND_OK)
+            {
+                char *tx_errmsg = pstrdup(PQerrorMessage(source_conn));
+                PQclear(txres);
+                ereport(ERROR,
+                        (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                         errmsg("pgclone: could not start read-only transaction on source: %s",
+                                tx_errmsg)));
+            }
             PQclear(txres);
-            ereport(ERROR,
-                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                     errmsg("pgclone: could not start read-only transaction on source: %s",
-                            tx_errmsg)));
+            began_local_txn = true;
         }
-        PQclear(txres);
     }
 
     /* Start COPY OUT on source */
@@ -1146,8 +1365,11 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     row_count = atol(PQcmdTuples(res));
     PQclear(res);
 
-    /* Close read-only transaction if WHERE clause was used */
-    if (opts != NULL && opts->where_clause[0] != '\0')
+    /* Close read-only transaction only if we opened it locally. When
+     * the caller already had an outer REPEATABLE READ snapshot txn we
+     * must NOT commit it — that would discard the cross-table
+     * snapshot the rest of the clone depends on. */
+    if (began_local_txn)
     {
         PGresult *txres = PQexec(source_conn, "COMMIT");
         PQclear(txres);
@@ -1597,8 +1819,14 @@ pgclone_table(PG_FUNCTION_ARGS)
             opts.include_triggers = PG_GETARG_BOOL(7);
     }
 
-    /* Connect to source */
+    /* Connect to source. v4.3.0: every read-side query happens inside
+     * a REPEATABLE READ READ ONLY transaction so that the CREATE TABLE
+     * DDL fetch, the data COPY, the constraint/index/trigger DDL
+     * fetches, and the seed sequence fetch all see the same snapshot.
+     * If a parent op (pgclone_schema) already exported a snapshot via
+     * opts.snapshot_id, this connection imports it instead. */
     source_conn = pgclone_connect(source_conninfo);
+    pgclone_setup_source_txn(source_conn, &opts);
 
     /* ---- Step 1: Get CREATE TABLE DDL from source ---- */
     initStringInfo(&buf);
@@ -1670,6 +1898,7 @@ pgclone_table(PG_FUNCTION_ARGS)
     if (PQntuples(res) == 0)
     {
         PQclear(res);
+        pgclone_setup_source_txn_done(source_conn, &opts);
         PQfinish(source_conn);
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_TABLE),
@@ -1762,6 +1991,7 @@ pgclone_table(PG_FUNCTION_ARGS)
             char *ddl_errmsg = pstrdup(PQerrorMessage(local_conn));
             PQclear(local_res);
             PQfinish(local_conn);
+            pgclone_setup_source_txn_done(source_conn, &opts);
             PQfinish(source_conn);
             pfree(ddl);
             ereport(ERROR,
@@ -1819,6 +2049,7 @@ pgclone_table(PG_FUNCTION_ARGS)
     }
 
     PQfinish(local_conn);
+    pgclone_setup_source_txn_done(source_conn, &opts);
     PQfinish(source_conn);
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
@@ -1885,6 +2116,31 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
     source_conn = pgclone_connect(source_conninfo);
     local_conn = pgclone_connect_local();
+
+    /* v4.3.0: Snapshot keeper. The schema clone opens many independent
+     * source connections (one per table via DirectFunctionCall, plus
+     * separate ones for FK retry / views / matviews / functions /
+     * triggers). To make every source read see the same data we
+     * either export a snapshot from this initial connection (when
+     * we're the top of the operation) or import a snapshot exported
+     * by a parent op (e.g. pgclone_database). The source_conn opened
+     * just above stays alive as the keeper for the whole function so
+     * importers always have a live exporting transaction to bind to. */
+    if (opts.consistent)
+    {
+        if (opts.snapshot_id[0] == '\0')
+        {
+            pgclone_begin_repeatable_read(source_conn);
+            pgclone_export_snapshot(source_conn,
+                                     opts.snapshot_id,
+                                     sizeof(opts.snapshot_id));
+        }
+        else
+        {
+            pgclone_begin_with_imported_snapshot(source_conn,
+                                                  opts.snapshot_id);
+        }
+    }
 
     /* ---- Step 1: Create schema ---- */
     initStringInfo(&buf);
@@ -1962,19 +2218,36 @@ pgclone_schema(PG_FUNCTION_ARGS)
             table_names[i] = pstrdup(PQgetvalue(res, i, 0));
     }
     PQclear(res);
-    PQfinish(source_conn);
+    /* v4.3.0: do NOT close source_conn here — it keeps the exported
+     * snapshot alive for the per-table sub-calls and the FK/view/
+     * function/trigger sub-phases below. Closed at end of function. */
 
     /* Build options JSON to pass through to pgclone_table.
      * triggers is forced to false here regardless of opts.include_triggers
      * — Step 8 handles the user-requested trigger pass after functions
-     * exist. */
+     * exist. snapshot_id is propagated so each per-table sub-call's
+     * own source connection imports the same snapshot. */
     {
         StringInfoData opts_json;
         initStringInfo(&opts_json);
-        appendStringInfo(&opts_json,
-            "{\"indexes\": %s, \"constraints\": %s, \"triggers\": false}",
-            opts.include_indexes ? "true" : "false",
-            opts.include_constraints ? "true" : "false");
+        if (opts.consistent && opts.snapshot_id[0] != '\0')
+        {
+            appendStringInfo(&opts_json,
+                "{\"indexes\": %s, \"constraints\": %s, \"triggers\": false, "
+                "\"consistent\": true, \"snapshot_id\": \"%s\"}",
+                opts.include_indexes ? "true" : "false",
+                opts.include_constraints ? "true" : "false",
+                opts.snapshot_id);
+        }
+        else
+        {
+            appendStringInfo(&opts_json,
+                "{\"indexes\": %s, \"constraints\": %s, \"triggers\": false, "
+                "\"consistent\": %s}",
+                opts.include_indexes ? "true" : "false",
+                opts.include_constraints ? "true" : "false",
+                opts.consistent ? "true" : "false");
+        }
 
         for (i = 0; i < ntables; i++)
         {
@@ -2003,6 +2276,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
         PGconn *src_retry  = pgclone_connect(source_conninfo);
         PGconn *lcl_retry  = pgclone_connect_local();
         int     fk_created = 0;
+
+        pgclone_setup_source_txn(src_retry, &opts);
 
         for (i = 0; i < ntables; i++)
         {
@@ -2050,6 +2325,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
                  fk_created, schema_name);
 
         PQfinish(lcl_retry);
+        pgclone_setup_source_txn_done(src_retry, &opts);
         PQfinish(src_retry);
     }
 
@@ -2057,6 +2333,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
     {
         PGconn *src_views = pgclone_connect(source_conninfo);
         PGconn *lcl_views = pgclone_connect_local();
+
+        pgclone_setup_source_txn(src_views, &opts);
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
@@ -2150,6 +2428,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
         }
 
         PQfinish(lcl_views);
+        pgclone_setup_source_txn_done(src_views, &opts);
         PQfinish(src_views);
     }
 
@@ -2167,6 +2446,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
         PGconn *src_funcs = pgclone_connect(source_conninfo);
         PGconn *lcl_funcs = pgclone_connect_local();
         int     fcount;
+
+        pgclone_setup_source_txn(src_funcs, &opts);
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
@@ -2187,6 +2468,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
         PQclear(res);
 
         PQfinish(lcl_funcs);
+        pgclone_setup_source_txn_done(src_funcs, &opts);
         PQfinish(src_funcs);
     }
 
@@ -2203,6 +2485,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
         PGconn *lcl_trig = pgclone_connect_local();
         int     trig_total = 0;
 
+        pgclone_setup_source_txn(src_trig, &opts);
+
         for (i = 0; i < ntables; i++)
         {
             int n = pgclone_triggers(src_trig, lcl_trig,
@@ -2216,6 +2500,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
                  trig_total, schema_name);
 
         PQfinish(lcl_trig);
+        pgclone_setup_source_txn_done(src_trig, &opts);
         PQfinish(src_trig);
     }
 
@@ -2225,6 +2510,12 @@ pgclone_schema(PG_FUNCTION_ARGS)
             pfree(table_names[i]);
         pfree(table_names);
     }
+
+    /* v4.3.0: close the snapshot keeper. Every importer that needed
+     * the snapshot has long since called SET TRANSACTION SNAPSHOT
+     * (or finished its own clone), so committing here is safe. */
+    pgclone_setup_source_txn_done(source_conn, &opts);
+    PQfinish(source_conn);
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
@@ -2321,6 +2612,22 @@ pgclone_database(PG_FUNCTION_ARGS)
 
     source_conn = pgclone_connect(source_conninfo);
 
+    /* v4.3.0: Database clone is the outermost operation, so it owns
+     * the snapshot keeper. Each per-schema sub-call inherits the
+     * snapshot id via the JSON options and uses it for every source
+     * connection it opens (including its per-table sub-calls). */
+    if (opts.consistent && opts.snapshot_id[0] == '\0')
+    {
+        pgclone_begin_repeatable_read(source_conn);
+        pgclone_export_snapshot(source_conn,
+                                 opts.snapshot_id,
+                                 sizeof(opts.snapshot_id));
+    }
+    else if (opts.consistent)
+    {
+        pgclone_begin_with_imported_snapshot(source_conn, opts.snapshot_id);
+    }
+
     res = pgclone_exec(source_conn,
         "SELECT nspname FROM pg_catalog.pg_namespace "
         "WHERE nspname NOT LIKE 'pg_%' "
@@ -2334,16 +2641,32 @@ pgclone_database(PG_FUNCTION_ARGS)
         schema_names[i] = pstrdup(PQgetvalue(res, i, 0));
 
     PQclear(res);
-    PQfinish(source_conn);
+    /* Keep source_conn alive as the snapshot keeper across all
+     * per-schema sub-calls; close it after the loop. */
 
     {
         StringInfoData opts_json;
         initStringInfo(&opts_json);
-        appendStringInfo(&opts_json,
-            "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s}",
-            opts.include_indexes ? "true" : "false",
-            opts.include_constraints ? "true" : "false",
-            opts.include_triggers ? "true" : "false");
+        if (opts.consistent && opts.snapshot_id[0] != '\0')
+        {
+            appendStringInfo(&opts_json,
+                "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s, "
+                "\"consistent\": true, \"snapshot_id\": \"%s\"}",
+                opts.include_indexes ? "true" : "false",
+                opts.include_constraints ? "true" : "false",
+                opts.include_triggers ? "true" : "false",
+                opts.snapshot_id);
+        }
+        else
+        {
+            appendStringInfo(&opts_json,
+                "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s, "
+                "\"consistent\": %s}",
+                opts.include_indexes ? "true" : "false",
+                opts.include_constraints ? "true" : "false",
+                opts.include_triggers ? "true" : "false",
+                opts.consistent ? "true" : "false");
+        }
 
         for (i = 0; i < nschemas; i++)
         {
@@ -2370,6 +2693,9 @@ pgclone_database(PG_FUNCTION_ARGS)
     for (i = 0; i < nschemas; i++)
         pfree(schema_names[i]);
     pfree(schema_names);
+
+    pgclone_setup_source_txn_done(source_conn, &opts);
+    PQfinish(source_conn);
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
@@ -4194,6 +4520,7 @@ pgclone_table_async(PG_FUNCTION_ARGS)
     job->include_triggers    = opts.include_triggers;
     job->conflict_strategy   = conflict;
     job->resumable           = true;
+    job->consistent          = opts.consistent;
 
     LWLockRelease(pgclone_state->lock);
 
@@ -4470,6 +4797,20 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         strlcpy(pgclone_state->pool.username,
                 GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
 
+        /* v4.3.0: consistent-snapshot coordination flags. The
+         * coordinator bgworker (launched below if consistent) will
+         * set snapshot_id + snapshot_ready; pool workers wait for
+         * those before importing. num_workers is incremented per
+         * successful launch later, so we don't pre-set it here —
+         * the coordinator polls until imported_count reaches the
+         * post-launch value. */
+        pgclone_state->pool.consistent = opts.consistent;
+        pgclone_state->pool.snapshot_ready = false;
+        pgclone_state->pool.snapshot_failed = false;
+        pgclone_state->pool.snapshot_imported_count = 0;
+        pgclone_state->pool.snapshot_id[0] = '\0';
+        pgclone_state->pool.coordinator_job_id = 0;
+
         {
             int ti;
             for (ti = 0; ti < ntables; ti++)
@@ -4485,6 +4826,95 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
 
         PQclear(table_res);
         pfree(qbuf.data);
+
+        /* v4.3.0: Launch the snapshot coordinator FIRST (when
+         * consistent). The coordinator opens its own source
+         * connection, BEGINs REPEATABLE READ READ ONLY, calls
+         * pg_export_snapshot() and publishes the ID into shared
+         * memory. Pool workers then import that snapshot — every
+         * COPY across every worker therefore reads the same
+         * point-in-time view of the source. The coordinator stays
+         * alive until every importer has bound to the snapshot,
+         * then COMMITs. */
+        if (opts.consistent)
+        {
+            BackgroundWorker        coord_worker;
+            BackgroundWorkerHandle *coord_handle;
+            PgcloneJob             *coord_job;
+            int                     coord_job_id;
+
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            coord_job = find_free_slot();
+            if (!coord_job)
+            {
+                LWLockRelease(pgclone_state->lock);
+                ereport(ERROR,
+                        (errmsg("pgclone: no free job slot for snapshot coordinator")));
+            }
+
+            coord_job_id = pgclone_state->next_job_id++;
+            memset(coord_job, 0, sizeof(PgcloneJob));
+            coord_job->job_id = coord_job_id;
+            coord_job->status = PGCLONE_JOB_PENDING;
+            coord_job->op_type = PGCLONE_OP_SCHEMA;
+            coord_job->database_oid = MyDatabaseId;
+            strlcpy(coord_job->database_name,
+                    get_database_name(MyDatabaseId), NAMEDATALEN);
+            strlcpy(coord_job->username,
+                    GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
+            strlcpy(coord_job->source_conninfo, source_conninfo,
+                    sizeof(coord_job->source_conninfo));
+            strlcpy(coord_job->schema_name, schema_name, NAMEDATALEN);
+            coord_job->consistent = true;
+            /* Sentinel: coordinator is not a regular bgw, just a holder. */
+            coord_job->parallel_workers = -2;
+
+            pgclone_state->pool.coordinator_job_id = coord_job_id;
+            LWLockRelease(pgclone_state->lock);
+
+            memset(&coord_worker, 0, sizeof(BackgroundWorker));
+            snprintf(coord_worker.bgw_name, BGW_MAXLEN,
+                     "pgclone: snapshot coordinator (parent %d)",
+                     parent_job_id);
+            snprintf(coord_worker.bgw_type, BGW_MAXLEN,
+                     "pgclone snapshot coordinator");
+            coord_worker.bgw_flags =
+                BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+            coord_worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+            coord_worker.bgw_restart_time = BGW_NEVER_RESTART;
+            snprintf(coord_worker.bgw_library_name, BGW_MAXLEN, "pgclone");
+            snprintf(coord_worker.bgw_function_name, BGW_MAXLEN,
+                     "pgclone_pool_coordinator_main");
+            coord_worker.bgw_main_arg = Int32GetDatum(coord_job_id);
+            coord_worker.bgw_notify_pid = MyProcPid;
+
+            if (!RegisterDynamicBackgroundWorker(&coord_worker, &coord_handle))
+            {
+                LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+                coord_job->status = PGCLONE_JOB_FAILED;
+                pgclone_state->pool.snapshot_failed = true;
+                LWLockRelease(pgclone_state->lock);
+                ereport(ERROR,
+                        (errmsg("pgclone: could not register snapshot coordinator")));
+            }
+            else
+            {
+                BgwHandleStatus cstatus;
+                pid_t           cpid;
+
+                cstatus = WaitForBackgroundWorkerStartup(coord_handle, &cpid);
+                if (cstatus != BGWH_STARTED)
+                {
+                    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+                    coord_job->status = PGCLONE_JOB_FAILED;
+                    pgclone_state->pool.snapshot_failed = true;
+                    LWLockRelease(pgclone_state->lock);
+                    ereport(ERROR,
+                            (errmsg("pgclone: snapshot coordinator failed to start (status=%d)",
+                                    cstatus)));
+                }
+            }
+        }
 
         /* Launch exactly N pool workers */
         for (wi = 0; wi < num_workers; wi++)
@@ -4563,7 +4993,11 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
                         (errmsg("pgclone: could not register pool worker %d", wi)));
         }
 
-        /* Update parent job with worker count */
+        /* Update parent job with worker count and unblock the
+         * snapshot coordinator. snapshot_expected_workers tells the
+         * coordinator how many SET TRANSACTION SNAPSHOT calls to
+         * wait for; launch_complete tells it foreground is done
+         * launching (workers_launched is now stable). */
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
         {
             PgcloneJob *pj = find_job(parent_job_id);
@@ -4576,8 +5010,12 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
                     pj->status = PGCLONE_JOB_FAILED;
                     pj->end_time = GetCurrentTimestamp();
                     pgclone_state->pool.active = false;
+                    /* Signal coordinator to abort: no importers will arrive */
+                    pgclone_state->pool.snapshot_failed = true;
                 }
             }
+            pgclone_state->pool.snapshot_expected_workers = workers_launched;
+            pgclone_state->pool.launch_complete = true;
         }
         LWLockRelease(pgclone_state->lock);
 
@@ -4622,6 +5060,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         job->include_triggers    = opts.include_triggers;
         job->conflict_strategy   = conflict;
         job->resumable           = true;
+        job->consistent          = opts.consistent;
 
         LWLockRelease(pgclone_state->lock);
 

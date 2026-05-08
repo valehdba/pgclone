@@ -49,6 +49,38 @@ postgresql://username:password@hostname:5432/database
 
 ---
 
+## Consistent-snapshot clones (v4.3.0+)
+
+Every clone — `pgclone.table()`, `pgclone.schema()`, `pgclone.database()`, `pgclone.table_async()`, `pgclone.schema_async()` (sequential and parallel pool) — runs the source-side reads inside a `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` transaction by default. Multi-connection paths (schema/database clones, parallel pool) export a snapshot from one keeper connection and import it on every other connection via `SET TRANSACTION SNAPSHOT`, the same correctness model as `pg_dump -j`.
+
+**What this gives you:** every per-table COPY across the entire clone reads the same point-in-time view of the source. Cross-table foreign keys, parent/child relationships, and any other invariant that holds at a single instant on the source is preserved in the clone — even when the source is taking concurrent writes.
+
+**What it costs:** the clone holds an open transaction on the source for the full duration of the clone, which delays VACUUM and WAL recycling on the source proportionally. On very long clones against busy sources this can cause table/index bloat and WAL accumulation.
+
+**Opt-out per call** (when lower source-side lock pressure matters more than cross-table consistency):
+
+```sql
+SELECT pgclone.schema(
+    'host=source-server dbname=mydb user=postgres',
+    'sales',
+    true,
+    '{"consistent": false}'
+);
+
+SELECT pgclone.schema_async(
+    'host=source-server dbname=mydb user=postgres',
+    'sales',
+    true,
+    '{"parallel": 4, "consistent": false}'
+);
+```
+
+In parallel pool mode (`schema_async` with `"parallel": N`), pgclone launches one extra background worker that holds the source-side keeper transaction; you'll see it as `pgclone: snapshot coordinator` in `pgclone.jobs_view`. It exits as soon as every pool worker has bound to the snapshot.
+
+Hot-standby sources are supported on PostgreSQL ≥ 10.
+
+---
+
 ## Table Cloning
 
 ### Clone a table with data

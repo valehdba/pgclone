@@ -100,6 +100,22 @@ in v4.3.0), follow the same pattern: a new `src/pgclone_<name>.c`,
 appended to `OBJS` in the Makefile, with its SQL function declared in
 both the per-version full-install file and the upgrade script.
 
+### Consistent-snapshot clones (v4.3.0+)
+
+Every clone wraps source-side reads in a `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` transaction. For multi-connection operations — schema clones (per-table sub-calls plus FK retry / views / matviews / functions / triggers passes), database clones, and parallel pool mode — one keeper connection exports a snapshot via `pg_export_snapshot()` and every other source connection imports it via `SET TRANSACTION SNAPSHOT`. This is the correctness model `pg_dump -j` uses for parallel-dump consistency.
+
+Three call patterns:
+
+1. **Single-connection sync (`pgclone.table()`)** — the source connection BEGINs at REPEATABLE READ READ ONLY for the function body, COMMITs at the end. No snapshot export needed because nothing else opens its own source connection.
+
+2. **Multi-connection sync (`pgclone.schema()`, `pgclone.database()`)** — the initial source connection becomes the snapshot keeper. It exports a snapshot ID (or imports one passed via JSON options when nested under another consistent op) and stays open for the full duration of the clone. Every sub-DirectFunctionCall and every later libpq connection (FK retry, views, matviews, functions, triggers) receives the snapshot ID through the options JSON and `SET TRANSACTION SNAPSHOT` on its own source connection.
+
+3. **Parallel pool async (`pgclone.schema_async(... '{"parallel": N}')`)** — a dedicated `pgclone_pool_coordinator_main` background worker is launched first. It opens its own source connection, BEGINs, calls `pg_export_snapshot()`, publishes the ID to shared memory (`PgclonePoolQueue.snapshot_id`) and sets `snapshot_ready = true`. The N pool workers wait on a latch for the flag, import the snapshot, and bump `snapshot_imported_count`. The coordinator COMMITs and exits once `imported_count == snapshot_expected_workers && launch_complete` — at which point every importer's own transaction independently owns the snapshot.
+
+Failure handling: if any pool worker fails to import, it sets `pool.snapshot_failed = true`; the coordinator and every other worker that hasn't yet bound abort cleanly. If the coordinator fails before publishing, workers time out (~60s wait) and report failure. The coordinator caps its hold at ~10 minutes regardless.
+
+Opt-out: `'{"consistent": false}'` in any options-JSON skips all of the above and runs with v4.2.x semantics. The keeper connection is then closed immediately after the table-list read like before, and the pool coordinator is not launched.
+
 ### COPY Protocol Data Transfer
 
 Data is transferred using PostgreSQL's COPY protocol, which is significantly faster than row-by-row INSERT:

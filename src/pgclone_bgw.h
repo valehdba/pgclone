@@ -69,6 +69,11 @@ typedef struct PgcloneJob
     PgcloneConflictStrategy conflict_strategy;
     int             parallel_workers;   /* 0 = sequential */
 
+    /* v4.3.0: when true, this job's source connection runs inside a
+     * REPEATABLE READ READ ONLY transaction so all per-table COPY
+     * commands see one consistent snapshot. Default true. */
+    bool            consistent;
+
     /* Progress tracking */
     int64           total_tables;
     int64           completed_tables;
@@ -132,6 +137,23 @@ typedef struct PgclonePoolQueue
     int             num_workers;
     int             worker_job_ids[PGCLONE_MAX_JOBS];
 
+    /* v4.3.0: Consistent snapshot coordination. The pool coordinator
+     * bgworker exports a snapshot from its source connection and
+     * publishes the ID here. Each pool worker waits for snapshot_ready,
+     * imports the snapshot via SET TRANSACTION SNAPSHOT, then bumps
+     * snapshot_imported_count. The coordinator commits its keeper
+     * transaction once all workers have imported (or coordinator_done
+     * is signalled). When consistent is false the coordinator is not
+     * launched and these fields stay zeroed. */
+    bool            consistent;
+    bool            snapshot_ready;     /* coordinator → workers */
+    bool            snapshot_failed;    /* coordinator → workers (abort signal) */
+    int             snapshot_imported_count;  /* workers → coordinator */
+    int             snapshot_expected_workers;  /* set by foreground after launch */
+    bool            launch_complete;    /* foreground → coordinator (workers all registered) */
+    char            snapshot_id[64];
+    int             coordinator_job_id;
+
     PgclonePoolTask tasks[PGCLONE_MAX_POOL_TASKS];
 } PgclonePoolQueue;
 
@@ -151,9 +173,11 @@ extern PgcloneSharedState *pgclone_state;
 #if defined(__GNUC__) || defined(__clang__)
 extern __attribute__((visibility("default"))) void pgclone_bgw_main(Datum main_arg);
 extern __attribute__((visibility("default"))) void pgclone_pool_worker_main(Datum main_arg);
+extern __attribute__((visibility("default"))) void pgclone_pool_coordinator_main(Datum main_arg);
 #else
 extern PGDLLEXPORT void pgclone_bgw_main(Datum main_arg);
 extern PGDLLEXPORT void pgclone_pool_worker_main(Datum main_arg);
+extern PGDLLEXPORT void pgclone_pool_coordinator_main(Datum main_arg);
 #endif
 extern Size pgclone_shmem_size(void);
 extern void pgclone_shmem_init(void);

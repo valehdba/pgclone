@@ -22,6 +22,7 @@
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
+#include "utils/wait_event.h"
 #include "commands/dbcommands.h"
 #include "utils/guc.h"
 #include "libpq-fe.h"
@@ -184,6 +185,114 @@ bgw_exec(PGconn *conn, const char *query)
 
     PQclear(res);
     return ok;
+}
+
+/* ---------------------------------------------------------------
+ * v4.3.0 Source-side snapshot helpers (bgw copy).
+ *
+ * Mirror of the helpers in pgclone.c — duplicated rather than
+ * exported to keep pgclone_bgw.c as an isolated translation unit.
+ * Used to wrap source connections inside REPEATABLE READ READ ONLY
+ * transactions and (for the pool case) export/import a shared
+ * snapshot via pg_export_snapshot() / SET TRANSACTION SNAPSHOT.
+ *
+ * Returns true on success, false on failure (caller decides whether
+ * to abort the job — these are non-fatal at the helper level).
+ * --------------------------------------------------------------- */
+static bool
+bgw_begin_repeatable_read(PGconn *conn)
+{
+    PGresult *res;
+
+    if (PQtransactionStatus(conn) == PQTRANS_INTRANS)
+        return true;
+
+    res = PQexec(conn, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        elog(WARNING, "pgclone bgw: BEGIN REPEATABLE READ failed: %s",
+             PQerrorMessage(conn));
+        PQclear(res);
+        return false;
+    }
+    PQclear(res);
+    return true;
+}
+
+static void
+bgw_commit_source(PGconn *conn)
+{
+    PGresult *res;
+
+    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
+        return;
+
+    res = PQexec(conn, "COMMIT");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        elog(DEBUG1, "pgclone bgw: COMMIT on source returned: %s",
+             PQerrorMessage(conn));
+    PQclear(res);
+}
+
+/* Export the current transaction's snapshot into out_id.
+ * conn must already be in a REPEATABLE READ READ ONLY transaction. */
+static bool
+bgw_export_snapshot(PGconn *conn, char *out_id, size_t out_id_len)
+{
+    PGresult   *res;
+    const char *snap;
+    size_t      slen;
+
+    res = PQexec(conn, "SELECT pg_catalog.pg_export_snapshot()");
+    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1)
+    {
+        elog(WARNING, "pgclone bgw: pg_export_snapshot failed: %s",
+             PQerrorMessage(conn));
+        PQclear(res);
+        return false;
+    }
+    snap = PQgetvalue(res, 0, 0);
+    slen = strlen(snap);
+    if (slen >= out_id_len)
+    {
+        elog(WARNING, "pgclone bgw: exported snapshot id is %zu bytes, buffer is %zu",
+             slen, out_id_len);
+        PQclear(res);
+        return false;
+    }
+    memcpy(out_id, snap, slen);
+    out_id[slen] = '\0';
+    PQclear(res);
+    return true;
+}
+
+/* BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY then SET TRANSACTION SNAPSHOT '<id>'.
+ * The exporting connection must still be alive (idle in transaction). */
+static bool
+bgw_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
+{
+    PGresult       *res;
+    StringInfoData  cmd;
+
+    if (!bgw_begin_repeatable_read(conn))
+        return false;
+
+    initStringInfo(&cmd);
+    /* snapshot ids are well-formed and short, but use parameterized
+     * literal quoting for defence-in-depth. */
+    appendStringInfo(&cmd, "SET TRANSACTION SNAPSHOT '%s'", snapshot_id);
+    res = PQexec(conn, cmd.data);
+    pfree(cmd.data);
+
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+    {
+        elog(WARNING, "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s",
+             snapshot_id, PQerrorMessage(conn));
+        PQclear(res);
+        return false;
+    }
+    PQclear(res);
+    return true;
 }
 
 /* ---------------------------------------------------------------
@@ -637,6 +746,26 @@ pgclone_bgw_main(Datum main_arg)
         PQclear(sp_res);
     }
 
+    /* v4.3.0: Wrap the source connection in a REPEATABLE READ READ
+     * ONLY transaction so every per-table COPY in this single-worker
+     * clone sees the same snapshot. Cross-table FK consistency
+     * requires this — without it, schema_async on a live source can
+     * observe FK violations between independently-snapshot-ed
+     * COPY commands. */
+    if (job->consistent)
+    {
+        if (!bgw_begin_repeatable_read(source_conn))
+        {
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            job->status = PGCLONE_JOB_FAILED;
+            strlcpy(job->error_message,
+                    "could not start REPEATABLE READ transaction on source", 256);
+            job->end_time = GetCurrentTimestamp();
+            LWLockRelease(pgclone_state->lock);
+            goto cleanup;
+        }
+    }
+
     local_conn = bgw_connect_local(dbname, port, job->username);
     if (!local_conn)
     {
@@ -794,7 +923,10 @@ pgclone_bgw_main(Datum main_arg)
 
 cleanup:
     if (source_conn)
+    {
+        bgw_commit_source(source_conn);
         PQfinish(source_conn);
+    }
     if (local_conn)
         PQfinish(local_conn);
 
@@ -887,6 +1019,82 @@ pgclone_pool_worker_main(Datum main_arg)
         job->end_time = GetCurrentTimestamp();
         LWLockRelease(pgclone_state->lock);
         goto pool_cleanup;
+    }
+
+    /* v4.3.0: When the pool runs in consistent mode, the coordinator
+     * has BEGIN'd a REPEATABLE READ READ ONLY transaction on its own
+     * source connection and called pg_export_snapshot(). We wait for
+     * that snapshot to be published, then import it on this worker's
+     * source connection so every COPY across every worker reads the
+     * same point-in-time snapshot. This is the same pattern pg_dump -j
+     * uses for parallel dump consistency. */
+    if (pgclone_state->pool.consistent)
+    {
+        bool ready = false;
+        bool failed = false;
+        char snap_buf[64];
+        int  attempts;
+
+        snap_buf[0] = '\0';
+        for (attempts = 0; attempts < 600; attempts++)  /* up to ~60s */
+        {
+            CHECK_FOR_INTERRUPTS();
+            LWLockAcquire(pgclone_state->lock, LW_SHARED);
+            if (pgclone_state->pool.snapshot_failed)
+                failed = true;
+            else if (pgclone_state->pool.snapshot_ready)
+            {
+                strlcpy(snap_buf, pgclone_state->pool.snapshot_id, sizeof(snap_buf));
+                ready = true;
+            }
+            if (job->status == PGCLONE_JOB_CANCELLED)
+                failed = true;
+            LWLockRelease(pgclone_state->lock);
+
+            if (ready || failed)
+                break;
+
+            (void) WaitLatch(MyLatch,
+                             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+                             100L,
+                             PG_WAIT_EXTENSION);
+            ResetLatch(MyLatch);
+        }
+
+        if (!ready || failed)
+        {
+            elog(WARNING, "pgclone pool worker: snapshot %s",
+                 failed ? "publish failed" : "publish timed out");
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            job->status = PGCLONE_JOB_FAILED;
+            strlcpy(job->error_message,
+                    failed ? "snapshot coordinator reported failure"
+                           : "timed out waiting for snapshot",
+                    256);
+            job->end_time = GetCurrentTimestamp();
+            LWLockRelease(pgclone_state->lock);
+            goto pool_cleanup;
+        }
+
+        if (!bgw_begin_with_imported_snapshot(source_conn, snap_buf))
+        {
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            job->status = PGCLONE_JOB_FAILED;
+            strlcpy(job->error_message,
+                    "could not import shared snapshot on source", 256);
+            job->end_time = GetCurrentTimestamp();
+            /* Signal coordinator to abort cleanly */
+            pgclone_state->pool.snapshot_failed = true;
+            LWLockRelease(pgclone_state->lock);
+            goto pool_cleanup;
+        }
+
+        /* Tell the coordinator we're now bound to its snapshot.
+         * Once imported_count reaches num_workers the coordinator may
+         * COMMIT and exit; our own transaction owns the snapshot. */
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        pgclone_state->pool.snapshot_imported_count++;
+        LWLockRelease(pgclone_state->lock);
     }
 
     /* Main loop: grab tasks from pool queue until exhausted */
@@ -1035,9 +1243,198 @@ pgclone_pool_worker_main(Datum main_arg)
 
 pool_cleanup:
     if (source_conn)
+    {
+        bgw_commit_source(source_conn);
         PQfinish(source_conn);
+    }
     if (local_conn)
         PQfinish(local_conn);
+
+    proc_exit(0);
+}
+
+/* ===============================================================
+ * Pool snapshot coordinator
+ *
+ * A short-lived bgworker that exists only to hold the source-side
+ * REPEATABLE READ READ ONLY transaction whose snapshot every pool
+ * worker imports. It connects to source, BEGIN's, calls
+ * pg_export_snapshot(), publishes the ID into shared memory, and
+ * then sits idle in transaction until every worker has imported.
+ * Once imported_count == num_workers (or a timeout / failure /
+ * cancellation fires) it COMMITs and exits. The keeper transaction
+ * MUST stay alive at least until each importer has issued
+ * SET TRANSACTION SNAPSHOT — after that, importers' own transactions
+ * own the snapshot independently, and the keeper is free to release.
+ *
+ * The job_id passed in main_arg is a tracking job slot in jobs[]
+ * (similar to a regular pool worker). Status transitions mirror
+ * pgclone_pool_worker_main(), so existing progress queries continue
+ * to work.
+ * =============================================================== */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("default")))
+#endif
+void
+pgclone_pool_coordinator_main(Datum main_arg)
+{
+    int             job_id = DatumGetInt32(main_arg);
+    PgcloneJob     *job;
+    PGconn         *source_conn = NULL;
+
+    /* Signal handlers */
+#if PG_VERSION_NUM >= 170000
+    pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+#else
+    pqsignal(SIGTERM, die);
+#endif
+    BackgroundWorkerUnblockSignals();
+
+    if (!pgclone_state)
+    {
+        elog(ERROR, "pgclone pool coordinator: shared memory not initialized");
+        return;
+    }
+
+    /* Find tracking job and mark running */
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+    job = find_job(job_id);
+    if (!job || job->status != PGCLONE_JOB_PENDING)
+    {
+        LWLockRelease(pgclone_state->lock);
+        elog(ERROR, "pgclone pool coordinator: job %d not found or not pending",
+             job_id);
+        return;
+    }
+    job->status = PGCLONE_JOB_RUNNING;
+    job->worker_pid = MyProcPid;
+    job->start_time = GetCurrentTimestamp();
+    strlcpy(job->current_phase, "exporting snapshot", 64);
+    LWLockRelease(pgclone_state->lock);
+
+    /* Required for any libpq operation in a bgworker context */
+    BackgroundWorkerInitializeConnectionByOid(job->database_oid, InvalidOid, 0);
+
+    source_conn = PQconnectdb(pgclone_state->pool.source_conninfo);
+    if (PQstatus(source_conn) != CONNECTION_OK)
+    {
+        elog(WARNING, "pgclone pool coordinator: source connection failed: %s",
+             PQerrorMessage(source_conn));
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        pgclone_state->pool.snapshot_failed = true;
+        job->status = PGCLONE_JOB_FAILED;
+        strlcpy(job->error_message, "could not connect to source", 256);
+        job->end_time = GetCurrentTimestamp();
+        LWLockRelease(pgclone_state->lock);
+        goto coord_cleanup;
+    }
+
+    /* Pin source search_path — same rationale as bgw_main. */
+    {
+        PGresult *sp_res = PQexec(source_conn, "SET search_path = pg_catalog");
+        PQclear(sp_res);
+    }
+
+    if (!bgw_begin_repeatable_read(source_conn))
+    {
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        pgclone_state->pool.snapshot_failed = true;
+        job->status = PGCLONE_JOB_FAILED;
+        strlcpy(job->error_message,
+                "could not BEGIN REPEATABLE READ on source", 256);
+        job->end_time = GetCurrentTimestamp();
+        LWLockRelease(pgclone_state->lock);
+        goto coord_cleanup;
+    }
+
+    {
+        char snap[64];
+
+        if (!bgw_export_snapshot(source_conn, snap, sizeof(snap)))
+        {
+            LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+            pgclone_state->pool.snapshot_failed = true;
+            job->status = PGCLONE_JOB_FAILED;
+            strlcpy(job->error_message,
+                    "pg_export_snapshot failed on source", 256);
+            job->end_time = GetCurrentTimestamp();
+            LWLockRelease(pgclone_state->lock);
+            goto coord_cleanup;
+        }
+
+        LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+        strlcpy(pgclone_state->pool.snapshot_id, snap,
+                sizeof(pgclone_state->pool.snapshot_id));
+        pgclone_state->pool.snapshot_ready = true;
+        strlcpy(job->current_phase, "holding snapshot", 64);
+        LWLockRelease(pgclone_state->lock);
+
+        elog(DEBUG1, "pgclone pool coordinator: published snapshot %s", snap);
+    }
+
+    /* Wait until every pool worker has imported the snapshot, then
+     * COMMIT to release the keeper transaction. The foreground sets
+     * snapshot_expected_workers (and launch_complete) once all
+     * worker bgworkers have been registered. If a worker fails to
+     * import it sets snapshot_failed and we abort, which cancels
+     * every other worker's wait loop as well. Cap at ~10 minutes —
+     * far longer than any reasonable startup. */
+    {
+        int attempts;
+
+        for (attempts = 0; attempts < 6000; attempts++)  /* up to ~10min */
+        {
+            int  imported;
+            int  target;
+            bool failed;
+            bool cancelled;
+            bool launch_done;
+
+            CHECK_FOR_INTERRUPTS();
+
+            LWLockAcquire(pgclone_state->lock, LW_SHARED);
+            imported    = pgclone_state->pool.snapshot_imported_count;
+            target      = pgclone_state->pool.snapshot_expected_workers;
+            failed      = pgclone_state->pool.snapshot_failed;
+            launch_done = pgclone_state->pool.launch_complete;
+            cancelled   = (job->status == PGCLONE_JOB_CANCELLED);
+            LWLockRelease(pgclone_state->lock);
+
+            if (failed || cancelled)
+            {
+                LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+                pgclone_state->pool.snapshot_failed = true;
+                LWLockRelease(pgclone_state->lock);
+                break;
+            }
+            /* Only release the keeper after foreground has finished
+             * launching every worker AND each launched worker has
+             * imported. Releasing earlier would race with a still-
+             * launching importer. */
+            if (launch_done && imported >= target)
+                break;
+
+            (void) WaitLatch(MyLatch,
+                             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+                             100L,
+                             PG_WAIT_EXTENSION);
+            ResetLatch(MyLatch);
+        }
+    }
+
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+    if (job->status == PGCLONE_JOB_RUNNING)
+        job->status = PGCLONE_JOB_COMPLETED;
+    job->end_time = GetCurrentTimestamp();
+    strlcpy(job->current_phase, "snapshot released", 64);
+    LWLockRelease(pgclone_state->lock);
+
+coord_cleanup:
+    if (source_conn)
+    {
+        bgw_commit_source(source_conn);
+        PQfinish(source_conn);
+    }
 
     proc_exit(0);
 }
