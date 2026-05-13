@@ -20,3 +20,5 @@ regression.out
 # OS files
 .DS_Store
 Thumbs.db
+.claude/
+INSTRUCTIONS.md
