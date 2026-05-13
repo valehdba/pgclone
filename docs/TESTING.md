@@ -67,7 +67,7 @@ Located in `test/test_consistent.sh`. Builds a parent/child schema with a foreig
 
 ### 6. Snapshot-Keeper Resilience Tests (v4.3.1, issue #9)
 
-Located in `test/test_snapshot_keeper.sh`. Four groups, 14 assertions, exercising every layer of the v4.3.1 fix:
+Located in `test/test_snapshot_keeper.sh`. Five groups, ~20 assertions, exercising every layer of the v4.3.1 and v4.3.2 fixes:
 
 | Group | What it stresses | Assertions |
 |---|---|---|
@@ -75,8 +75,9 @@ Located in `test/test_snapshot_keeper.sh`. Four groups, 14 assertions, exercisin
 | 2 | `SET LOCAL statement_timeout = 0` on keeper (sets `statement_timeout = 1s` on source role and runs a 2-table schema clone — confirms both keeper queries and importer `COPY`s are protected) | 4 |
 | 3 | `pgclone.database_create()` keeper across the outer per-schema loop (two-schema source, tight `idle_in_transaction_session_timeout`, fresh target DB) | 6 |
 | 4 | `PQconninfoParse` + `PQconnectdbParams` augmentation: both URI (`postgresql://…`) and keyword-form conninfo strings work; user-supplied `keepalives_idle=120 keepalives_count=3` are preserved (no overwrite of explicit choices) | 3 |
+| 5 (v4.3.2) | Async path (`pgclone.schema_async()`) under tight `idle_in_transaction_session_timeout`. Confirms the bgw mirror fix: `bgw_connect_with_keepalives` + `SET LOCAL` timeouts in `bgw_begin_repeatable_read` + `bgw_keeper_ping` in the pool coordinator. Skipped automatically when `pgclone` is not in `shared_preload_libraries`. | 5 |
 
-Without the v4.3.1 fix, groups 1 and 3 would fail deterministically at the second or third table when the source kills the keeper transaction.
+Without the v4.3.1 fix, groups 1 and 3 would fail deterministically. Without the v4.3.2 fix, group 5 would fail deterministically on the same source-role condition.
 
 ---
 

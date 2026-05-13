@@ -58,6 +58,7 @@ echo "  group 1: idle_in_transaction_session_timeout"
 echo "  group 2: statement_timeout"
 echo "  group 3: pgclone.database_create keeper"
 echo "  group 4: conninfo form handling"
+echo "  group 5: async path (v4.3.2 bgw)"
 echo "============================================"
 
 # ---- Build a small multi-table schema on the source ----
@@ -100,10 +101,12 @@ ALTER ROLE $SOURCE_USER RESET statement_timeout;
 DROP SCHEMA IF EXISTS keeper_test  CASCADE;
 DROP SCHEMA IF EXISTS keeper_test2 CASCADE;
 DROP SCHEMA IF EXISTS keeper_probe CASCADE;
+DROP SCHEMA IF EXISTS keeper_async CASCADE;
 SQL
     tgt "DROP SCHEMA IF EXISTS keeper_test  CASCADE" >/dev/null 2>&1 || true
     tgt "DROP SCHEMA IF EXISTS keeper_test2 CASCADE" >/dev/null 2>&1 || true
     tgt "DROP SCHEMA IF EXISTS keeper_probe CASCADE" >/dev/null 2>&1 || true
+    tgt "DROP SCHEMA IF EXISTS keeper_async CASCADE" >/dev/null 2>&1 || true
     psql -U postgres -d postgres -c "DROP DATABASE IF EXISTS keeper_test_dbc" \
         >/dev/null 2>&1 || true
 }
@@ -318,6 +321,90 @@ src <<'SQL'
 DROP SCHEMA IF EXISTS keeper_probe CASCADE;
 SQL
 tgt "DROP SCHEMA IF EXISTS keeper_probe CASCADE" >/dev/null 2>&1 || true
+
+# ============================================================
+# Test group 5 — async path keeper resilience (v4.3.2, issue #9 bgw)
+#
+# v4.3.1 fixed the synchronous keeper. v4.3.2 ports the same
+# four-layer fix to src/pgclone_bgw.c so async clones over
+# networked sources also survive a non-zero source-side
+# idle_in_transaction_session_timeout. This group sets the
+# timeout to 1s and runs pgclone.schema_async(...). Without the
+# v4.3.2 bgw fix, the single-job worker's source connection or
+# the pool coordinator's keeper would be killed and the async
+# clone would fail.
+#
+# Requires pgclone in shared_preload_libraries (provided by CI).
+# ============================================================
+
+echo ""
+echo "============================================"
+echo "Test group 5: async path keeper resilience"
+echo "============================================"
+
+# Skip the async group when pgclone isn't preloaded (Docker local
+# runs may not have shared_preload_libraries set, in which case
+# pgclone.schema_async itself would error out before we test the
+# keeper-resilience aspect).
+PRELOAD=$(tgt "SHOW shared_preload_libraries" 2>/dev/null || true)
+if ! echo "$PRELOAD" | grep -q pgclone; then
+    echo "  SKIP: pgclone not in shared_preload_libraries (async group)"
+else
+    src <<'SQL'
+DROP SCHEMA IF EXISTS keeper_async CASCADE;
+CREATE SCHEMA keeper_async;
+CREATE TABLE keeper_async.t1 (id int PRIMARY KEY, payload text);
+CREATE TABLE keeper_async.t2 (id int PRIMARY KEY, payload text);
+CREATE TABLE keeper_async.t3 (id int PRIMARY KEY, payload text);
+INSERT INTO keeper_async.t1 SELECT g, repeat('x', 200) FROM generate_series(1, 3000) g;
+INSERT INTO keeper_async.t2 SELECT g, repeat('y', 200) FROM generate_series(1, 3000) g;
+INSERT INTO keeper_async.t3 SELECT g, repeat('z', 200) FROM generate_series(1, 3000) g;
+SQL
+
+    src <<SQL
+ALTER ROLE $SOURCE_USER SET idle_in_transaction_session_timeout = '1s';
+SQL
+
+    tgt "DROP SCHEMA IF EXISTS keeper_async CASCADE" >/dev/null
+
+    # Kick off async schema clone (sequential mode — the v4.3.2 fix
+    # applies to both sequential and parallel pool paths via the
+    # same bgw_begin_repeatable_read / bgw_connect_with_keepalives
+    # helpers).
+    JOB_ID=$(tgt "SELECT pgclone.schema_async('$CONNINFO', 'keeper_async', true)" 2>/dev/null \
+        | tr -d '[:space:]')
+    run_test "schema_async returns a job_id (got: '$JOB_ID')" \
+        "[ -n '$JOB_ID' ] && [ '$JOB_ID' != '' ]"
+
+    # Poll for completion — up to ~30 s
+    ASYNC_FINAL=""
+    for attempt in $(seq 1 60); do
+        ASYNC_STATUS=$(tgt "SELECT status FROM pgclone.jobs WHERE job_id = $JOB_ID" 2>/dev/null \
+            | tr -d '[:space:]')
+        if [ "$ASYNC_STATUS" = "completed" ] || [ "$ASYNC_STATUS" = "failed" ]; then
+            ASYNC_FINAL="$ASYNC_STATUS"
+            break
+        fi
+        sleep 0.5
+    done
+
+    run_test "async clone reached completed status (got: '$ASYNC_FINAL')" \
+        "[ '$ASYNC_FINAL' = 'completed' ]"
+
+    # Row counts on the target
+    for tbl in t1 t2 t3; do
+        n=$(tgt "SELECT count(*) FROM keeper_async.$tbl" 2>/dev/null || echo missing)
+        run_test "keeper_async.$tbl cloned with 3000 rows (actual: $n)" \
+            "[ '$n' = '3000' ]"
+    done
+
+    # Cleanup
+    src <<SQL
+ALTER ROLE $SOURCE_USER RESET idle_in_transaction_session_timeout;
+DROP SCHEMA IF EXISTS keeper_async CASCADE;
+SQL
+    tgt "DROP SCHEMA IF EXISTS keeper_async CASCADE" >/dev/null 2>&1 || true
+fi
 
 echo ""
 echo "============================================"

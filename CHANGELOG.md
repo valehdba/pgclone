@@ -2,6 +2,26 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.3.2]
+
+### Fixed
+- **Snapshot-keeper resilience on the async path** (issue #9, bgw mirror) — v4.3.1 closed the failure mode on the synchronous code paths in `src/pgclone.c` but left `src/pgclone_bgw.c` untouched. As a result, `pgclone.table_async()`, `pgclone.schema_async()` sequential, and `pgclone.schema_async()` parallel-pool mode could still fail with `ERROR: pgclone: SET TRANSACTION SNAPSHOT … invalid snapshot identifier` on networked source connections when the bgworker keeper transaction was killed by a firewall idle TCP drop or by a non-zero source-side `idle_in_transaction_session_timeout`. This release ports the same four-layer fix to the bgworker translation unit.
+
+### Added
+- **`bgw_connect_with_keepalives()`** — mirror of `pgclone_connect_with_keepalives()` for the background-worker path. Parses every source `conninfo` via `PQconninfoParse`, injects `keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6` when the user did not specify them, and connects via `PQconnectdbParams`. Both URI (`postgresql://…`) and keyword-form strings are handled. Falls back to plain `PQconnectdb` on parser failure so the caller's existing `PQstatus()`-based error path still surfaces the failure cleanly. Replaces three direct `PQconnectdb()` call sites: `pgclone_bgw_main` (single-job worker), `pgclone_pool_worker_main` (pool worker), and `pgclone_pool_coordinator_main` (pool coordinator).
+- **`SET LOCAL idle_in_transaction_session_timeout = 0`** and **`SET LOCAL statement_timeout = 0`** in `bgw_begin_repeatable_read()`. Issued immediately after `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`; both GUCs are `PGC_USERSET` and `SET LOCAL` reverts at COMMIT.
+- **Clearer diagnostic** in `bgw_begin_with_imported_snapshot()` — when `SET TRANSACTION SNAPSHOT` fails with `invalid snapshot identifier`, the WARNING now includes a HINT pointing at firewall idle drops, `idle_in_transaction_session_timeout`, and the `{"consistent": false}` opt-out, with a reference to issue #9.
+- **`bgw_keeper_ping()`** — cheap `SELECT 1` probe on the bgworker-owned snapshot keeper connection. Called every ~5 s (every 50th iteration of the 100 ms `WaitLatch` cycle) inside `pgclone_pool_coordinator_main`'s wait loop. Surfaces a silently-dropped keeper before pool workers waste time waiting on a snapshot the server has already reaped, and sets `pool.snapshot_failed` so every worker aborts cleanly.
+- **Regression test `test/test_snapshot_keeper.sh` Group 5** — sets `idle_in_transaction_session_timeout = 1s` on the source role and runs `pgclone.schema_async()` against a 3-table source. Without the v4.3.2 fix the bgworker keeper would be killed mid-clone and the async job would land in `failed`. Skipped automatically when `pgclone` is not in `shared_preload_libraries` (i.e. local Docker runs without async setup).
+
+### Compatibility
+- No SQL signature changes. `sql/pgclone--4.3.1--4.3.2.sql` is intentionally empty.
+- All four protection layers use libpq/server APIs unchanged across PG 14–18. No `#if PG_VERSION_NUM` guards needed.
+- No configuration changes required. Existing async jobs continue to work without modification.
+
+### Internal
+- `src/pgclone_bgw.c`: new static helpers `bgw_connect_with_keepalives()` (above the snapshot-helpers block) and `bgw_keeper_ping()` (below `bgw_begin_with_imported_snapshot()`). `bgw_begin_repeatable_read()` extended with the `SET LOCAL` block. The async-path code now exactly mirrors the synchronous-path protections in `src/pgclone.c`, eliminating the known gap disclosed in v4.3.1.
+
 ## [4.3.1]
 
 ### Fixed
@@ -23,8 +43,8 @@ All notable changes to pgclone are documented in this file.
 - All four protection layers use libpq/server APIs that have existed unchanged across PG 14–18. No `#if PG_VERSION_NUM` guards needed.
 - No configuration changes required. No data is touched. No backward-incompatible behaviour.
 
-### Known gap
-- The fix is applied to the synchronous helpers in `src/pgclone.c`. The background-worker mirror helpers in `src/pgclone_bgw.c` (`bgw_begin_repeatable_read`, `bgw_export_snapshot`, `bgw_begin_with_imported_snapshot`, and four direct `PQconnectdb()` call sites) have **not** received the same treatment in this release. Async clones (`pgclone.table_async()`, `pgclone.schema_async()` sequential and parallel-pool) over networked source connections may still hit the same three failure modes; a v4.3.2 release is planned to port the four-layer fix to the bgworker path. Until then, set keepalives explicitly in async conninfo strings, ensure source-side `idle_in_transaction_session_timeout = 0`, or pass `'{"consistent": false}'` for async clones over unreliable links. See `docs/ASYNC.md` → "Known gap: snapshot-keeper resilience in async paths".
+### Known gap (closed in v4.3.2)
+- The v4.3.1 fix was applied to the synchronous helpers in `src/pgclone.c` only. The background-worker mirror helpers in `src/pgclone_bgw.c` (`bgw_begin_repeatable_read`, `bgw_export_snapshot`, `bgw_begin_with_imported_snapshot`, and four direct `PQconnectdb()` call sites) did **not** receive the same treatment in this release. Async clones (`pgclone.table_async()`, `pgclone.schema_async()` sequential and parallel-pool) over networked source connections may still hit the same three failure modes on v4.3.1. **Closed in v4.3.2** — see the [4.3.2] entry above for the bgworker mirror fix.
 
 ### Internal
 - New static helpers `pgclone_connect_with_keepalives()` and `pgclone_keeper_ping()` in `src/pgclone.c`.
