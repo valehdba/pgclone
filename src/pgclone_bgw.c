@@ -188,6 +188,98 @@ bgw_exec(PGconn *conn, const char *query)
 }
 
 /* ---------------------------------------------------------------
+ * v4.3.2 source-side conninfo augmentation (bgw mirror of
+ * pgclone_connect_with_keepalives in pgclone.c).
+ *
+ * Background-worker source connections are subject to the same
+ * idle-keeper failure modes as the synchronous path (issue #9):
+ * firewall/NAT idle TCP drops kill the long-running pool
+ * coordinator's keeper, and the single-job worker's source
+ * connection can drop during slow COPYs. Parse the user's conninfo
+ * with PQconninfoParse, inject TCP keepalive defaults only when the
+ * user did not set them, and connect via PQconnectdbParams. URI
+ * and keyword-form conninfo strings are both handled.
+ *
+ * Failure to parse falls through to plain PQconnectdb so the
+ * caller's existing PQstatus()-based failure path surfaces a
+ * normal connection error rather than a hard worker-abort.
+ * --------------------------------------------------------------- */
+static PGconn *
+bgw_connect_with_keepalives(const char *conninfo)
+{
+    PQconninfoOption *parsed;
+    PQconninfoOption *opt;
+    char             *parse_err = NULL;
+    const char      **keywords;
+    const char      **values;
+    int               nopts = 0;
+    int               i;
+    bool              have_keepalives          = false;
+    bool              have_keepalives_idle     = false;
+    bool              have_keepalives_interval = false;
+    bool              have_keepalives_count    = false;
+    PGconn           *conn;
+
+    parsed = PQconninfoParse(conninfo, &parse_err);
+    if (parsed == NULL)
+    {
+        elog(WARNING, "pgclone bgw: could not parse conninfo (%s); "
+                      "falling back to plain PQconnectdb",
+             parse_err ? parse_err : "unknown");
+        if (parse_err)
+            PQfreemem(parse_err);
+        return PQconnectdb(conninfo);
+    }
+
+    for (opt = parsed; opt->keyword != NULL; opt++)
+    {
+        if (opt->val != NULL && opt->val[0] != '\0')
+        {
+            nopts++;
+            if (strcmp(opt->keyword, "keepalives") == 0)
+                have_keepalives = true;
+            else if (strcmp(opt->keyword, "keepalives_idle") == 0)
+                have_keepalives_idle = true;
+            else if (strcmp(opt->keyword, "keepalives_interval") == 0)
+                have_keepalives_interval = true;
+            else if (strcmp(opt->keyword, "keepalives_count") == 0)
+                have_keepalives_count = true;
+        }
+    }
+
+    keywords = (const char **) palloc0(sizeof(char *) * (nopts + 5));
+    values   = (const char **) palloc0(sizeof(char *) * (nopts + 5));
+
+    i = 0;
+    for (opt = parsed; opt->keyword != NULL; opt++)
+    {
+        if (opt->val != NULL && opt->val[0] != '\0')
+        {
+            keywords[i] = pstrdup(opt->keyword);
+            values[i]   = pstrdup(opt->val);
+            i++;
+        }
+    }
+
+    if (!have_keepalives)          { keywords[i] = "keepalives";          values[i++] = "1";  }
+    if (!have_keepalives_idle)     { keywords[i] = "keepalives_idle";     values[i++] = "30"; }
+    if (!have_keepalives_interval) { keywords[i] = "keepalives_interval"; values[i++] = "10"; }
+    if (!have_keepalives_count)    { keywords[i] = "keepalives_count";    values[i++] = "6";  }
+
+    keywords[i] = NULL;
+    values[i]   = NULL;
+
+    PQconninfoFree(parsed);
+
+    conn = PQconnectdbParams(keywords, values, 0);
+
+    pfree(keywords);
+    pfree(values);
+
+    return conn;
+}
+
+/* ---------------------------------------------------------------
  * v4.3.0 Source-side snapshot helpers (bgw copy).
  *
  * Mirror of the helpers in pgclone.c — duplicated rather than
@@ -215,6 +307,19 @@ bgw_begin_repeatable_read(PGconn *conn)
         PQclear(res);
         return false;
     }
+    PQclear(res);
+
+    /* v4.3.2: defeat server-side timeouts for the keeper's idle
+     * window. SET LOCAL reverts at COMMIT; both GUCs are PGC_USERSET
+     * so no special privilege is required. Failures here are
+     * non-fatal — TCP keepalives still protect us against the
+     * firewall path. (issue #9 mirror in bgw) */
+    res = PQexec(conn,
+                 "SET LOCAL idle_in_transaction_session_timeout = 0; "
+                 "SET LOCAL statement_timeout = 0");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        elog(DEBUG1, "pgclone bgw: could not disable source-side timeouts: %s",
+             PQerrorMessage(conn));
     PQclear(res);
     return true;
 }
@@ -267,7 +372,14 @@ bgw_export_snapshot(PGconn *conn, char *out_id, size_t out_id_len)
 }
 
 /* BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY then SET TRANSACTION SNAPSHOT '<id>'.
- * The exporting connection must still be alive (idle in transaction). */
+ * The exporting connection must still be alive (idle in transaction).
+ *
+ * v4.3.2: when SET TRANSACTION SNAPSHOT fails with PostgreSQL's
+ * "invalid snapshot identifier" message — which the server emits
+ * both for malformed IDs AND for IDs whose backing file has been
+ * reaped (keeper transaction terminated) — log a clearer line
+ * with diagnostic context so async failures are easy to triage
+ * (issue #9 mirror in bgw). */
 static bool
 bgw_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
 {
@@ -286,8 +398,62 @@ bgw_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
 
     if (PQresultStatus(res) != PGRES_COMMAND_OK)
     {
-        elog(WARNING, "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s",
-             snapshot_id, PQerrorMessage(conn));
+        const char *errtxt = PQerrorMessage(conn);
+
+        if (errtxt && strstr(errtxt, "invalid snapshot identifier"))
+            elog(WARNING,
+                 "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s"
+                 "HINT: The exporting (coordinator/keeper) transaction "
+                 "was likely terminated. Common causes: firewall idle drop, "
+                 "idle_in_transaction_session_timeout on the source. "
+                 "Async path mitigations (v4.3.2): TCP keepalives are "
+                 "auto-injected; the keeper transaction issues SET LOCAL "
+                 "idle_in_transaction_session_timeout = 0. "
+                 "Emergency workaround: pass {\"consistent\": false} in "
+                 "the options JSON. See issue #9.",
+                 snapshot_id, errtxt);
+        else
+            elog(WARNING, "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s",
+                 snapshot_id, errtxt ? errtxt : "(no error message)");
+
+        PQclear(res);
+        return false;
+    }
+    PQclear(res);
+    return true;
+}
+
+/* Lightweight liveness check on the bgworker-owned snapshot keeper
+ * connection (typically the pool coordinator's source_conn). Issues
+ * a cheap round-trip so libpq detects a silently-dropped TCP
+ * session BEFORE pool workers waste time waiting on a snapshot the
+ * server has already reaped. Returns true if the keeper is healthy,
+ * false otherwise (caller is expected to set snapshot_failed and
+ * break out of the wait loop). No-op when conn is NULL or no
+ * transaction is open. v4.3.2 (issue #9 mirror in bgw). */
+static bool
+bgw_keeper_ping(PGconn *conn)
+{
+    PGresult *res;
+
+    if (conn == NULL)
+        return true;
+    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
+        return true;
+
+    if (PQstatus(conn) != CONNECTION_OK)
+    {
+        elog(WARNING,
+             "pgclone bgw: snapshot keeper connection is no longer alive: %s",
+             PQerrorMessage(conn));
+        return false;
+    }
+
+    res = PQexec(conn, "SELECT 1");
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        elog(WARNING, "pgclone bgw: snapshot keeper ping failed: %s",
+             PQerrorMessage(conn));
         PQclear(res);
         return false;
     }
@@ -721,7 +887,7 @@ pgclone_bgw_main(Datum main_arg)
     port = GetConfigOption("port", false, false);
 
 
-    source_conn = PQconnectdb(job->source_conninfo);
+    source_conn = bgw_connect_with_keepalives(job->source_conninfo);
     if (PQstatus(source_conn) != CONNECTION_OK)
     {
         elog(WARNING, "pgclone bgw: source connection failed: %s",
@@ -988,7 +1154,7 @@ pgclone_pool_worker_main(Datum main_arg)
     port = GetConfigOption("port", false, false);
 
     /* Connect to source and local once — reuse for all tasks */
-    source_conn = PQconnectdb(pgclone_state->pool.source_conninfo);
+    source_conn = bgw_connect_with_keepalives(pgclone_state->pool.source_conninfo);
     if (PQstatus(source_conn) != CONNECTION_OK)
     {
         elog(WARNING, "pgclone pool worker: source connection failed: %s",
@@ -1315,7 +1481,7 @@ pgclone_pool_coordinator_main(Datum main_arg)
     /* Required for any libpq operation in a bgworker context */
     BackgroundWorkerInitializeConnectionByOid(job->database_oid, InvalidOid, 0);
 
-    source_conn = PQconnectdb(pgclone_state->pool.source_conninfo);
+    source_conn = bgw_connect_with_keepalives(pgclone_state->pool.source_conninfo);
     if (PQstatus(source_conn) != CONNECTION_OK)
     {
         elog(WARNING, "pgclone pool coordinator: source connection failed: %s",
@@ -1413,6 +1579,27 @@ pgclone_pool_coordinator_main(Datum main_arg)
              * launching importer. */
             if (launch_done && imported >= target)
                 break;
+
+            /* v4.3.2: every ~5 s (50 × 100 ms WaitLatch) probe the
+             * keeper to detect a silently-dropped TCP session or a
+             * server-side termination BEFORE pool workers fail to
+             * import. Keepalives already auto-detect dropped TCP
+             * within ~90 s; this catches the residual paths where
+             * the server actively closes the connection (e.g.
+             * idle_in_transaction_session_timeout firing despite
+             * our SET LOCAL, an external superuser-driven
+             * pg_terminate_backend, or a wal_sender_timeout
+             * variant). (issue #9 mirror in bgw) */
+            if (attempts % 50 == 0 && attempts > 0 && !bgw_keeper_ping(source_conn))
+            {
+                LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+                pgclone_state->pool.snapshot_failed = true;
+                strlcpy(job->error_message,
+                        "snapshot keeper connection died — see WARNING above",
+                        256);
+                LWLockRelease(pgclone_state->lock);
+                break;
+            }
 
             (void) WaitLatch(MyLatch,
                              WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,

@@ -97,19 +97,21 @@ SELECT pgclone.schema_async(
 - Only one pool operation can run at a time per database cluster.
 - Pool workers are visible in `pgclone.jobs_view` as individual table-type jobs.
 
-### Known gap: snapshot-keeper resilience in async paths (as of v4.3.1)
+### Snapshot-keeper resilience in async paths (v4.3.2)
 
-The v4.3.1 snapshot-keeper resilience fix (issue #9) was applied to the synchronous helpers in `src/pgclone.c`. The background-worker code in `src/pgclone_bgw.c` carries its own **mirror** helpers (`bgw_begin_repeatable_read`, `bgw_export_snapshot`, `bgw_begin_with_imported_snapshot`) and several direct `PQconnectdb()` call sites — none of which received the v4.3.1 protections. As a result, async clones (`pgclone.table_async()`, `pgclone.schema_async()` sequential, `pgclone.schema_async()` parallel-pool mode) are **still vulnerable** to the three failure paths described in issue #9 on networked source connections:
+Consistent async clones use a snapshot keeper that sits idle in transaction on the source for the duration of the job:
 
-1. TCP keepalives are not injected into the bgworker's source conninfo.
-2. The bgworker keeper transaction does not issue `SET LOCAL idle_in_transaction_session_timeout = 0` or `SET LOCAL statement_timeout = 0`.
-3. The bgworker importer has no specific `errhint` and no keeper-liveness ping.
+- **Sequential `pgclone.schema_async()`** — the single worker holds its own source connection and BEGINs at REPEATABLE READ READ ONLY for the full clone.
+- **Parallel pool mode** — a dedicated `pgclone_pool_coordinator_main` background worker opens the source connection, exports the snapshot, publishes the ID to shared memory for the N pool workers to import, and waits (idle in transaction) until every worker has bound. Once all bindings complete it COMMITs and exits.
 
-A follow-up release (planned v4.3.2) will port the same four-layer fix to `pgclone_bgw.c`. In the meantime, for long async clones over networks:
+In both cases the keeper can sit idle long enough to trip a firewall idle TCP drop or a non-zero source-side `idle_in_transaction_session_timeout`. v4.3.1 closed these failure paths on the synchronous code; **v4.3.2 ports the same fix to the bgworker path**:
 
-- Set keepalives explicitly in the conninfo, for example `keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6`. The bgworker's `PQconnectdb()` will honour any keepalive parameters the user supplies; v4.3.1's auto-injection is the only thing missing on the async path.
-- Ensure `idle_in_transaction_session_timeout` on the source role is `0` (or unset).
-- Or pass `'{"consistent": false}'` to disable cross-table snapshot sharing.
+1. Every bgworker source connection is opened through `bgw_connect_with_keepalives()`, which auto-injects `keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6` (unless the user already set them).
+2. The bgworker `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` is immediately followed by `SET LOCAL idle_in_transaction_session_timeout = 0` and `SET LOCAL statement_timeout = 0`.
+3. `bgw_begin_with_imported_snapshot()` emits a clearer WARNING + HINT when the snapshot import fails with `invalid snapshot identifier`.
+4. The pool coordinator's wait loop calls `bgw_keeper_ping()` every ~5 s, surfacing a silently-dropped keeper before pool workers fail to import.
+
+If a v4.3.2 async clone still aborts with the snapshot-import error, see the troubleshooting section in [USAGE.md](USAGE.md). The deterministic workaround is the same as for the sync path: pass `'{"consistent": false}'` in the options JSON to bypass cross-table snapshot sharing entirely.
 
 ---
 
