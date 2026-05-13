@@ -2,6 +2,36 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.3.1]
+
+### Fixed
+- **Snapshot-keeper resilience under long-running clones** (issue #9) — `pgclone.schema()` and `pgclone.database()` could fail mid-run on remote/networked source connections with the misleading message `ERROR: pgclone: could not import snapshot … invalid snapshot identifier`. Root cause: the snapshot-keeper transaction sat idle-in-transaction for the bulk of the clone, and three independent paths could silently terminate it — firewall/NAT idle TCP drop on the conninfo (no `keepalives=*` were set), a non-zero `idle_in_transaction_session_timeout` on the source server, or `statement_timeout` firing on COMMIT. When the keeper died, PostgreSQL deleted the exported-snapshot file, and every subsequent `SET TRANSACTION SNAPSHOT` importer failed with the misleading message PG emits both for malformed IDs and for IDs whose backing file is gone.
+
+### Added
+- **TCP keepalives auto-injected** into every source `conninfo` via `PQconninfoParse` + `PQconnectdbParams`: `keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6`. Injected only when the user did **not** already set them; explicit user choices (including `keepalives=0`) are preserved. Both URI (`postgresql://…`) and keyword-form conninfo strings are handled.
+- **`SET LOCAL idle_in_transaction_session_timeout = 0`** and **`SET LOCAL statement_timeout = 0`** inside the keeper transaction. Both GUCs are `PGC_USERSET` (no privilege required); `SET LOCAL` reverts at COMMIT so pooled connections never leak settings.
+- **`errhint` on snapshot-import failure** — when `SET TRANSACTION SNAPSHOT` fails with `invalid snapshot identifier`, pgclone now attaches a clear hint naming the most likely causes and the `{"consistent": false}` emergency opt-out.
+- **`pgclone_keeper_ping()`** — cheap `SELECT 1` on the keeper before each per-table call and before every sub-phase of `pgclone.schema()` (FK retry, views, functions, triggers) and `pgclone.database()` (per-schema loop). Surfaces a clear error naming the *keeper* instead of letting the next importer waste a multi-GB `COPY` before hitting the misleading message.
+- **Regression test `test/test_snapshot_keeper.sh`** with 4 groups / 14 assertions:
+  - Group 1 — `idle_in_transaction_session_timeout = 1s` on source role (deterministic regression for issue #9)
+  - Group 2 — `statement_timeout = 1s` on source role
+  - Group 3 — `pgclone.database_create()` keeper across an outer per-schema loop
+  - Group 4 — URI vs keyword conninfo form handling + user-supplied keepalive overrides preserved
+
+### Compatibility
+- No SQL signature changes. The upgrade script `sql/pgclone--4.3.0--4.3.1.sql` is intentionally empty; `ALTER EXTENSION pgclone UPDATE` simply refreshes metadata.
+- All four protection layers use libpq/server APIs that have existed unchanged across PG 14–18. No `#if PG_VERSION_NUM` guards needed.
+- No configuration changes required. No data is touched. No backward-incompatible behaviour.
+
+### Known gap
+- The fix is applied to the synchronous helpers in `src/pgclone.c`. The background-worker mirror helpers in `src/pgclone_bgw.c` (`bgw_begin_repeatable_read`, `bgw_export_snapshot`, `bgw_begin_with_imported_snapshot`, and four direct `PQconnectdb()` call sites) have **not** received the same treatment in this release. Async clones (`pgclone.table_async()`, `pgclone.schema_async()` sequential and parallel-pool) over networked source connections may still hit the same three failure modes; a v4.3.2 release is planned to port the four-layer fix to the bgworker path. Until then, set keepalives explicitly in async conninfo strings, ensure source-side `idle_in_transaction_session_timeout = 0`, or pass `'{"consistent": false}'` for async clones over unreliable links. See `docs/ASYNC.md` → "Known gap: snapshot-keeper resilience in async paths".
+
+### Internal
+- New static helpers `pgclone_connect_with_keepalives()` and `pgclone_keeper_ping()` in `src/pgclone.c`.
+- `pgclone_connect()` routes through `pgclone_connect_with_keepalives()` instead of calling `PQconnectdb()` directly. Every source connection therefore receives the keepalive injection, not only the keeper.
+- `pgclone_begin_repeatable_read()` issues the `SET LOCAL` timeouts after the `BEGIN`. Because `pgclone_begin_with_imported_snapshot()` and `pgclone_setup_source_txn()` both delegate to it, importers inherit the same protection.
+- `docs/ARCHITECTURE.md` adds the "Snapshot-keeper resilience (v4.3.1)" section.
+
 ## [4.3.0]
 
 ### Added

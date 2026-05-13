@@ -97,6 +97,20 @@ SELECT pgclone.schema_async(
 - Only one pool operation can run at a time per database cluster.
 - Pool workers are visible in `pgclone.jobs_view` as individual table-type jobs.
 
+### Known gap: snapshot-keeper resilience in async paths (as of v4.3.1)
+
+The v4.3.1 snapshot-keeper resilience fix (issue #9) was applied to the synchronous helpers in `src/pgclone.c`. The background-worker code in `src/pgclone_bgw.c` carries its own **mirror** helpers (`bgw_begin_repeatable_read`, `bgw_export_snapshot`, `bgw_begin_with_imported_snapshot`) and several direct `PQconnectdb()` call sites — none of which received the v4.3.1 protections. As a result, async clones (`pgclone.table_async()`, `pgclone.schema_async()` sequential, `pgclone.schema_async()` parallel-pool mode) are **still vulnerable** to the three failure paths described in issue #9 on networked source connections:
+
+1. TCP keepalives are not injected into the bgworker's source conninfo.
+2. The bgworker keeper transaction does not issue `SET LOCAL idle_in_transaction_session_timeout = 0` or `SET LOCAL statement_timeout = 0`.
+3. The bgworker importer has no specific `errhint` and no keeper-liveness ping.
+
+A follow-up release (planned v4.3.2) will port the same four-layer fix to `pgclone_bgw.c`. In the meantime, for long async clones over networks:
+
+- Set keepalives explicitly in the conninfo, for example `keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6`. The bgworker's `PQconnectdb()` will honour any keepalive parameters the user supplies; v4.3.1's auto-injection is the only thing missing on the async path.
+- Ensure `idle_in_transaction_session_timeout` on the source role is `0` (or unset).
+- Or pass `'{"consistent": false}'` to disable cross-table snapshot sharing.
+
 ---
 
 ## Progress Tracking
