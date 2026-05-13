@@ -379,7 +379,7 @@ SQL
     # Poll for completion — up to ~30 s
     ASYNC_FINAL=""
     for attempt in $(seq 1 60); do
-        ASYNC_STATUS=$(tgt "SELECT status FROM pgclone.jobs WHERE job_id = $JOB_ID" 2>/dev/null \
+        ASYNC_STATUS=$(tgt "SELECT status FROM pgclone.jobs_view WHERE job_id = $JOB_ID" 2>/dev/null \
             | tr -d '[:space:]')
         if [ "$ASYNC_STATUS" = "completed" ] || [ "$ASYNC_STATUS" = "failed" ]; then
             ASYNC_FINAL="$ASYNC_STATUS"
