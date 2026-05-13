@@ -103,6 +103,16 @@ if echo "$SPL" | grep -q "pgclone"; then
     if [ $CONSISTENT_EXIT -ne 0 ]; then
         TEST_EXIT=1
     fi
+
+    echo ""
+    echo "============================================"
+    echo "Running pgclone v4.3.1 snapshot-keeper tests (issue #9)..."
+    echo "============================================"
+    bash /build/pgclone/test/test_snapshot_keeper.sh 2>&1
+    KEEPER_EXIT=$?
+    if [ $KEEPER_EXIT -ne 0 ]; then
+        TEST_EXIT=1
+    fi
 else
     echo "WARNING: pgclone not in shared_preload_libraries, skipping async tests"
     echo "To run async tests, add to postgresql.conf:"

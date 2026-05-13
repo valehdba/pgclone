@@ -679,14 +679,122 @@ pgclone_normalize_session(PGconn *conn)
 }
 
 /* ---------------------------------------------------------------
- * Internal helper: connect to a remote PostgreSQL host
+ * Internal helper: open a libpq connection with TCP keepalives
+ * forced on, unless the caller already set them.
+ *
+ * Long-running pgclone operations leave the "snapshot keeper"
+ * connection idle-in-transaction for the bulk of the clone
+ * (often hours). Without TCP keepalives, perimeter firewalls and
+ * NAT gateways silently drop the idle TCP session, the exporting
+ * transaction dies on the server, and the snapshot file is
+ * removed — causing every subsequent SET TRANSACTION SNAPSHOT
+ * importer to fail with the misleading message
+ * "invalid snapshot identifier" (issue #9).
+ *
+ * Defaults injected (only when not already present):
+ *   keepalives=1                — enable
+ *   keepalives_idle=30          — seconds idle before first probe
+ *   keepalives_interval=10      — seconds between probes
+ *   keepalives_count=6          — probes before declaring dead
+ *
+ * We parse the user's conninfo with PQconninfoParse (so URI and
+ * keyword forms both work), copy each set option into a new
+ * keyword/value array, append our defaults for any keepalive
+ * keyword the user did NOT specify, and connect via
+ * PQconnectdbParams. This preserves any explicit keepalive choice
+ * the user made (including keepalives=0 to disable).
+ * --------------------------------------------------------------- */
+static PGconn *
+pgclone_connect_with_keepalives(const char *conninfo)
+{
+    PQconninfoOption *parsed;
+    PQconninfoOption *opt;
+    char             *parse_err = NULL;
+    const char      **keywords;
+    const char      **values;
+    int               nopts = 0;
+    int               i;
+    bool              have_keepalives           = false;
+    bool              have_keepalives_idle      = false;
+    bool              have_keepalives_interval  = false;
+    bool              have_keepalives_count     = false;
+    PGconn           *conn;
+
+    parsed = PQconninfoParse(conninfo, &parse_err);
+    if (parsed == NULL)
+    {
+        char *err_copy = parse_err ? pstrdup(parse_err) : pstrdup("(unknown)");
+        if (parse_err)
+            PQfreemem(parse_err);
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: could not parse conninfo: %s", err_copy)));
+    }
+
+    /* Count set options and detect existing keepalive settings. */
+    for (opt = parsed; opt->keyword != NULL; opt++)
+    {
+        if (opt->val != NULL && opt->val[0] != '\0')
+        {
+            nopts++;
+            if (strcmp(opt->keyword, "keepalives") == 0)
+                have_keepalives = true;
+            else if (strcmp(opt->keyword, "keepalives_idle") == 0)
+                have_keepalives_idle = true;
+            else if (strcmp(opt->keyword, "keepalives_interval") == 0)
+                have_keepalives_interval = true;
+            else if (strcmp(opt->keyword, "keepalives_count") == 0)
+                have_keepalives_count = true;
+        }
+    }
+
+    /* +4 slots for injected defaults, +1 for the NULL terminator. */
+    keywords = (const char **) palloc0(sizeof(char *) * (nopts + 5));
+    values   = (const char **) palloc0(sizeof(char *) * (nopts + 5));
+
+    i = 0;
+    for (opt = parsed; opt->keyword != NULL; opt++)
+    {
+        if (opt->val != NULL && opt->val[0] != '\0')
+        {
+            keywords[i] = pstrdup(opt->keyword);
+            values[i]   = pstrdup(opt->val);
+            i++;
+        }
+    }
+
+    if (!have_keepalives)            { keywords[i] = "keepalives";           values[i++] = "1";  }
+    if (!have_keepalives_idle)       { keywords[i] = "keepalives_idle";      values[i++] = "30"; }
+    if (!have_keepalives_interval)   { keywords[i] = "keepalives_interval";  values[i++] = "10"; }
+    if (!have_keepalives_count)      { keywords[i] = "keepalives_count";     values[i++] = "6";  }
+
+    keywords[i] = NULL;
+    values[i]   = NULL;
+
+    PQconninfoFree(parsed);
+
+    /* expand_dbname=0 — we have already parsed and expanded. */
+    conn = PQconnectdbParams(keywords, values, 0);
+
+    pfree(keywords);
+    pfree(values);
+
+    return conn;
+}
+
+/* ---------------------------------------------------------------
+ * Internal helper: connect to a remote PostgreSQL host.
+ *
+ * v4.3.1: routed through pgclone_connect_with_keepalives() so the
+ * snapshot keeper (and every other source connection) survives
+ * idle firewall/NAT timeouts (issue #9).
  * --------------------------------------------------------------- */
 static PGconn *
 pgclone_connect(const char *conninfo)
 {
     PGconn *conn;
 
-    conn = PQconnectdb(conninfo);
+    conn = pgclone_connect_with_keepalives(conninfo);
 
     if (PQstatus(conn) != CONNECTION_OK)
     {
@@ -722,7 +830,18 @@ pgclone_connect(const char *conninfo)
 
 /* Open BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY on the source
  * connection. No-op if a transaction is already open on this conn
- * (e.g. caller already imported a snapshot). */
+ * (e.g. caller already imported a snapshot).
+ *
+ * v4.3.1: also disables idle_in_transaction_session_timeout and
+ * statement_timeout for the lifetime of this transaction via
+ * SET LOCAL. The snapshot keeper sits idle-in-transaction for the
+ * bulk of a long clone; if the source has a non-zero
+ * idle_in_transaction_session_timeout configured (a common
+ * production safeguard) the keeper would be killed and the
+ * exported snapshot reaped, breaking every subsequent importer
+ * (issue #9). SET LOCAL scopes to the transaction, so the values
+ * revert automatically at COMMIT and never leak into pooled
+ * connections. Both GUCs are PGC_USERSET — no privilege required. */
 static void
 pgclone_begin_repeatable_read(PGconn *conn)
 {
@@ -741,6 +860,17 @@ pgclone_begin_repeatable_read(PGconn *conn)
                  errmsg("pgclone: could not start REPEATABLE READ transaction on source: %s",
                         errmsg_copy)));
     }
+    PQclear(res);
+
+    /* Defeat server-side timeouts for the keeper's idle window.
+     * Failures here are non-fatal — TCP keepalives still protect
+     * us against the firewall path. */
+    res = PQexec(conn,
+                 "SET LOCAL idle_in_transaction_session_timeout = 0; "
+                 "SET LOCAL statement_timeout = 0");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK)
+        elog(DEBUG1, "pgclone: could not disable source-side timeouts: %s",
+             PQerrorMessage(conn));
     PQclear(res);
 }
 
@@ -802,7 +932,13 @@ pgclone_export_snapshot(PGconn *conn, char *out_id, size_t out_id_len)
 
 /* Open BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY then SET
  * TRANSACTION SNAPSHOT '<id>'. The keeper that exported this snapshot
- * must still be alive (idle in transaction) at this point. */
+ * must still be alive (idle in transaction) at this point.
+ *
+ * v4.3.1: when SET TRANSACTION SNAPSHOT fails with PostgreSQL's
+ * "invalid snapshot identifier" message — which the server emits
+ * both for malformed IDs AND for IDs whose backing file has been
+ * removed (keeper transaction terminated) — emit a hint pointing
+ * at the most common cause. See issue #9. */
 static void
 pgclone_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
 {
@@ -820,11 +956,76 @@ pgclone_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
     if (PQresultStatus(res) != PGRES_COMMAND_OK)
     {
         char *errmsg_copy = pstrdup(PQerrorMessage(conn));
+        bool  looks_like_gone_snapshot =
+            (strstr(errmsg_copy, "invalid snapshot identifier") != NULL);
+
+        PQclear(res);
+
+        if (looks_like_gone_snapshot)
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgclone: could not import snapshot %s on source: %s",
+                            snapshot_id, errmsg_copy),
+                     errhint("The exporting (keeper) transaction was likely "
+                             "terminated mid-clone. Common causes: a firewall "
+                             "or NAT gateway dropped the idle TCP session, or "
+                             "the source has a non-zero "
+                             "idle_in_transaction_session_timeout. pgclone "
+                             "4.3.1 injects TCP keepalives and clears those "
+                             "timeouts on the keeper transaction; verify the "
+                             "extension was reloaded after upgrade. As an "
+                             "emergency workaround, pass "
+                             "'{\"consistent\": false}' in the options "
+                             "argument to disable cross-table snapshot "
+                             "sharing.")));
+        else
+            ereport(ERROR,
+                    (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                     errmsg("pgclone: could not import snapshot %s on source: %s",
+                            snapshot_id, errmsg_copy)));
+    }
+    PQclear(res);
+}
+
+/* Lightweight liveness check on the snapshot keeper. Issues a
+ * cheap round-trip so libpq detects a silently-dropped TCP
+ * session BEFORE the next importer tries to bind to a snapshot
+ * the server has already reaped. On failure emits a clear ERROR
+ * that names the root cause rather than letting the next SET
+ * TRANSACTION SNAPSHOT fail with the misleading "invalid snapshot
+ * identifier" message. No-op when conn is NULL or no transaction
+ * is open (consistent mode disabled). v4.3.1 (issue #9). */
+static void
+pgclone_keeper_ping(PGconn *conn)
+{
+    PGresult *res;
+
+    if (conn == NULL)
+        return;
+    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
+        return;
+
+    if (PQstatus(conn) != CONNECTION_OK)
+        ereport(ERROR,
+                (errcode(ERRCODE_CONNECTION_FAILURE),
+                 errmsg("pgclone: snapshot keeper connection is no longer alive: %s",
+                        PQerrorMessage(conn)),
+                 errhint("The exported snapshot has been invalidated. "
+                         "Re-run the clone; if the failure repeats, the "
+                         "source's idle_in_transaction_session_timeout, a "
+                         "firewall idle timeout, or wal_sender_timeout is "
+                         "killing the keeper transaction.")));
+
+    res = PQexec(conn, "SELECT 1");
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        char *err_copy = pstrdup(PQerrorMessage(conn));
         PQclear(res);
         ereport(ERROR,
-                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgclone: could not import snapshot %s on source: %s",
-                        snapshot_id, errmsg_copy)));
+                (errcode(ERRCODE_CONNECTION_FAILURE),
+                 errmsg("pgclone: snapshot keeper ping failed: %s", err_copy),
+                 errhint("The keeper transaction was terminated mid-clone. "
+                         "See pgclone issue #9.")));
     }
     PQclear(res);
 }
@@ -2253,6 +2454,14 @@ pgclone_schema(PG_FUNCTION_ARGS)
         {
             Datum result;
 
+            /* v4.3.1: validate the keeper before each importer
+             * opens its own SET TRANSACTION SNAPSHOT — fail fast
+             * with a clear error instead of letting the importer
+             * hit the misleading "invalid snapshot identifier"
+             * (issue #9). */
+            if (opts.consistent && opts.snapshot_id[0] != '\0')
+                pgclone_keeper_ping(source_conn);
+
             /* Call 6-arg version: conninfo, schema, table, include_data, target_name, options */
             result = DirectFunctionCall6(pgclone_table,
                         CStringGetTextDatum(source_conninfo),
@@ -2273,9 +2482,17 @@ pgclone_schema(PG_FUNCTION_ARGS)
     /* ---- Step 4: Retry FK constraints if constraints enabled ---- */
     if (opts.include_constraints)
     {
-        PGconn *src_retry  = pgclone_connect(source_conninfo);
-        PGconn *lcl_retry  = pgclone_connect_local();
+        PGconn *src_retry;
+        PGconn *lcl_retry;
         int     fk_created = 0;
+
+        /* v4.3.1: keeper liveness gate before opening another importer
+         * (issue #9). */
+        if (opts.consistent && opts.snapshot_id[0] != '\0')
+            pgclone_keeper_ping(source_conn);
+
+        src_retry = pgclone_connect(source_conninfo);
+        lcl_retry = pgclone_connect_local();
 
         pgclone_setup_source_txn(src_retry, &opts);
 
@@ -2331,8 +2548,16 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
     /* ---- Step 5: Clone views ---- */
     {
-        PGconn *src_views = pgclone_connect(source_conninfo);
-        PGconn *lcl_views = pgclone_connect_local();
+        PGconn *src_views;
+        PGconn *lcl_views;
+
+        /* v4.3.1: keeper liveness gate before opening another importer
+         * (issue #9). */
+        if (opts.consistent && opts.snapshot_id[0] != '\0')
+            pgclone_keeper_ping(source_conn);
+
+        src_views = pgclone_connect(source_conninfo);
+        lcl_views = pgclone_connect_local();
 
         pgclone_setup_source_txn(src_views, &opts);
 
@@ -2443,9 +2668,17 @@ pgclone_schema(PG_FUNCTION_ARGS)
      * references inside the body is whatever the original author wrote.
      */
     {
-        PGconn *src_funcs = pgclone_connect(source_conninfo);
-        PGconn *lcl_funcs = pgclone_connect_local();
+        PGconn *src_funcs;
+        PGconn *lcl_funcs;
         int     fcount;
+
+        /* v4.3.1: keeper liveness gate before opening another importer
+         * (issue #9). */
+        if (opts.consistent && opts.snapshot_id[0] != '\0')
+            pgclone_keeper_ping(source_conn);
+
+        src_funcs = pgclone_connect(source_conninfo);
+        lcl_funcs = pgclone_connect_local();
 
         pgclone_setup_source_txn(src_funcs, &opts);
 
@@ -2481,9 +2714,17 @@ pgclone_schema(PG_FUNCTION_ARGS)
      */
     if (opts.include_triggers && ntables > 0)
     {
-        PGconn *src_trig = pgclone_connect(source_conninfo);
-        PGconn *lcl_trig = pgclone_connect_local();
+        PGconn *src_trig;
+        PGconn *lcl_trig;
         int     trig_total = 0;
+
+        /* v4.3.1: keeper liveness gate before opening another importer
+         * (issue #9). */
+        if (opts.consistent && opts.snapshot_id[0] != '\0')
+            pgclone_keeper_ping(source_conn);
+
+        src_trig = pgclone_connect(source_conninfo);
+        lcl_trig = pgclone_connect_local();
 
         pgclone_setup_source_txn(src_trig, &opts);
 
@@ -2671,6 +2912,10 @@ pgclone_database(PG_FUNCTION_ARGS)
         for (i = 0; i < nschemas; i++)
         {
             Datum result;
+
+            /* v4.3.1: keeper liveness check between schemas (issue #9). */
+            if (opts.consistent && opts.snapshot_id[0] != '\0')
+                pgclone_keeper_ping(source_conn);
 
             elog(DEBUG1, "pgclone: cloning schema %s (%d/%d)",
                  schema_names[i], i + 1, nschemas);
@@ -4408,7 +4653,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.3.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.3.1"));
 }
 
 /* ===============================================================

@@ -116,6 +116,16 @@ Failure handling: if any pool worker fails to import, it sets `pool.snapshot_fai
 
 Opt-out: `'{"consistent": false}'` in any options-JSON skips all of the above and runs with v4.2.x semantics. The keeper connection is then closed immediately after the table-list read like before, and the pool coordinator is not launched.
 
+### Snapshot-keeper resilience (v4.3.1, issue #9)
+
+The keeper transaction sits idle-in-transaction for the bulk of a long clone. Three independent paths can silently terminate it and invalidate the exported snapshot:
+
+1. **Firewall / NAT idle TCP drop** on remote source connections. pgclone injects `keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6` into every source conninfo (unless the user already set them), giving ~90s drop detection and keeping perimeter NAT entries warm. Done at the libpq layer via `PQconninfoParse` + `PQconnectdbParams`, so both URI (`postgresql://...`) and keyword-form conninfo strings are handled.
+2. **`idle_in_transaction_session_timeout`** on the source server. The keeper's BEGIN issues `SET LOCAL idle_in_transaction_session_timeout = 0` and `SET LOCAL statement_timeout = 0`; both GUCs are `PGC_USERSET` (no privilege required) and `SET LOCAL` reverts at COMMIT, so the settings never leak into pooled connections.
+3. **Silent post-drop continuation.** Between major sub-phases of `pgclone.schema()` (per-table loop, FK retry, views, functions, triggers) and `pgclone.database()` (per-schema loop) pgclone runs a cheap `SELECT 1` ping on the keeper. A failure produces a clear error naming the keeper rather than the misleading `invalid snapshot identifier` that PostgreSQL emits when the exported-snapshot file has been reaped.
+
+Operators who explicitly want to bypass snapshot sharing — for example, on an unreliable link where one of the above is guaranteed to fire — can pass `'{"consistent": false}'` in the options JSON. Each importer then begins its own REPEATABLE READ transaction independently. Cross-table referential consistency is no longer guaranteed, but every per-table copy is still internally consistent.
+
 ### COPY Protocol Data Transfer
 
 Data is transferred using PostgreSQL's COPY protocol, which is significantly faster than row-by-row INSERT:

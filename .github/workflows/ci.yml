@@ -270,6 +270,21 @@ jobs:
           echo "============================================"
           [ $FAIL -eq 0 ] || exit 1
 
+      - name: "Test: Snapshot-keeper resilience (issue #9)"
+        env:
+          PGHOST: localhost
+          PGPORT: 5434
+          SOURCE_HOST: localhost
+          SOURCE_PORT: 5433
+          SOURCE_DB: source_db
+          SOURCE_USER: postgres
+          SOURCE_PW: testpass
+        run: |
+          # The test script defaults its target connection to
+          # `psql -U postgres -d target_db`, which matches the CI
+          # target DB created on port 5434.
+          bash test/test_snapshot_keeper.sh
+
       - name: Show logs on failure
         if: failure()
         run: |
