@@ -79,6 +79,55 @@ In parallel pool mode (`schema_async` with `"parallel": N`), pgclone launches on
 
 Hot-standby sources are supported on PostgreSQL ≥ 10.
 
+### Troubleshooting `invalid snapshot identifier` (fixed in v4.3.1, issue #9)
+
+If a multi-hour schema or database clone aborts with:
+
+```
+ERROR:  pgclone: could not import snapshot 000000XX-000XXXXX-1 on source:
+ERROR:  invalid snapshot identifier: "000000XX-000XXXXX-1"
+```
+
+…then the snapshot-keeper transaction died mid-clone and PostgreSQL reaped the exported-snapshot file. The misleading error wording is what the server emits both for malformed IDs and for IDs whose backing file is gone.
+
+**v4.3.1 makes this self-healing on every supported PG version.** Verify you're running ≥ 4.3.1:
+
+```sql
+SELECT pgclone.version();   -- expect 'pgclone 4.3.1' or newer
+```
+
+If you're on 4.3.0 and can't upgrade immediately, the deterministic workaround is the per-call opt-out:
+
+```sql
+SELECT pgclone.schema(
+    'postgresql://user@host:5432/sourcedb',
+    'myschema',
+    true,
+    '{"consistent": false}'
+);
+```
+
+Every per-table copy is still internally consistent. Cross-table referential consistency is no longer guaranteed against concurrent writers, but the clone will not fail with `invalid snapshot identifier`.
+
+The three failure paths v4.3.1 closes:
+
+1. **Firewall / NAT idle TCP drop** on the keeper's connection. v4.3.1 injects `keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=6` into every source conninfo (only when you didn't set them yourself) so perimeter equipment stays warm.
+2. **`idle_in_transaction_session_timeout` on the source.** v4.3.1 issues `SET LOCAL idle_in_transaction_session_timeout = 0` inside the keeper's `BEGIN`, defeating any non-zero source-side setting for the keeper's lifetime.
+3. **`statement_timeout` on COMMIT.** v4.3.1 also issues `SET LOCAL statement_timeout = 0` in the keeper transaction.
+
+You can verify each layer is in effect by reading the source connection's parameters on the source side:
+
+```sql
+-- From the source DB, while a pgclone keeper transaction is mid-flight:
+SELECT pid, application_name, state, backend_start, xact_start,
+       current_setting('idle_in_transaction_session_timeout') AS iitt,
+       current_setting('statement_timeout') AS stmt_to
+FROM pg_stat_activity
+WHERE application_name LIKE 'pgclone%' AND state LIKE 'idle in transaction%';
+```
+
+Both timeout columns should read `0` for the keeper backend.
+
 ---
 
 ## Table Cloning

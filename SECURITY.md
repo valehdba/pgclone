@@ -2,12 +2,15 @@
 
 ## Supported Versions
 
+Security and bug fixes target the current minor release. Older minor lines receive security fixes for one minor cycle after the next minor is released; older majors are end-of-life.
+
 | Version | Supported |
 |---------|-----------|
-| 3.x     | ✅ Active |
-| 2.x     | ✅ Security fixes |
-| 1.x     | ❌ End of life |
-| 0.x     | ❌ End of life |
+| 4.3.x   | ✅ Active (current — fixes go here) |
+| 4.2.x   | ✅ Security fixes |
+| 4.0.x – 4.1.x | ❌ End of life |
+| 3.x     | ❌ End of life |
+| ≤ 2.x   | ❌ End of life |
 
 ## Reporting a Vulnerability
 
@@ -30,6 +33,8 @@ Connection strings passed to pgclone functions may contain passwords in plaintex
 - Use `.pgpass` files or the `PGPASSFILE` environment variable instead of inline passwords
 - Restrict access to pgclone functions to trusted users only
 - Avoid logging connection strings in application logs
+
+As of v4.3.1, pgclone re-parses every source `conninfo` via `PQconninfoParse` and reconnects via `PQconnectdbParams` to inject TCP keepalive defaults (issue #9). The conninfo is never serialised back to a single string for logging or storage, and any password parameter is handled exclusively through libpq's parameter array — never echoed by pgclone at `LOG` level or above. If `PQconninfoParse` itself rejects a malformed conninfo, pgclone propagates only libpq's parser message via `ereport(ERROR, ...)`; pgclone does not directly include the raw conninfo in the error. Operators relying on this property should still use `.pgpass` rather than inline passwords, since libpq's own parser message can in rare malformed-syntax cases include short fragments of the input.
 
 ### SQL Injection — WHERE Clause
 

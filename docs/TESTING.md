@@ -4,7 +4,7 @@ PgClone has a comprehensive test suite that runs across PostgreSQL versions 14�
 
 ## Test Suite Overview
 
-The test suite is organized into four test groups:
+The test suite is organized into six test groups:
 
 ### 1. pgTAP Sync Tests (66 tests)
 
@@ -60,6 +60,23 @@ Located in `test/test_async.sh` — covers background worker operations (8 tests
 - TEST 6: `pgclone.jobs_view` — progress tracking view
 - TEST 7: `pgclone.clear_jobs` — cleanup completed/failed jobs
 - TEST 8: Worker Pool — parallel schema clone with pool workers (v2.2.0)
+
+### 5. Consistent-Snapshot Tests (v4.3.0)
+
+Located in `test/test_consistent.sh`. Builds a parent/child schema with a foreign-key relationship, runs a background writer that continuously commits parent+child rows in separate transactions, then runs `pgclone.schema()` (sync), `pgclone.schema_async()` (parallel pool), and the `{"consistent": false}` opt-out path. Asserts that for every child row in the target there exists a matching parent row — without consistent-snapshot wrapping, copying tables one-at-a-time against a moving source would yield orphan FKs. The opt-out test confirms `{"consistent": false}` still functions and completes successfully.
+
+### 6. Snapshot-Keeper Resilience Tests (v4.3.1, issue #9)
+
+Located in `test/test_snapshot_keeper.sh`. Four groups, 14 assertions, exercising every layer of the v4.3.1 fix:
+
+| Group | What it stresses | Assertions |
+|---|---|---|
+| 1 | `SET LOCAL idle_in_transaction_session_timeout = 0` on keeper (sets `idle_in_transaction_session_timeout = 1s` on source role and runs a 5-table schema clone — deterministic regression for the original report) | 7 |
+| 2 | `SET LOCAL statement_timeout = 0` on keeper (sets `statement_timeout = 1s` on source role and runs a 2-table schema clone — confirms both keeper queries and importer `COPY`s are protected) | 4 |
+| 3 | `pgclone.database_create()` keeper across the outer per-schema loop (two-schema source, tight `idle_in_transaction_session_timeout`, fresh target DB) | 6 |
+| 4 | `PQconninfoParse` + `PQconnectdbParams` augmentation: both URI (`postgresql://…`) and keyword-form conninfo strings work; user-supplied `keepalives_idle=120 keepalives_count=3` are preserved (no overwrite of explicit choices) | 3 |
+
+Without the v4.3.1 fix, groups 1 and 3 would fail deterministically at the second or third table when the source kills the keeper transaction.
 
 ---
 
