@@ -104,11 +104,13 @@ DROP SCHEMA IF EXISTS keeper_test  CASCADE;
 DROP SCHEMA IF EXISTS keeper_test2 CASCADE;
 DROP SCHEMA IF EXISTS keeper_probe CASCADE;
 DROP SCHEMA IF EXISTS keeper_async CASCADE;
+DROP SCHEMA IF EXISTS keeper_txnto CASCADE;
 SQL
     tgt "DROP SCHEMA IF EXISTS keeper_test  CASCADE" >/dev/null 2>&1 || true
     tgt "DROP SCHEMA IF EXISTS keeper_test2 CASCADE" >/dev/null 2>&1 || true
     tgt "DROP SCHEMA IF EXISTS keeper_probe CASCADE" >/dev/null 2>&1 || true
     tgt "DROP SCHEMA IF EXISTS keeper_async CASCADE" >/dev/null 2>&1 || true
+    tgt "DROP SCHEMA IF EXISTS keeper_txnto CASCADE" >/dev/null 2>&1 || true
     psql -U postgres -d postgres -c "DROP DATABASE IF EXISTS keeper_test_dbc" \
         >/dev/null 2>&1 || true
 }
@@ -427,21 +429,38 @@ SRC_VER=$(src -tAc "SHOW server_version_num" 2>/dev/null | tr -d '[:space:]')
 if [ -z "$SRC_VER" ] || [ "$SRC_VER" -lt 170000 ]; then
     echo "  SKIP: source server_version_num='$SRC_VER' (< 170000, no transaction_timeout)"
 else
+    # Build a dedicated source schema. Earlier groups rebuild
+    # keeper_test with different tables, so this group must own its
+    # own schema. 5 x 5000 rows takes several seconds to clone —
+    # comfortably longer than the 1s transaction_timeout below, so
+    # without the fix the keeper transaction is force-terminated and
+    # a later per-table importer fails with "invalid snapshot
+    # identifier".
+    src <<'SQL'
+DROP SCHEMA IF EXISTS keeper_txnto CASCADE;
+CREATE SCHEMA keeper_txnto;
+CREATE TABLE keeper_txnto.t1 (id int PRIMARY KEY, payload text);
+CREATE TABLE keeper_txnto.t2 (id int PRIMARY KEY, payload text);
+CREATE TABLE keeper_txnto.t3 (id int PRIMARY KEY, payload text);
+CREATE TABLE keeper_txnto.t4 (id int PRIMARY KEY, payload text);
+CREATE TABLE keeper_txnto.t5 (id int PRIMARY KEY, payload text);
+INSERT INTO keeper_txnto.t1 SELECT g, repeat('x', 200) FROM generate_series(1, 5000) g;
+INSERT INTO keeper_txnto.t2 SELECT g, repeat('y', 200) FROM generate_series(1, 5000) g;
+INSERT INTO keeper_txnto.t3 SELECT g, repeat('z', 200) FROM generate_series(1, 5000) g;
+INSERT INTO keeper_txnto.t4 SELECT g, repeat('w', 200) FROM generate_series(1, 5000) g;
+INSERT INTO keeper_txnto.t5 SELECT g, repeat('v', 200) FROM generate_series(1, 5000) g;
+SQL
+
     src <<SQL
 ALTER ROLE $SOURCE_USER RESET idle_in_transaction_session_timeout;
 ALTER ROLE $SOURCE_USER RESET statement_timeout;
 ALTER ROLE $SOURCE_USER SET transaction_timeout = '1s';
 SQL
 
-    tgt "DROP SCHEMA IF EXISTS keeper_test CASCADE" >/dev/null
+    tgt "DROP SCHEMA IF EXISTS keeper_txnto CASCADE" >/dev/null
 
-    # The 5 x 5000-row keeper_test schema takes several seconds to
-    # clone — comfortably longer than the 1s transaction_timeout, so
-    # without the fix the keeper transaction is force-terminated and
-    # a later per-table importer fails with "invalid snapshot
-    # identifier".
     CLONE_RC=0
-    CLONE_OUT=$(tgt "SELECT pgclone.schema('$CONNINFO', 'keeper_test', true)" 2>&1) || CLONE_RC=$?
+    CLONE_OUT=$(tgt "SELECT pgclone.schema('$CONNINFO', 'keeper_txnto', true)" 2>&1) || CLONE_RC=$?
     echo "  exit code: $CLONE_RC"
 
     run_test "pgclone.schema returns OK under tight transaction_timeout" \
@@ -451,14 +470,16 @@ SQL
         "! echo '$CLONE_OUT' | grep -qi 'invalid snapshot identifier'"
 
     for tbl in t1 t2 t3 t4 t5; do
-        n=$(tgt "SELECT count(*) FROM keeper_test.$tbl" 2>/dev/null || echo "missing")
-        run_test "keeper_test.$tbl cloned with 5000 rows under transaction_timeout (actual: $n)" \
+        n=$(tgt "SELECT count(*) FROM keeper_txnto.$tbl" 2>/dev/null || echo "missing")
+        run_test "keeper_txnto.$tbl cloned with 5000 rows under transaction_timeout (actual: $n)" \
             "[ '$n' = '5000' ]"
     done
 
     src <<SQL
 ALTER ROLE $SOURCE_USER RESET transaction_timeout;
+DROP SCHEMA IF EXISTS keeper_txnto CASCADE;
 SQL
+    tgt "DROP SCHEMA IF EXISTS keeper_txnto CASCADE" >/dev/null 2>&1 || true
 fi
 
 echo ""
