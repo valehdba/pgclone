@@ -865,13 +865,35 @@ pgclone_begin_repeatable_read(PGconn *conn)
     /* Defeat server-side timeouts for the keeper's idle window.
      * Failures here are non-fatal — TCP keepalives still protect
      * us against the firewall path. */
-    res = PQexec(conn,
-                 "SET LOCAL idle_in_transaction_session_timeout = 0; "
-                 "SET LOCAL statement_timeout = 0");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-        elog(DEBUG1, "pgclone: could not disable source-side timeouts: %s",
-             PQerrorMessage(conn));
-    PQclear(res);
+    {
+        StringInfoData setcmd;
+
+        initStringInfo(&setcmd);
+        appendStringInfoString(&setcmd,
+            "SET LOCAL idle_in_transaction_session_timeout = 0; "
+            "SET LOCAL statement_timeout = 0");
+
+        /* transaction_timeout (PG 17+) caps a transaction's *total*
+         * wall-clock age and fires whether the session is idle or
+         * active, so neither TCP keepalives nor
+         * idle_in_transaction_session_timeout = 0 defend against it:
+         * it reaps the snapshot keeper mid-clone (issue #5). The GUC
+         * does not exist on source servers < 17, where SET would
+         * raise "unrecognized configuration parameter", so gate on
+         * the SOURCE server version via PQserverVersion() — the
+         * source may run a different major version than this backend,
+         * so PG_VERSION_NUM is the wrong test here. */
+        if (PQserverVersion(conn) >= 170000)
+            appendStringInfoString(&setcmd,
+                "; SET LOCAL transaction_timeout = 0");
+
+        res = PQexec(conn, setcmd.data);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            elog(DEBUG1, "pgclone: could not disable source-side timeouts: %s",
+                 PQerrorMessage(conn));
+        PQclear(res);
+        pfree(setcmd.data);
+    }
 }
 
 /* COMMIT the source transaction. Safe to call when no transaction is
@@ -968,13 +990,16 @@ pgclone_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
                             snapshot_id, errmsg_copy),
                      errhint("The exporting (keeper) transaction was likely "
                              "terminated mid-clone. Common causes: a firewall "
-                             "or NAT gateway dropped the idle TCP session, or "
-                             "the source has a non-zero "
-                             "idle_in_transaction_session_timeout. pgclone "
-                             "4.3.1 injects TCP keepalives and clears those "
-                             "timeouts on the keeper transaction; verify the "
-                             "extension was reloaded after upgrade. As an "
-                             "emergency workaround, pass "
+                             "or NAT gateway dropped the idle TCP session; a "
+                             "non-zero idle_in_transaction_session_timeout; "
+                             "or, on a PostgreSQL 17+ source, a non-zero "
+                             "transaction_timeout (which caps total "
+                             "transaction age and fires even on an active "
+                             "keeper). pgclone injects TCP keepalives and "
+                             "issues SET LOCAL ... = 0 for all three timeouts "
+                             "on the keeper transaction; verify the extension "
+                             "was reloaded after upgrade. As an emergency "
+                             "workaround, pass "
                              "'{\"consistent\": false}' in the options "
                              "argument to disable cross-table snapshot "
                              "sharing.")));
