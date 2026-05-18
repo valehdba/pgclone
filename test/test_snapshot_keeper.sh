@@ -59,6 +59,7 @@ echo "  group 2: statement_timeout"
 echo "  group 3: pgclone.database_create keeper"
 echo "  group 4: conninfo form handling"
 echo "  group 5: async path (v4.3.2 bgw)"
+echo "  group 6: transaction_timeout (PG17+)"
 echo "============================================"
 
 # ---- Build a small multi-table schema on the source ----
@@ -98,6 +99,7 @@ cleanup() {
     src <<SQL >/dev/null 2>&1 || true
 ALTER ROLE $SOURCE_USER RESET idle_in_transaction_session_timeout;
 ALTER ROLE $SOURCE_USER RESET statement_timeout;
+ALTER ROLE $SOURCE_USER RESET transaction_timeout;
 DROP SCHEMA IF EXISTS keeper_test  CASCADE;
 DROP SCHEMA IF EXISTS keeper_test2 CASCADE;
 DROP SCHEMA IF EXISTS keeper_probe CASCADE;
@@ -404,6 +406,59 @@ ALTER ROLE $SOURCE_USER RESET idle_in_transaction_session_timeout;
 DROP SCHEMA IF EXISTS keeper_async CASCADE;
 SQL
     tgt "DROP SCHEMA IF EXISTS keeper_async CASCADE" >/dev/null 2>&1 || true
+fi
+
+echo ""
+echo "============================================"
+echo "Test group 6: transaction_timeout protection (PG17+)"
+echo "============================================"
+
+# ============================================================
+# transaction_timeout (PG 17+) caps a transaction's total age and
+# fires even on an actively-used keeper, so the idle_in_transaction
+# and keepalive mitigations from groups 1-5 do NOT cover it. This
+# group verifies the keeper's SET LOCAL transaction_timeout = 0
+# defeats a non-zero source-side transaction_timeout. Skipped on
+# source servers < 17, where the GUC does not exist (SET would
+# raise "unrecognized configuration parameter"). (issue #5)
+# ============================================================
+
+SRC_VER=$(src -tAc "SHOW server_version_num" 2>/dev/null | tr -d '[:space:]')
+if [ -z "$SRC_VER" ] || [ "$SRC_VER" -lt 170000 ]; then
+    echo "  SKIP: source server_version_num='$SRC_VER' (< 170000, no transaction_timeout)"
+else
+    src <<SQL
+ALTER ROLE $SOURCE_USER RESET idle_in_transaction_session_timeout;
+ALTER ROLE $SOURCE_USER RESET statement_timeout;
+ALTER ROLE $SOURCE_USER SET transaction_timeout = '1s';
+SQL
+
+    tgt "DROP SCHEMA IF EXISTS keeper_test CASCADE" >/dev/null
+
+    # The 5 x 5000-row keeper_test schema takes several seconds to
+    # clone — comfortably longer than the 1s transaction_timeout, so
+    # without the fix the keeper transaction is force-terminated and
+    # a later per-table importer fails with "invalid snapshot
+    # identifier".
+    CLONE_RC=0
+    CLONE_OUT=$(tgt "SELECT pgclone.schema('$CONNINFO', 'keeper_test', true)" 2>&1) || CLONE_RC=$?
+    echo "  exit code: $CLONE_RC"
+
+    run_test "pgclone.schema returns OK under tight transaction_timeout" \
+        "[ '$CLONE_RC' = '0' ] && [ '$CLONE_OUT' = 'OK' ]"
+
+    run_test "no 'invalid snapshot identifier' error under transaction_timeout" \
+        "! echo '$CLONE_OUT' | grep -qi 'invalid snapshot identifier'"
+
+    for tbl in t1 t2 t3 t4 t5; do
+        n=$(tgt "SELECT count(*) FROM keeper_test.$tbl" 2>/dev/null || echo "missing")
+        run_test "keeper_test.$tbl cloned with 5000 rows under transaction_timeout (actual: $n)" \
+            "[ '$n' = '5000' ]"
+    done
+
+    src <<SQL
+ALTER ROLE $SOURCE_USER RESET transaction_timeout;
+SQL
 fi
 
 echo ""

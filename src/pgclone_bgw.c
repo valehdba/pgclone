@@ -310,17 +310,36 @@ bgw_begin_repeatable_read(PGconn *conn)
     PQclear(res);
 
     /* v4.3.2: defeat server-side timeouts for the keeper's idle
-     * window. SET LOCAL reverts at COMMIT; both GUCs are PGC_USERSET
+     * window. SET LOCAL reverts at COMMIT; the GUCs are PGC_USERSET
      * so no special privilege is required. Failures here are
      * non-fatal — TCP keepalives still protect us against the
      * firewall path. (issue #9 mirror in bgw) */
-    res = PQexec(conn,
-                 "SET LOCAL idle_in_transaction_session_timeout = 0; "
-                 "SET LOCAL statement_timeout = 0");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-        elog(DEBUG1, "pgclone bgw: could not disable source-side timeouts: %s",
-             PQerrorMessage(conn));
-    PQclear(res);
+    {
+        StringInfoData setcmd;
+
+        initStringInfo(&setcmd);
+        appendStringInfoString(&setcmd,
+            "SET LOCAL idle_in_transaction_session_timeout = 0; "
+            "SET LOCAL statement_timeout = 0");
+
+        /* transaction_timeout (PG 17+) caps a transaction's total
+         * wall-clock age and fires whether the session is idle or
+         * active — keepalives and idle_in_transaction_session_timeout
+         * = 0 do not defend against it, so it reaps the keeper
+         * mid-clone (issue #5). The GUC is unknown to source servers
+         * < 17, where SET raises an error, so gate on the source's
+         * PQserverVersion() rather than this backend's PG_VERSION_NUM. */
+        if (PQserverVersion(conn) >= 170000)
+            appendStringInfoString(&setcmd,
+                "; SET LOCAL transaction_timeout = 0");
+
+        res = PQexec(conn, setcmd.data);
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            elog(DEBUG1, "pgclone bgw: could not disable source-side timeouts: %s",
+                 PQerrorMessage(conn));
+        PQclear(res);
+        pfree(setcmd.data);
+    }
     return true;
 }
 
@@ -405,12 +424,15 @@ bgw_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
                  "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s"
                  "HINT: The exporting (coordinator/keeper) transaction "
                  "was likely terminated. Common causes: firewall idle drop, "
-                 "idle_in_transaction_session_timeout on the source. "
-                 "Async path mitigations (v4.3.2): TCP keepalives are "
+                 "idle_in_transaction_session_timeout on the source, or — on "
+                 "a PostgreSQL 17+ source — a non-zero transaction_timeout "
+                 "(caps total transaction age, fires even on an active "
+                 "keeper). Async path mitigations: TCP keepalives are "
                  "auto-injected; the keeper transaction issues SET LOCAL "
-                 "idle_in_transaction_session_timeout = 0. "
+                 "idle_in_transaction_session_timeout = 0, statement_timeout "
+                 "= 0, and (PG 17+) transaction_timeout = 0. "
                  "Emergency workaround: pass {\"consistent\": false} in "
-                 "the options JSON. See issue #9.",
+                 "the options JSON. See issue #5 / #9.",
                  snapshot_id, errtxt);
         else
             elog(WARNING, "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s",
