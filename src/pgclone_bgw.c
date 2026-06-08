@@ -1140,6 +1140,8 @@ pgclone_pool_worker_main(Datum main_arg)
     PGconn         *local_conn = NULL;
     const char     *port;
     const char     *dbname;
+    bool            is_last_worker = false;
+    int             pool_failed_count = 0;
 
     /* Signal handlers */
 #if PG_VERSION_NUM >= 170000
@@ -1424,10 +1426,110 @@ pgclone_pool_worker_main(Datum main_arg)
                          pgclone_state->pool.completed_count,
                          pgclone_state->pool.num_tasks);
                 pgclone_state->pool.active = false;
+                is_last_worker = true;
+                pool_failed_count = pgclone_state->pool.failed_count;
             }
         }
     }
     LWLockRelease(pgclone_state->lock);
+
+    /*
+     * Last worker to finish syncs sequence current values.
+     *
+     * CREATE SEQUENCE in the pre-launch phase (pgclone_schema_async) only
+     * sets the definition.  The actual runtime position — how far nextval()
+     * has already advanced — must be replayed via setval() so the target
+     * never re-issues IDs that already exist in the just-copied data.
+     *
+     * We skip this if any table failed: the dataset is incomplete and the
+     * caller must handle the inconsistency.
+     */
+    if (is_last_worker && pool_failed_count == 0)
+    {
+        PGconn     *sv_source = NULL;
+        PGconn     *sv_local  = NULL;
+        PGresult   *sv_res;
+        StringInfoData svbuf;
+        int         si;
+        char        schema_name_copy[NAMEDATALEN];
+        char        source_conninfo_copy[1024];
+
+        /* Copy from shared memory before using outside the lock */
+        strlcpy(schema_name_copy,    pgclone_state->pool.schema_name,    NAMEDATALEN);
+        strlcpy(source_conninfo_copy, pgclone_state->pool.source_conninfo,
+                sizeof(source_conninfo_copy));
+
+        sv_source = bgw_connect_with_keepalives(source_conninfo_copy);
+        sv_local  = bgw_connect_local(dbname, port, job->username);
+
+        if (PQstatus(sv_source) == CONNECTION_OK &&
+            PQstatus(sv_local)  == CONNECTION_OK)
+        {
+            initStringInfo(&svbuf);
+            appendStringInfo(&svbuf,
+                "SELECT sequencename, last_value, is_called "
+                "FROM pg_catalog.pg_sequences "
+                "WHERE schemaname = %s "
+                "AND last_value IS NOT NULL",
+                quote_literal_cstr(schema_name_copy));
+
+            sv_res = PQexec(sv_source, svbuf.data);
+
+            if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
+            {
+                for (si = 0; si < PQntuples(sv_res); si++)
+                {
+                    const char *seqname   = PQgetvalue(sv_res, si, 0);
+                    const char *last_val  = PQgetvalue(sv_res, si, 1);
+                    const char *is_called = PQgetvalue(sv_res, si, 2);
+                    char       *qualified;
+                    const char *quoted_seq;
+                    PGresult   *lcres;
+
+                    qualified  = psprintf("%s.%s",
+                                          quote_identifier(schema_name_copy),
+                                          quote_identifier(seqname));
+                    quoted_seq = quote_literal_cstr(qualified);
+                    pfree(qualified);
+
+                    resetStringInfo(&svbuf);
+                    appendStringInfo(&svbuf,
+                        "SELECT setval(%s, %s, %s)",
+                        quoted_seq,
+                        last_val,
+                        strcmp(is_called, "t") == 0 ? "true" : "false");
+
+                    lcres = PQexec(sv_local, svbuf.data);
+                    if (PQresultStatus(lcres) != PGRES_TUPLES_OK)
+                        elog(WARNING,
+                             "pgclone pool: setval for sequence %s.%s failed: %s",
+                             schema_name_copy, seqname,
+                             PQerrorMessage(sv_local));
+                    PQclear(lcres);
+                }
+
+                elog(DEBUG1,
+                     "pgclone pool: synced current value for %d sequences in schema %s",
+                     PQntuples(sv_res), schema_name_copy);
+            }
+            else
+            {
+                elog(WARNING,
+                     "pgclone pool: could not query pg_sequences for schema %s: %s",
+                     schema_name_copy, PQerrorMessage(sv_source));
+            }
+
+            PQclear(sv_res);
+            pfree(svbuf.data);
+        }
+        else
+        {
+            elog(WARNING, "pgclone pool: could not open connections for setval pass");
+        }
+
+        if (sv_source) PQfinish(sv_source);
+        if (sv_local)  PQfinish(sv_local);
+    }
 
 pool_cleanup:
     if (source_conn)

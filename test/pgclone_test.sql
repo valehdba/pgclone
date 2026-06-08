@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(77);
+SELECT plan(78);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -512,7 +512,7 @@ SELECT results_eq(
 -- "relation does not exist" at CREATE FUNCTION time).
 -- ============================================================
 
--- 11 tests below — keep in sync with plan() above.
+-- 12 tests below — keep in sync with plan() above.
 
 SELECT lives_ok(
     format($q$SELECT pgclone.schema(%L, %L, true)$q$,
@@ -560,6 +560,18 @@ SELECT results_eq(
     'SELECT count(*)::integer FROM dep_test.documents_to_resend',
     ARRAY[1],
     'documents_to_resend data preserved through clone');
+
+-- Sequence current value must have been synced via setval().
+-- The source had 1 row inserted (seed), so last_value = 1, is_called = true.
+-- A new INSERT must get id = 2 (not 1, which would conflict with cloned data).
+SELECT results_eq(
+    $$
+    INSERT INTO dep_test.documents_to_resend (payload)
+    VALUES ('after-clone-insert')
+    RETURNING id
+    $$,
+    ARRAY[2],
+    'sequence position synced: first post-clone insert gets id=2 not id=1');
 
 SELECT * FROM finish();
 ROLLBACK;

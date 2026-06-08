@@ -2414,6 +2414,68 @@ pgclone_schema(PG_FUNCTION_ARGS)
          PQntuples(res), schema_name);
     PQclear(res);
 
+    /* ---- Step 2b: Sync sequence current values ----
+     *
+     * CREATE SEQUENCE above only records the definition (START WITH,
+     * INCREMENT, etc.).  The actual runtime position — how far nextval()
+     * has advanced — lives in pg_sequences.last_value / is_called and
+     * must be replayed via setval() so the target never reuses IDs that
+     * already exist in the cloned data.
+     *
+     * last_value is NULL when a sequence has never been called (is_called
+     * is false and the sequence was freshly created).  In that case no
+     * setval() is needed — the sequence starts at the right position from
+     * the CREATE SEQUENCE above.
+     *
+     * We read from source_conn (the snapshot keeper) so the value is
+     * consistent with the data snapshot used for the table COPY.
+     */
+    {
+        PGresult *sv_res;
+        int       si;
+
+        resetStringInfo(&buf);
+        appendStringInfo(&buf,
+            "SELECT sequencename, last_value, is_called "
+            "FROM pg_catalog.pg_sequences "
+            "WHERE schemaname = %s "
+            "AND last_value IS NOT NULL",
+            quote_literal_cstr(schema_name));
+
+        sv_res = pgclone_exec(source_conn, buf.data);
+
+        for (si = 0; si < PQntuples(sv_res); si++)
+        {
+            const char *seqname    = PQgetvalue(sv_res, si, 0);
+            const char *last_val   = PQgetvalue(sv_res, si, 1);
+            const char *is_called  = PQgetvalue(sv_res, si, 2);
+            char       *qualified;
+            const char *quoted_seq;
+
+            /* Build schema-qualified name then quote it as a literal
+             * for the regclass argument to setval(). */
+            qualified  = psprintf("%s.%s",
+                                  quote_identifier(schema_name),
+                                  quote_identifier(seqname));
+            quoted_seq = quote_literal_cstr(qualified);
+            pfree(qualified);
+
+            resetStringInfo(&buf);
+            appendStringInfo(&buf,
+                "SELECT setval(%s, %s, %s)",
+                quoted_seq,
+                last_val,
+                strcmp(is_called, "t") == 0 ? "true" : "false");
+
+            pgclone_exec_conn(local_conn, buf.data);
+        }
+
+        elog(DEBUG1,
+             "pgclone: synced current value for %d sequences in schema %s",
+             PQntuples(sv_res), schema_name);
+        PQclear(sv_res);
+    }
+
     PQfinish(local_conn);
 
     /* ---- Step 3: Clone tables ----
