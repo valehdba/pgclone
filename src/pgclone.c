@@ -2248,20 +2248,28 @@ pgclone_table(PG_FUNCTION_ARGS)
      * source runtime position.  Without this, the first INSERT on the
      * target gets an ID that already exists in the copied rows.
      *
-     * A dedicated short-lived connection is used (not source_conn) so
-     * that any query error cannot corrupt source_conn's transaction state.
+     * Runs on source_conn, guarded by a SAVEPOINT when that connection
+     * is inside a transaction (opts.consistent), so a failed read can be
+     * rolled back without aborting the transaction that Steps 4-6
+     * (constraints, indexes, triggers) still need.  No extra source
+     * connection is opened.
      *
-     * We only sync sequences with last_value IS NOT NULL — a sequence
-     * that was never called needs no setval; CREATE SEQUENCE already set
-     * the right START WITH.
+     * Only sequences with last_value IS NOT NULL are synced; a sequence
+     * that was never called needs no setval.
      */
     if (include_data)
     {
-        PGconn   *sv_source;
         PGresult *sv_res;
         int       si;
+        bool      in_txn = opts.consistent;
 
-        sv_source = pgclone_connect(source_conninfo);
+        if (in_txn)
+        {
+            PGresult *sp = PQexec(source_conn, "SAVEPOINT pgclone_seqsync");
+            if (PQresultStatus(sp) != PGRES_COMMAND_OK)
+                in_txn = false;
+            PQclear(sp);
+        }
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
@@ -2279,7 +2287,7 @@ pgclone_table(PG_FUNCTION_ARGS)
             quote_literal_cstr(schema_name),
             quote_literal_cstr(table_name));
 
-        sv_res = PQexec(sv_source, buf.data);
+        sv_res = PQexec(source_conn, buf.data);
 
         if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
         {
@@ -2311,15 +2319,27 @@ pgclone_table(PG_FUNCTION_ARGS)
                 elog(DEBUG1,
                      "pgclone: synced current value for %d sequences for table %s.%s",
                      PQntuples(sv_res), schema_name, table_name);
+
+            if (in_txn)
+            {
+                PGresult *rel = PQexec(source_conn,
+                                       "RELEASE SAVEPOINT pgclone_seqsync");
+                PQclear(rel);
+            }
         }
         else
         {
             elog(WARNING,
                  "pgclone: could not query pg_sequences for table %s.%s: %s",
-                 schema_name, table_name, PQerrorMessage(sv_source));
+                 schema_name, table_name, PQerrorMessage(source_conn));
+            if (in_txn)
+            {
+                PGresult *rb = PQexec(source_conn,
+                                      "ROLLBACK TO SAVEPOINT pgclone_seqsync");
+                PQclear(rb);
+            }
         }
         PQclear(sv_res);
-        PQfinish(sv_source);
     }
 
     /* ---- Step 4: Clone constraints if enabled ---- */
@@ -2502,23 +2522,31 @@ pgclone_schema(PG_FUNCTION_ARGS)
      * must be replayed via setval() so the target never reuses IDs that
      * already exist in the cloned data.
      *
-     * We use a dedicated short-lived source connection rather than
-     * source_conn so that any query error cannot corrupt source_conn's
-     * transaction state (source_conn may be inside a REPEATABLE READ
-     * transaction as the snapshot keeper, and a failed query there would
-     * put the transaction in an aborted state, breaking all subsequent
-     * steps that read from source_conn).
+     * The query runs on source_conn (the snapshot keeper).  When that
+     * connection is inside a transaction (opts.consistent) we wrap the
+     * read in a SAVEPOINT so that any failure can be rolled back without
+     * aborting the keeper transaction — a plain failed query inside a
+     * transaction would otherwise poison every later step that reads
+     * from source_conn.  No extra source connection is opened, so the
+     * keeper-resilience guarantees (snapshot, keepalives, SET LOCAL
+     * timeout overrides from issue #9) are preserved.
      *
      * last_value IS NOT NULL means the sequence has been called at least
-     * once; freshly created sequences (last_value IS NULL) need no setval
-     * because CREATE SEQUENCE already set the right START WITH.
+     * once; freshly created sequences need no setval (CREATE SEQUENCE
+     * already set the right START WITH).
      */
     {
-        PGconn   *sv_source;
         PGresult *sv_res;
         int       si;
+        bool      in_txn = opts.consistent;
 
-        sv_source = pgclone_connect(source_conninfo);
+        if (in_txn)
+        {
+            PGresult *sp = PQexec(source_conn, "SAVEPOINT pgclone_seqsync");
+            if (PQresultStatus(sp) != PGRES_COMMAND_OK)
+                in_txn = false;   /* not in a txn after all; proceed plainly */
+            PQclear(sp);
+        }
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
@@ -2528,7 +2556,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
             "AND last_value IS NOT NULL",
             quote_literal_cstr(schema_name));
 
-        sv_res = PQexec(sv_source, buf.data);
+        sv_res = PQexec(source_conn, buf.data);
 
         if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
         {
@@ -2559,15 +2587,27 @@ pgclone_schema(PG_FUNCTION_ARGS)
             elog(DEBUG1,
                  "pgclone: synced current value for %d sequences in schema %s",
                  PQntuples(sv_res), schema_name);
+
+            if (in_txn)
+            {
+                PGresult *rel = PQexec(source_conn,
+                                       "RELEASE SAVEPOINT pgclone_seqsync");
+                PQclear(rel);
+            }
         }
         else
         {
             elog(WARNING,
                  "pgclone: could not query pg_sequences for schema %s: %s",
-                 schema_name, PQerrorMessage(sv_source));
+                 schema_name, PQerrorMessage(source_conn));
+            if (in_txn)
+            {
+                PGresult *rb = PQexec(source_conn,
+                                      "ROLLBACK TO SAVEPOINT pgclone_seqsync");
+                PQclear(rb);
+            }
         }
         PQclear(sv_res);
-        PQfinish(sv_source);
     }
 
     PQfinish(local_conn);
