@@ -1015,9 +1015,19 @@ pgclone_bgw_main(Datum main_arg)
             PGresult *seq_res;
             resetStringInfo(&buf);
             appendStringInfo(&buf,
-                "SELECT sequence_name FROM information_schema.sequences "
-                "WHERE sequence_schema = '%s'",
-                job->schema_name);
+                "SELECT s.relname, "
+                "       pg_sequence.seqstart, "
+                "       pg_sequence.seqincrement, "
+                "       pg_sequence.seqmax, "
+                "       pg_sequence.seqmin, "
+                "       pg_sequence.seqcache, "
+                "       pg_sequence.seqcycle, "
+                "       pg_sequence.seqtypid::regtype::text "
+                "FROM pg_catalog.pg_class s "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = s.relnamespace "
+                "JOIN pg_catalog.pg_sequence ON pg_sequence.seqrelid = s.oid "
+                "WHERE n.nspname = %s AND s.relkind = 'S'",
+                quote_literal_cstr(job->schema_name));
 
             seq_res = PQexec(source_conn, buf.data);
             if (PQresultStatus(seq_res) == PGRES_TUPLES_OK)
@@ -1025,11 +1035,22 @@ pgclone_bgw_main(Datum main_arg)
                 int si;
                 for (si = 0; si < PQntuples(seq_res); si++)
                 {
-                    const char *seqname = PQgetvalue(seq_res, si, 0);
                     resetStringInfo(&buf);
                     appendStringInfo(&buf,
-                        "CREATE SEQUENCE IF NOT EXISTS %s.%s",
-                        job->schema_name, seqname);
+                        "CREATE SEQUENCE IF NOT EXISTS %s.%s "
+                        "AS %s "
+                        "START WITH %s INCREMENT BY %s "
+                        "MINVALUE %s MAXVALUE %s CACHE %s %s",
+                        quote_identifier(job->schema_name),
+                        quote_identifier(PQgetvalue(seq_res, si, 0)),
+                        PQgetvalue(seq_res, si, 7),   /* data type */
+                        PQgetvalue(seq_res, si, 1),   /* start */
+                        PQgetvalue(seq_res, si, 2),   /* increment */
+                        PQgetvalue(seq_res, si, 4),   /* min */
+                        PQgetvalue(seq_res, si, 3),   /* max */
+                        PQgetvalue(seq_res, si, 5),   /* cache */
+                        strcmp(PQgetvalue(seq_res, si, 6), "t") == 0 ?
+                            "CYCLE" : "NO CYCLE");
                     bgw_exec(local_conn, buf.data);
                 }
             }
@@ -1098,6 +1119,58 @@ pgclone_bgw_main(Datum main_arg)
         }
 
         PQclear(table_res);
+
+        /* Sync sequence current values after all table data is copied.
+         * CREATE SEQUENCE only records the definition; the runtime
+         * position must be replayed via setval() to prevent ID reuse. */
+        if (job->include_data)
+        {
+            PGresult   *sv_res;
+            StringInfoData svbuf;
+
+            initStringInfo(&svbuf);
+            appendStringInfo(&svbuf,
+                "SELECT sequencename, last_value, is_called "
+                "FROM pg_catalog.pg_sequences "
+                "WHERE schemaname = %s "
+                "AND last_value IS NOT NULL",
+                quote_literal_cstr(job->schema_name));
+
+            sv_res = PQexec(source_conn, svbuf.data);
+            if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
+            {
+                int si;
+                for (si = 0; si < PQntuples(sv_res); si++)
+                {
+                    const char *seqname   = PQgetvalue(sv_res, si, 0);
+                    const char *last_val  = PQgetvalue(sv_res, si, 1);
+                    const char *is_called = PQgetvalue(sv_res, si, 2);
+                    char       *qualified;
+                    const char *quoted_seq;
+
+                    qualified  = psprintf("%s.%s",
+                                          quote_identifier(job->schema_name),
+                                          quote_identifier(seqname));
+                    quoted_seq = quote_literal_cstr(qualified);
+                    pfree(qualified);
+
+                    resetStringInfo(&svbuf);
+                    appendStringInfo(&svbuf,
+                        "SELECT setval(%s, %s, %s)",
+                        quoted_seq,
+                        last_val,
+                        strcmp(is_called, "t") == 0 ? "true" : "false");
+
+                    bgw_exec(local_conn, svbuf.data);
+                }
+                elog(DEBUG1,
+                     "pgclone bgw: synced current value for %d sequences in schema %s",
+                     PQntuples(sv_res), job->schema_name);
+            }
+            PQclear(sv_res);
+            pfree(svbuf.data);
+        }
+
         pfree(buf.data);
     }
 
