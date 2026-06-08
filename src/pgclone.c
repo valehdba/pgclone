@@ -2248,14 +2248,20 @@ pgclone_table(PG_FUNCTION_ARGS)
      * source runtime position.  Without this, the first INSERT on the
      * target gets an ID that already exists in the copied rows.
      *
+     * A dedicated short-lived connection is used (not source_conn) so
+     * that any query error cannot corrupt source_conn's transaction state.
+     *
      * We only sync sequences with last_value IS NOT NULL — a sequence
      * that was never called needs no setval; CREATE SEQUENCE already set
      * the right START WITH.
      */
     if (include_data)
     {
+        PGconn   *sv_source;
         PGresult *sv_res;
         int       si;
+
+        sv_source = pgclone_connect(source_conninfo);
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
@@ -2273,7 +2279,7 @@ pgclone_table(PG_FUNCTION_ARGS)
             quote_literal_cstr(schema_name),
             quote_literal_cstr(table_name));
 
-        sv_res = PQexec(source_conn, buf.data);
+        sv_res = PQexec(sv_source, buf.data);
 
         if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
         {
@@ -2310,9 +2316,10 @@ pgclone_table(PG_FUNCTION_ARGS)
         {
             elog(WARNING,
                  "pgclone: could not query pg_sequences for table %s.%s: %s",
-                 schema_name, table_name, PQerrorMessage(source_conn));
+                 schema_name, table_name, PQerrorMessage(sv_source));
         }
         PQclear(sv_res);
+        PQfinish(sv_source);
     }
 
     /* ---- Step 4: Clone constraints if enabled ---- */
@@ -2495,17 +2502,23 @@ pgclone_schema(PG_FUNCTION_ARGS)
      * must be replayed via setval() so the target never reuses IDs that
      * already exist in the cloned data.
      *
-     * last_value is NULL when a sequence has never been called (is_called
-     * is false and the sequence was freshly created).  In that case no
-     * setval() is needed — the sequence starts at the right position from
-     * the CREATE SEQUENCE above.
+     * We use a dedicated short-lived source connection rather than
+     * source_conn so that any query error cannot corrupt source_conn's
+     * transaction state (source_conn may be inside a REPEATABLE READ
+     * transaction as the snapshot keeper, and a failed query there would
+     * put the transaction in an aborted state, breaking all subsequent
+     * steps that read from source_conn).
      *
-     * We read from source_conn (the snapshot keeper) so the value is
-     * consistent with the data snapshot used for the table COPY.
+     * last_value IS NOT NULL means the sequence has been called at least
+     * once; freshly created sequences (last_value IS NULL) need no setval
+     * because CREATE SEQUENCE already set the right START WITH.
      */
     {
+        PGconn   *sv_source;
         PGresult *sv_res;
         int       si;
+
+        sv_source = pgclone_connect(source_conninfo);
 
         resetStringInfo(&buf);
         appendStringInfo(&buf,
@@ -2515,7 +2528,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
             "AND last_value IS NOT NULL",
             quote_literal_cstr(schema_name));
 
-        sv_res = PQexec(source_conn, buf.data);
+        sv_res = PQexec(sv_source, buf.data);
 
         if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
         {
@@ -2527,8 +2540,6 @@ pgclone_schema(PG_FUNCTION_ARGS)
                 char       *qualified;
                 const char *quoted_seq;
 
-                /* Build schema-qualified name then quote it as a literal
-                 * for the regclass argument to setval(). */
                 qualified  = psprintf("%s.%s",
                                       quote_identifier(schema_name),
                                       quote_identifier(seqname));
@@ -2553,9 +2564,10 @@ pgclone_schema(PG_FUNCTION_ARGS)
         {
             elog(WARNING,
                  "pgclone: could not query pg_sequences for schema %s: %s",
-                 schema_name, PQerrorMessage(source_conn));
+                 schema_name, PQerrorMessage(sv_source));
         }
         PQclear(sv_res);
+        PQfinish(sv_source);
     }
 
     PQfinish(local_conn);
