@@ -2271,9 +2271,14 @@ pgclone_table(PG_FUNCTION_ARGS)
             PQclear(sp);
         }
 
+        /* Find sequences OWNED by this table (serial/identity columns)
+         * via the pg_depend 'a' (auto) dependency.  pg_sequences is used
+         * only to skip never-called sequences (last_value IS NULL); the
+         * authoritative last_value / is_called pair is read directly from
+         * each sequence relation below (pg_sequences has no is_called). */
         resetStringInfo(&buf);
         appendStringInfo(&buf,
-            "SELECT s.relname, ps.last_value, ps.is_called "
+            "SELECT s.relname "
             "FROM pg_catalog.pg_class t "
             "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
             "JOIN pg_catalog.pg_depend dep ON dep.refobjid = t.oid "
@@ -2293,26 +2298,38 @@ pgclone_table(PG_FUNCTION_ARGS)
         {
             for (si = 0; si < PQntuples(sv_res); si++)
             {
-                const char *seqname   = PQgetvalue(sv_res, si, 0);
-                const char *last_val  = PQgetvalue(sv_res, si, 1);
-                const char *is_called = PQgetvalue(sv_res, si, 2);
+                const char *seqname = PQgetvalue(sv_res, si, 0);
                 char       *qualified;
                 const char *quoted_seq;
+                PGresult   *val_res;
 
                 qualified  = psprintf("%s.%s",
                                       quote_identifier(schema_name),
                                       quote_identifier(seqname));
                 quoted_seq = quote_literal_cstr(qualified);
-                pfree(qualified);
 
                 resetStringInfo(&buf);
                 appendStringInfo(&buf,
-                    "SELECT setval(%s, %s, %s)",
-                    quoted_seq,
-                    last_val,
-                    strcmp(is_called, "t") == 0 ? "true" : "false");
+                    "SELECT last_value, is_called FROM %s", qualified);
+                val_res = PQexec(source_conn, buf.data);
 
-                pgclone_exec_conn(local_conn, buf.data);
+                if (PQresultStatus(val_res) == PGRES_TUPLES_OK &&
+                    PQntuples(val_res) == 1)
+                {
+                    const char *last_val  = PQgetvalue(val_res, 0, 0);
+                    const char *is_called = PQgetvalue(val_res, 0, 1);
+
+                    resetStringInfo(&buf);
+                    appendStringInfo(&buf,
+                        "SELECT setval(%s, %s, %s)",
+                        quoted_seq,
+                        last_val,
+                        strcmp(is_called, "t") == 0 ? "true" : "false");
+
+                    pgclone_exec_conn(local_conn, buf.data);
+                }
+                PQclear(val_res);
+                pfree(qualified);
             }
 
             if (PQntuples(sv_res) > 0)
@@ -2548,9 +2565,13 @@ pgclone_schema(PG_FUNCTION_ARGS)
             PQclear(sp);
         }
 
+        /* pg_sequences exposes last_value (NULL until first nextval) but
+         * NOT is_called.  Use it only to enumerate sequences that have
+         * been advanced; read the authoritative last_value / is_called
+         * pair directly from each sequence relation below. */
         resetStringInfo(&buf);
         appendStringInfo(&buf,
-            "SELECT sequencename, last_value, is_called "
+            "SELECT sequencename "
             "FROM pg_catalog.pg_sequences "
             "WHERE schemaname = %s "
             "AND last_value IS NOT NULL",
@@ -2562,26 +2583,39 @@ pgclone_schema(PG_FUNCTION_ARGS)
         {
             for (si = 0; si < PQntuples(sv_res); si++)
             {
-                const char *seqname    = PQgetvalue(sv_res, si, 0);
-                const char *last_val   = PQgetvalue(sv_res, si, 1);
-                const char *is_called  = PQgetvalue(sv_res, si, 2);
+                const char *seqname = PQgetvalue(sv_res, si, 0);
                 char       *qualified;
                 const char *quoted_seq;
+                PGresult   *val_res;
 
                 qualified  = psprintf("%s.%s",
                                       quote_identifier(schema_name),
                                       quote_identifier(seqname));
                 quoted_seq = quote_literal_cstr(qualified);
-                pfree(qualified);
 
+                /* Read last_value + is_called directly from the sequence. */
                 resetStringInfo(&buf);
                 appendStringInfo(&buf,
-                    "SELECT setval(%s, %s, %s)",
-                    quoted_seq,
-                    last_val,
-                    strcmp(is_called, "t") == 0 ? "true" : "false");
+                    "SELECT last_value, is_called FROM %s", qualified);
+                val_res = PQexec(source_conn, buf.data);
 
-                pgclone_exec_conn(local_conn, buf.data);
+                if (PQresultStatus(val_res) == PGRES_TUPLES_OK &&
+                    PQntuples(val_res) == 1)
+                {
+                    const char *last_val  = PQgetvalue(val_res, 0, 0);
+                    const char *is_called = PQgetvalue(val_res, 0, 1);
+
+                    resetStringInfo(&buf);
+                    appendStringInfo(&buf,
+                        "SELECT setval(%s, %s, %s)",
+                        quoted_seq,
+                        last_val,
+                        strcmp(is_called, "t") == 0 ? "true" : "false");
+
+                    pgclone_exec_conn(local_conn, buf.data);
+                }
+                PQclear(val_res);
+                pfree(qualified);
             }
 
             elog(DEBUG1,

@@ -1130,7 +1130,7 @@ pgclone_bgw_main(Datum main_arg)
 
             initStringInfo(&svbuf);
             appendStringInfo(&svbuf,
-                "SELECT sequencename, last_value, is_called "
+                "SELECT sequencename "
                 "FROM pg_catalog.pg_sequences "
                 "WHERE schemaname = %s "
                 "AND last_value IS NOT NULL",
@@ -1142,26 +1142,38 @@ pgclone_bgw_main(Datum main_arg)
                 int si;
                 for (si = 0; si < PQntuples(sv_res); si++)
                 {
-                    const char *seqname   = PQgetvalue(sv_res, si, 0);
-                    const char *last_val  = PQgetvalue(sv_res, si, 1);
-                    const char *is_called = PQgetvalue(sv_res, si, 2);
+                    const char *seqname = PQgetvalue(sv_res, si, 0);
                     char       *qualified;
                     const char *quoted_seq;
+                    PGresult   *val_res;
 
                     qualified  = psprintf("%s.%s",
                                           quote_identifier(job->schema_name),
                                           quote_identifier(seqname));
                     quoted_seq = quote_literal_cstr(qualified);
-                    pfree(qualified);
 
                     resetStringInfo(&svbuf);
                     appendStringInfo(&svbuf,
-                        "SELECT setval(%s, %s, %s)",
-                        quoted_seq,
-                        last_val,
-                        strcmp(is_called, "t") == 0 ? "true" : "false");
+                        "SELECT last_value, is_called FROM %s", qualified);
+                    val_res = PQexec(source_conn, svbuf.data);
 
-                    bgw_exec(local_conn, svbuf.data);
+                    if (PQresultStatus(val_res) == PGRES_TUPLES_OK &&
+                        PQntuples(val_res) == 1)
+                    {
+                        const char *last_val  = PQgetvalue(val_res, 0, 0);
+                        const char *is_called = PQgetvalue(val_res, 0, 1);
+
+                        resetStringInfo(&svbuf);
+                        appendStringInfo(&svbuf,
+                            "SELECT setval(%s, %s, %s)",
+                            quoted_seq,
+                            last_val,
+                            strcmp(is_called, "t") == 0 ? "true" : "false");
+
+                        bgw_exec(local_conn, svbuf.data);
+                    }
+                    PQclear(val_res);
+                    pfree(qualified);
                 }
                 elog(DEBUG1,
                      "pgclone bgw: synced current value for %d sequences in schema %s",
@@ -1540,7 +1552,7 @@ pgclone_pool_worker_main(Datum main_arg)
         {
             initStringInfo(&svbuf);
             appendStringInfo(&svbuf,
-                "SELECT sequencename, last_value, is_called "
+                "SELECT sequencename "
                 "FROM pg_catalog.pg_sequences "
                 "WHERE schemaname = %s "
                 "AND last_value IS NOT NULL",
@@ -1552,33 +1564,45 @@ pgclone_pool_worker_main(Datum main_arg)
             {
                 for (si = 0; si < PQntuples(sv_res); si++)
                 {
-                    const char *seqname   = PQgetvalue(sv_res, si, 0);
-                    const char *last_val  = PQgetvalue(sv_res, si, 1);
-                    const char *is_called = PQgetvalue(sv_res, si, 2);
+                    const char *seqname = PQgetvalue(sv_res, si, 0);
                     char       *qualified;
                     const char *quoted_seq;
-                    PGresult   *lcres;
+                    PGresult   *val_res;
 
                     qualified  = psprintf("%s.%s",
                                           quote_identifier(schema_name_copy),
                                           quote_identifier(seqname));
                     quoted_seq = quote_literal_cstr(qualified);
-                    pfree(qualified);
 
                     resetStringInfo(&svbuf);
                     appendStringInfo(&svbuf,
-                        "SELECT setval(%s, %s, %s)",
-                        quoted_seq,
-                        last_val,
-                        strcmp(is_called, "t") == 0 ? "true" : "false");
+                        "SELECT last_value, is_called FROM %s", qualified);
+                    val_res = PQexec(sv_source, svbuf.data);
 
-                    lcres = PQexec(sv_local, svbuf.data);
-                    if (PQresultStatus(lcres) != PGRES_TUPLES_OK)
-                        elog(WARNING,
-                             "pgclone pool: setval for sequence %s.%s failed: %s",
-                             schema_name_copy, seqname,
-                             PQerrorMessage(sv_local));
-                    PQclear(lcres);
+                    if (PQresultStatus(val_res) == PGRES_TUPLES_OK &&
+                        PQntuples(val_res) == 1)
+                    {
+                        const char *last_val  = PQgetvalue(val_res, 0, 0);
+                        const char *is_called = PQgetvalue(val_res, 0, 1);
+                        PGresult   *lcres;
+
+                        resetStringInfo(&svbuf);
+                        appendStringInfo(&svbuf,
+                            "SELECT setval(%s, %s, %s)",
+                            quoted_seq,
+                            last_val,
+                            strcmp(is_called, "t") == 0 ? "true" : "false");
+
+                        lcres = PQexec(sv_local, svbuf.data);
+                        if (PQresultStatus(lcres) != PGRES_TUPLES_OK)
+                            elog(WARNING,
+                                 "pgclone pool: setval for sequence %s.%s failed: %s",
+                                 schema_name_copy, seqname,
+                                 PQerrorMessage(sv_local));
+                        PQclear(lcres);
+                    }
+                    PQclear(val_res);
+                    pfree(qualified);
                 }
 
                 elog(DEBUG1,
