@@ -2273,36 +2273,45 @@ pgclone_table(PG_FUNCTION_ARGS)
             quote_literal_cstr(schema_name),
             quote_literal_cstr(table_name));
 
-        sv_res = pgclone_exec(source_conn, buf.data);
+        sv_res = PQexec(source_conn, buf.data);
 
-        for (si = 0; si < PQntuples(sv_res); si++)
+        if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
         {
-            const char *seqname   = PQgetvalue(sv_res, si, 0);
-            const char *last_val  = PQgetvalue(sv_res, si, 1);
-            const char *is_called = PQgetvalue(sv_res, si, 2);
-            char       *qualified;
-            const char *quoted_seq;
+            for (si = 0; si < PQntuples(sv_res); si++)
+            {
+                const char *seqname   = PQgetvalue(sv_res, si, 0);
+                const char *last_val  = PQgetvalue(sv_res, si, 1);
+                const char *is_called = PQgetvalue(sv_res, si, 2);
+                char       *qualified;
+                const char *quoted_seq;
 
-            qualified  = psprintf("%s.%s",
-                                  quote_identifier(schema_name),
-                                  quote_identifier(seqname));
-            quoted_seq = quote_literal_cstr(qualified);
-            pfree(qualified);
+                qualified  = psprintf("%s.%s",
+                                      quote_identifier(schema_name),
+                                      quote_identifier(seqname));
+                quoted_seq = quote_literal_cstr(qualified);
+                pfree(qualified);
 
-            resetStringInfo(&buf);
-            appendStringInfo(&buf,
-                "SELECT setval(%s, %s, %s)",
-                quoted_seq,
-                last_val,
-                strcmp(is_called, "t") == 0 ? "true" : "false");
+                resetStringInfo(&buf);
+                appendStringInfo(&buf,
+                    "SELECT setval(%s, %s, %s)",
+                    quoted_seq,
+                    last_val,
+                    strcmp(is_called, "t") == 0 ? "true" : "false");
 
-            pgclone_exec_conn(local_conn, buf.data);
+                pgclone_exec_conn(local_conn, buf.data);
+            }
+
+            if (PQntuples(sv_res) > 0)
+                elog(DEBUG1,
+                     "pgclone: synced current value for %d sequences for table %s.%s",
+                     PQntuples(sv_res), schema_name, table_name);
         }
-
-        if (PQntuples(sv_res) > 0)
-            elog(DEBUG1,
-                 "pgclone: synced current value for %d sequences for table %s.%s",
-                 PQntuples(sv_res), schema_name, table_name);
+        else
+        {
+            elog(WARNING,
+                 "pgclone: could not query pg_sequences for table %s.%s: %s",
+                 schema_name, table_name, PQerrorMessage(source_conn));
+        }
         PQclear(sv_res);
     }
 
@@ -2506,37 +2515,46 @@ pgclone_schema(PG_FUNCTION_ARGS)
             "AND last_value IS NOT NULL",
             quote_literal_cstr(schema_name));
 
-        sv_res = pgclone_exec(source_conn, buf.data);
+        sv_res = PQexec(source_conn, buf.data);
 
-        for (si = 0; si < PQntuples(sv_res); si++)
+        if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
         {
-            const char *seqname    = PQgetvalue(sv_res, si, 0);
-            const char *last_val   = PQgetvalue(sv_res, si, 1);
-            const char *is_called  = PQgetvalue(sv_res, si, 2);
-            char       *qualified;
-            const char *quoted_seq;
+            for (si = 0; si < PQntuples(sv_res); si++)
+            {
+                const char *seqname    = PQgetvalue(sv_res, si, 0);
+                const char *last_val   = PQgetvalue(sv_res, si, 1);
+                const char *is_called  = PQgetvalue(sv_res, si, 2);
+                char       *qualified;
+                const char *quoted_seq;
 
-            /* Build schema-qualified name then quote it as a literal
-             * for the regclass argument to setval(). */
-            qualified  = psprintf("%s.%s",
-                                  quote_identifier(schema_name),
-                                  quote_identifier(seqname));
-            quoted_seq = quote_literal_cstr(qualified);
-            pfree(qualified);
+                /* Build schema-qualified name then quote it as a literal
+                 * for the regclass argument to setval(). */
+                qualified  = psprintf("%s.%s",
+                                      quote_identifier(schema_name),
+                                      quote_identifier(seqname));
+                quoted_seq = quote_literal_cstr(qualified);
+                pfree(qualified);
 
-            resetStringInfo(&buf);
-            appendStringInfo(&buf,
-                "SELECT setval(%s, %s, %s)",
-                quoted_seq,
-                last_val,
-                strcmp(is_called, "t") == 0 ? "true" : "false");
+                resetStringInfo(&buf);
+                appendStringInfo(&buf,
+                    "SELECT setval(%s, %s, %s)",
+                    quoted_seq,
+                    last_val,
+                    strcmp(is_called, "t") == 0 ? "true" : "false");
 
-            pgclone_exec_conn(local_conn, buf.data);
+                pgclone_exec_conn(local_conn, buf.data);
+            }
+
+            elog(DEBUG1,
+                 "pgclone: synced current value for %d sequences in schema %s",
+                 PQntuples(sv_res), schema_name);
         }
-
-        elog(DEBUG1,
-             "pgclone: synced current value for %d sequences in schema %s",
-             PQntuples(sv_res), schema_name);
+        else
+        {
+            elog(WARNING,
+                 "pgclone: could not query pg_sequences for schema %s: %s",
+                 schema_name, PQerrorMessage(source_conn));
+        }
         PQclear(sv_res);
     }
 
