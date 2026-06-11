@@ -2,6 +2,20 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.4.0]
+
+### Added
+- **Schema/database-level in-line masking — `"masks"` option** (discussion #16). `pgclone.schema()`, `pgclone.database()`, and `pgclone.database_create()` now accept `"masks": {"table": {<mask obj>}, "schema.table": {<mask obj>}}` in the JSON options. Each entry is applied to the matching table *while the data streams* from source to target — the same query-based COPY pipeline as the single-table `"mask"` option — so unmasked data never reaches the target and no post-clone `UPDATE`/`VACUUM` pass or masked-view layer is needed. Keys may be bare table names or schema-qualified; qualified keys win, letting database clones disambiguate identically named tables across schemas. Internally the per-table mask objects are captured as raw JSON during option parsing and re-emitted verbatim as the `"mask"` option of each matching per-table sub-call, so the existing masking pipeline (all 8 strategies) applies unchanged.
+- **Table subset filters — `"tables"` / `"exclude_tables"` options** (discussion #16). Both accept an array of POSIX regular expressions, anchored as `^(pattern)$`, evaluated by the *source* server against `pg_tables.tablename` (sent as quoted literals — no regex code in the extension and no injection surface). `"exclude_tables"` is applied after `"tables"`. The filtered table list flows through every downstream phase that iterates tables (FK retry, deferred triggers), while sequences, views, matviews, and functions of the schema are still cloned in full. Character classes like `events_[0-9]{4}` are fully supported — the option parser gained string-aware bracket/brace matching so `]` inside a pattern no longer terminates the array.
+- **JSON scanning helpers** in `src/pgclone.c`: `pgclone_json_balanced_end()` (string-aware `{}`/`[]` matching), `pgclone_json_string_end()` (escape-aware string scanning), `pgclone_json_unescape()` (resolves `\"` and `\\`), `pgclone_parse_pattern_array()`, and `pgclone_find_table_mask()`.
+- **pgTAP test group 25** (10 tests, plan 77 → 87) plus a new `filter_test` seed schema: verifies include/exclude regex filtering, in-line email/null masking during a schema clone, that masking is scoped to the named table only, and that unfiltered tables keep their data intact.
+- `COMMENT ON FUNCTION` documentation for `pgclone.schema(TEXT, TEXT, BOOLEAN, TEXT)` and `pgclone.database(TEXT, BOOLEAN, TEXT)` describing the new options.
+
+### Compatibility
+- No SQL signature changes — both features are new keys in the existing JSON options argument. `sql/pgclone--4.3.2--4.4.0.sql` only updates function comments.
+- Synchronous paths only: `pgclone.schema_async()` and the parallel worker pool do not carry JSON options through shared memory and ignore `"masks"`/`"tables"`/`"exclude_tables"`, as they already do for `"mask"`.
+- Pure C-string/libpq implementation; identical behavior on PG 14–18, no `#if PG_VERSION_NUM` guards needed.
+
 ## [4.3.2]
 
 ### Fixed
