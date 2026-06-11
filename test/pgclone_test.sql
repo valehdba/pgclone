@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(77);
+SELECT plan(87);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -560,6 +560,62 @@ SELECT results_eq(
     'SELECT count(*)::integer FROM dep_test.documents_to_resend',
     ARRAY[1],
     'documents_to_resend data preserved through clone');
+
+-- ============================================================
+-- TEST GROUP 25: v4.4.0 — schema clone with table subset filters
+-- and per-table in-line masking ("tables"/"exclude_tables"/"masks")
+-- ============================================================
+-- 10 tests below — keep in sync with plan() above.
+
+SELECT lives_ok(
+    format('SELECT pgclone.schema(%L, %L, true, %L)',
+        current_setting('app.source_conninfo'),
+        'filter_test',
+        '{"tables": ["keep_.*"], "exclude_tables": [".*_old"], '
+        || '"masks": {"keep_users": {"email": "email", "ssn": "null"}}}'),
+    'pgclone.schema with tables/exclude_tables/masks options'
+);
+
+SELECT has_table('filter_test', 'keep_users',
+    'included table keep_users cloned');
+
+SELECT has_table('filter_test', 'keep_orders',
+    'included table keep_orders cloned');
+
+SELECT hasnt_table('filter_test', 'skip_audit_log',
+    'table outside include regex not cloned');
+
+SELECT hasnt_table('filter_test', 'keep_orders_old',
+    'table matching exclude regex not cloned');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM filter_test.keep_users',
+    ARRAY[3],
+    'masked keep_users has all 3 rows');
+
+-- Email mask: local part replaced, domain preserved
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM filter_test.keep_users
+      WHERE email LIKE 'a%@example.com' AND email <> 'alice@example.com'$$,
+    ARRAY[1],
+    'keep_users emails masked in-line during schema clone');
+
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM filter_test.keep_users WHERE ssn IS NULL$$,
+    ARRAY[3],
+    'keep_users ssn nulled by masks option');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM filter_test.keep_orders',
+    ARRAY[2],
+    'unmasked keep_orders data cloned intact');
+
+-- masks must apply only to the table named in the key
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM filter_test.keep_orders
+      WHERE contact_email IN ('orders1@example.com', 'orders2@example.com')$$,
+    ARRAY[2],
+    'keep_orders emails untouched — masks scoped per table');
 
 SELECT * FROM finish();
 ROLLBACK;

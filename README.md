@@ -3,7 +3,7 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-4.3.2-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.3.2)
+[![Version](https://img.shields.io/badge/version-4.4.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.4.0)
 
 A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 
@@ -145,7 +145,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v4.1.0: Schema diff — DDL drift detection between source and target (`pgclone.diff`)
 - [x] v4.2.0: Pre-flight validator — connection, space, permissions, version, name-conflict checks before clone (`pgclone.preflight`)
 - [x] v4.3.0: Consistent-snapshot clones — every clone reads the source under one shared `REPEATABLE READ READ ONLY` snapshot (sync, async, and parallel pool); cross-table FK consistency on a live source is now guaranteed (same model as `pg_dump -j`)
-- [ ] v4.4.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
+- [x] v4.4.0: Schema/database-level in-line masking (`"masks"`) and regex table subset filters (`"tables"` / `"exclude_tables"`) — discussion #16
+- [ ] v4.5.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License
 

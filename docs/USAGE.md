@@ -189,6 +189,75 @@ SELECT pgclone.functions(
 );
 ```
 
+### Clone a subset of tables (v4.4.0)
+
+Use the `tables` and `exclude_tables` options to clone only some of a schema's tables. Each entry is a POSIX regular expression, anchored as `^(pattern)$` so it must match the whole table name, and evaluated by the source server. Excludes are applied after includes.
+
+```sql
+-- Only tables starting with "order_" plus the customers table
+SELECT pgclone.schema(
+    'host=source-server dbname=mydb user=postgres password=secret',
+    'sales', true,
+    '{"tables": ["order_.*", "customers"]}'
+);
+
+-- Everything except audit and archive tables
+SELECT pgclone.schema(
+    'host=source-server dbname=mydb user=postgres password=secret',
+    'sales', true,
+    '{"exclude_tables": ["audit_.*", ".*_archive"]}'
+);
+
+-- Regex character classes work too (e.g. partition suffixes)
+SELECT pgclone.schema(
+    'host=source-server dbname=mydb user=postgres password=secret',
+    'sales', true,
+    '{"tables": ["events_[0-9]{4}"]}'
+);
+```
+
+Notes:
+- Sequences, views, materialized views, and functions of the schema are still cloned in full — only the table list is filtered.
+- FK constraints referencing an excluded table cannot be created on the target; the FK retry pass reports them as warnings, as with any unresolvable FK.
+- An invalid regex fails the clone with the source server's `invalid regular expression` error.
+
+### In-line masking during schema/database clone (v4.4.0)
+
+The `masks` option applies data masking per table while the data streams from source to target — the same query-based COPY pipeline as the single-table `mask` option. No post-clone `UPDATE` pass, no re-vacuum, no masked views: the unmasked data never reaches the target.
+
+```sql
+SELECT pgclone.schema(
+    'host=source-server dbname=mydb user=postgres password=secret',
+    'hr', true,
+    '{"masks": {
+        "employees": {"email": "email", "ssn": "null", "salary": {"type": "random_int", "min": 40000, "max": 120000}},
+        "candidates": {"full_name": "name", "phone": "phone"}
+     }}'
+);
+```
+
+Keys are table names; values use the exact same format as the single-table `mask` option (see [Data Masking](#data-masking-v300)). Tables not listed are cloned unmasked. `masks` combines freely with `tables`/`exclude_tables`.
+
+For database clones, keys may be schema-qualified to disambiguate identically named tables in different schemas — a qualified key wins over a bare table name:
+
+```sql
+SELECT pgclone.database(
+    'host=source-server dbname=production user=postgres password=secret',
+    true,
+    '{"exclude_tables": ["tmp_.*"],
+      "masks": {
+        "hr.employees": {"email": "hash", "ssn": "null"},
+        "users": {"email": "email"}
+     }}'
+);
+```
+
+`pgclone.database_create()` forwards its options verbatim, so the same keys work there.
+
+Limitations:
+- Synchronous clones only — `pgclone.schema_async()` and the parallel worker pool do not carry JSON options through shared memory and ignore `masks`, `tables`, and `exclude_tables` (as they already do for `mask`).
+- Bare-name mask keys apply in every schema with a matching table during a database clone; use schema-qualified keys when that's not what you want.
+
 ---
 
 ## Database Cloning
@@ -961,6 +1030,9 @@ SELECT (pgclone.preflight(:src, 'app_schema')::jsonb ->> 'ready')::boolean
 | `conflict` | string | `"error"` | Conflict strategy: error, skip, replace, rename |
 | `parallel` | int | 1 | Number of parallel workers (async only) |
 | `mask` | object | none | Column masking rules: `{"col": "type"}` or `{"col": {"type":"...", ...}}` |
+| `masks` | object | none | v4.4.0, schema/database clone only: per-table in-line masking: `{"table": {<mask obj>}, "schema.table": {<mask obj>}}` |
+| `tables` | array | all | v4.4.0, schema/database clone only: anchored POSIX regexes selecting which tables to clone |
+| `exclude_tables` | array | none | v4.4.0, schema/database clone only: anchored POSIX regexes removing tables (applied after `tables`) |
 
 ---
 

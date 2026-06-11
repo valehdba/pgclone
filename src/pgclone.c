@@ -37,6 +37,10 @@ PG_MODULE_MAGIC;
 #define PGCLONE_MAX_WHERE     2048
 #define PGCLONE_MAX_MASKS     64
 
+/* v4.4.0: schema/database-level masking and table subset filters */
+#define PGCLONE_MAX_TABLE_MASKS    64
+#define PGCLONE_MAX_TABLE_PATTERNS 64
+
 /* Snapshot identifiers exported by pg_export_snapshot() are short
  * (well under 32 bytes in practice — e.g. "00000003-00000ABC-1"); 64
  * bytes is comfortable padding. */
@@ -89,6 +93,31 @@ typedef struct CloneOptions
     int  num_masks;
     MaskRule masks[PGCLONE_MAX_MASKS];
 
+    /* v4.4.0: Per-table masking for schema/database clones, parsed
+     * from  "masks": {"tbl": {<mask obj>}, "schema.tbl": {<mask obj>}}.
+     * Each value is kept as raw JSON text and re-emitted verbatim as
+     * the "mask" option of the matching per-table sub-call, so the
+     * existing single-table mask parser does the real work.
+     *
+     * Pointer members are palloc'd during option parsing and the
+     * struct is only ever copied within one function call's lifetime,
+     * so shallow copies stay valid. */
+    int   num_table_masks;
+    char *table_mask_key[PGCLONE_MAX_TABLE_MASKS];
+    char *table_mask_json[PGCLONE_MAX_TABLE_MASKS];
+    char *masks_raw;            /* whole "masks" object, for propagation */
+
+    /* v4.4.0: Table subset filters for schema/database clones,
+     * parsed from  "tables": [...]  /  "exclude_tables": [...].
+     * Entries are POSIX regexes anchored as ^(pattern)$ and evaluated
+     * by the SOURCE server against pg_tables.tablename. */
+    int   num_table_includes;
+    char *table_includes[PGCLONE_MAX_TABLE_PATTERNS];
+    int   num_table_excludes;
+    char *table_excludes[PGCLONE_MAX_TABLE_PATTERNS];
+    char *tables_raw;           /* raw "tables" array, for propagation */
+    char *exclude_tables_raw;   /* raw "exclude_tables" array */
+
     /* v4.3.0: Consistent snapshot across all source reads.
      * When true, every source connection runs inside a
      * REPEATABLE READ READ ONLY transaction; multi-connection
@@ -122,6 +151,144 @@ pgclone_default_options(void)
     opts.consistent          = true;     /* v4.3.0: consistent snapshot by default */
     opts.snapshot_id[0]      = '\0';
     return opts;
+}
+
+/* ---------------------------------------------------------------
+ * v4.4.0: small string-aware JSON scanning helpers.
+ *
+ * The hand-rolled option parser below historically used strchr()
+ * to find closing braces/brackets, which breaks when the delimiter
+ * appears inside a string value — a real concern for regex table
+ * patterns like "order_[0-9]+". These helpers track string state.
+ * --------------------------------------------------------------- */
+
+/* Return a pointer to the closing '}' / ']' matching the opening
+ * '{' / '[' at *start, ignoring delimiters inside double-quoted
+ * strings (and escaped characters inside those strings). NULL if
+ * the text is unbalanced. */
+static const char *
+pgclone_json_balanced_end(const char *start)
+{
+    char        open = *start;
+    char        close = (open == '{') ? '}' : ']';
+    int         depth = 0;
+    bool        in_str = false;
+    const char *c;
+
+    for (c = start; *c != '\0'; c++)
+    {
+        if (in_str)
+        {
+            if (*c == '\\' && *(c + 1) != '\0')
+                c++;
+            else if (*c == '"')
+                in_str = false;
+            continue;
+        }
+        if (*c == '"')
+            in_str = true;
+        else if (*c == open)
+            depth++;
+        else if (*c == close)
+        {
+            depth--;
+            if (depth == 0)
+                return c;
+        }
+    }
+    return NULL;
+}
+
+/* Given a pointer just past an opening quote, return the closing
+ * quote of the JSON string (skipping escaped characters), or NULL. */
+static const char *
+pgclone_json_string_end(const char *s)
+{
+    while (*s != '\0')
+    {
+        if (*s == '\\' && *(s + 1) != '\0')
+        {
+            s += 2;
+            continue;
+        }
+        if (*s == '"')
+            return s;
+        s++;
+    }
+    return NULL;
+}
+
+/* Copy the JSON string between s (inclusive) and e (exclusive) into
+ * a palloc'd C string, resolving the escapes that matter for table
+ * names and regex patterns: \" and \\ . */
+static char *
+pgclone_json_unescape(const char *s, const char *e)
+{
+    char *out = palloc((e - s) + 1);
+    char *o = out;
+
+    while (s < e)
+    {
+        if (*s == '\\' && (s + 1) < e &&
+            (*(s + 1) == '"' || *(s + 1) == '\\'))
+            s++;
+        *o++ = *s++;
+    }
+    *o = '\0';
+    return out;
+}
+
+/* Parse  key: ["pat1", "pat2", ...]  into palloc'd strings.
+ * `key` must include its surrounding quotes (e.g. "\"tables\"").
+ * Returns the number of items stored; if raw_out is non-NULL it
+ * receives a palloc'd copy of the raw [...] text so parent
+ * operations can propagate the option verbatim to sub-calls. */
+static int
+pgclone_parse_pattern_array(const char *json_str, const char *key,
+                            char **items, int max_items, char **raw_out)
+{
+    const char *p = strstr(json_str, key);
+    const char *bracket;
+    const char *end_bracket;
+    const char *cur;
+    int         n = 0;
+
+    if (p == NULL)
+        return 0;
+
+    bracket = strchr(p + strlen(key), '[');
+    if (bracket == NULL)
+        return 0;
+
+    end_bracket = pgclone_json_balanced_end(bracket);
+    if (end_bracket == NULL)
+        return 0;
+
+    if (raw_out != NULL)
+        *raw_out = pnstrdup(bracket, (end_bracket - bracket) + 1);
+
+    cur = bracket + 1;
+    while (cur < end_bracket && n < max_items)
+    {
+        const char *qs;
+        const char *qe;
+
+        qs = strchr(cur, '"');
+        if (qs == NULL || qs >= end_bracket)
+            break;
+        qs++;
+
+        qe = pgclone_json_string_end(qs);
+        if (qe == NULL || qe >= end_bracket)
+            break;
+
+        if (qe > qs)
+            items[n++] = pgclone_json_unescape(qs, qe);
+
+        cur = qe + 1;
+    }
+
+    return n;
 }
 
 /* ---------------------------------------------------------------
@@ -508,6 +675,78 @@ pgclone_parse_options(const char *json_str)
         }
     }
 
+    /* v4.4.0: Parse "masks": {"tbl": {<mask obj>}, "schema.tbl": {...}}
+     * — per-table masking for schema/database clones. Keys may be
+     * bare table names or schema-qualified; values are captured as
+     * raw JSON and injected verbatim as the "mask" option of each
+     * matching per-table sub-call. (Note: strstr("\"mask\"") above
+     * cannot match "masks" because of the trailing quote, and vice
+     * versa, so the two options never collide.) */
+    p = strstr(json_str, "\"masks\"");
+    if (p != NULL)
+    {
+        const char *obj = strchr(p + 7, '{');
+
+        if (obj != NULL)
+        {
+            const char *obj_end = pgclone_json_balanced_end(obj);
+
+            if (obj_end != NULL)
+            {
+                const char *cur = obj + 1;
+
+                opts.masks_raw = pnstrdup(obj, (obj_end - obj) + 1);
+
+                while (cur < obj_end &&
+                       opts.num_table_masks < PGCLONE_MAX_TABLE_MASKS)
+                {
+                    const char *qs;
+                    const char *qe;
+                    const char *vobj;
+                    const char *vend;
+
+                    qs = strchr(cur, '"');
+                    if (qs == NULL || qs >= obj_end)
+                        break;
+                    qs++;
+
+                    qe = pgclone_json_string_end(qs);
+                    if (qe == NULL || qe >= obj_end)
+                        break;
+
+                    vobj = strchr(qe, '{');
+                    if (vobj == NULL || vobj >= obj_end)
+                        break;
+                    vend = pgclone_json_balanced_end(vobj);
+                    if (vend == NULL || vend > obj_end)
+                        break;
+
+                    opts.table_mask_key[opts.num_table_masks] =
+                        pgclone_json_unescape(qs, qe);
+                    opts.table_mask_json[opts.num_table_masks] =
+                        pnstrdup(vobj, (vend - vobj) + 1);
+                    opts.num_table_masks++;
+
+                    cur = vend + 1;
+                }
+            }
+        }
+    }
+
+    /* v4.4.0: "tables" / "exclude_tables" — regex subset filters for
+     * schema/database clones. The leading quote in the search key
+     * prevents "tables" from matching inside "exclude_tables". */
+    opts.num_table_includes =
+        pgclone_parse_pattern_array(json_str, "\"tables\"",
+                                    opts.table_includes,
+                                    PGCLONE_MAX_TABLE_PATTERNS,
+                                    &opts.tables_raw);
+    opts.num_table_excludes =
+        pgclone_parse_pattern_array(json_str, "\"exclude_tables\"",
+                                    opts.table_excludes,
+                                    PGCLONE_MAX_TABLE_PATTERNS,
+                                    &opts.exclude_tables_raw);
+
     return opts;
 }
 
@@ -642,6 +881,41 @@ pgclone_find_mask_rule(const CloneOptions *opts, const char *col_name)
     {
         if (strcmp(opts->masks[i].column, col_name) == 0)
             return &opts->masks[i];
+    }
+    return NULL;
+}
+
+/* ---------------------------------------------------------------
+ * v4.4.0: Find the raw mask JSON for a table inside a schema clone,
+ * or NULL if none. Schema-qualified keys ("schema.table") win over
+ * bare table names so a database clone can disambiguate identically
+ * named tables in different schemas.
+ * --------------------------------------------------------------- */
+static const char *
+pgclone_find_table_mask(const CloneOptions *opts,
+                        const char *schema_name, const char *table_name)
+{
+    int   i;
+    char *qualified;
+
+    if (opts == NULL || opts->num_table_masks == 0)
+        return NULL;
+
+    qualified = psprintf("%s.%s", schema_name, table_name);
+    for (i = 0; i < opts->num_table_masks; i++)
+    {
+        if (strcmp(opts->table_mask_key[i], qualified) == 0)
+        {
+            pfree(qualified);
+            return opts->table_mask_json[i];
+        }
+    }
+    pfree(qualified);
+
+    for (i = 0; i < opts->num_table_masks; i++)
+    {
+        if (strcmp(opts->table_mask_key[i], table_name) == 0)
+            return opts->table_mask_json[i];
     }
     return NULL;
 }
@@ -2660,8 +2934,38 @@ pgclone_schema(PG_FUNCTION_ARGS)
     resetStringInfo(&buf);
     appendStringInfo(&buf,
         "SELECT tablename FROM pg_catalog.pg_tables "
-        "WHERE schemaname = %s ORDER BY tablename",
+        "WHERE schemaname = %s",
         quote_literal_cstr(schema_name));
+
+    /* v4.4.0: table subset filters. Each pattern is anchored as
+     * ^(pattern)$ so it must match the whole table name, then sent
+     * as a quoted literal for the SOURCE server's regex engine to
+     * evaluate — no regex code needed here and no injection surface
+     * beyond a possible regex syntax error, which the source reports
+     * back as a normal query error. */
+    if (opts.num_table_includes > 0)
+    {
+        appendStringInfoString(&buf, " AND (");
+        for (i = 0; i < opts.num_table_includes; i++)
+        {
+            char *anchored = psprintf("^(%s)$", opts.table_includes[i]);
+
+            appendStringInfo(&buf, "%stablename ~ %s",
+                             i > 0 ? " OR " : "",
+                             quote_literal_cstr(anchored));
+            pfree(anchored);
+        }
+        appendStringInfoChar(&buf, ')');
+    }
+    for (i = 0; i < opts.num_table_excludes; i++)
+    {
+        char *anchored = psprintf("^(%s)$", opts.table_excludes[i]);
+
+        appendStringInfo(&buf, " AND tablename !~ %s",
+                         quote_literal_cstr(anchored));
+        pfree(anchored);
+    }
+    appendStringInfoString(&buf, " ORDER BY tablename");
 
     res = pgclone_exec(source_conn, buf.data);
 
@@ -2684,13 +2988,16 @@ pgclone_schema(PG_FUNCTION_ARGS)
      * exist. snapshot_id is propagated so each per-table sub-call's
      * own source connection imports the same snapshot. */
     {
-        StringInfoData opts_json;
+        StringInfoData opts_json;   /* common prefix — no closing brace */
+        StringInfoData tbl_opts;    /* per-table final options JSON */
+
         initStringInfo(&opts_json);
+        initStringInfo(&tbl_opts);
         if (opts.consistent && opts.snapshot_id[0] != '\0')
         {
             appendStringInfo(&opts_json,
                 "{\"indexes\": %s, \"constraints\": %s, \"triggers\": false, "
-                "\"consistent\": true, \"snapshot_id\": \"%s\"}",
+                "\"consistent\": true, \"snapshot_id\": \"%s\"",
                 opts.include_indexes ? "true" : "false",
                 opts.include_constraints ? "true" : "false",
                 opts.snapshot_id);
@@ -2699,7 +3006,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
         {
             appendStringInfo(&opts_json,
                 "{\"indexes\": %s, \"constraints\": %s, \"triggers\": false, "
-                "\"consistent\": %s}",
+                "\"consistent\": %s",
                 opts.include_indexes ? "true" : "false",
                 opts.include_constraints ? "true" : "false",
                 opts.consistent ? "true" : "false");
@@ -2708,6 +3015,20 @@ pgclone_schema(PG_FUNCTION_ARGS)
         for (i = 0; i < ntables; i++)
         {
             Datum result;
+
+            /* v4.4.0: per-table mask injection. The raw JSON object
+             * the user supplied under "masks" is re-emitted verbatim
+             * as this sub-call's "mask" option, so the single-table
+             * masking pipeline (query-based COPY with mask
+             * expressions) applies unchanged. */
+            const char *mask_json =
+                pgclone_find_table_mask(&opts, schema_name, table_names[i]);
+
+            resetStringInfo(&tbl_opts);
+            appendStringInfoString(&tbl_opts, opts_json.data);
+            if (mask_json != NULL)
+                appendStringInfo(&tbl_opts, ", \"mask\": %s", mask_json);
+            appendStringInfoChar(&tbl_opts, '}');
 
             /* v4.3.1: validate the keeper before each importer
              * opens its own SET TRANSACTION SNAPSHOT — fail fast
@@ -2724,10 +3045,11 @@ pgclone_schema(PG_FUNCTION_ARGS)
                         CStringGetTextDatum(table_names[i]),
                         BoolGetDatum(include_data),
                         CStringGetTextDatum(table_names[i]),  /* target = source name */
-                        CStringGetTextDatum(opts_json.data));
+                        CStringGetTextDatum(tbl_opts.data));
             (void) result;
         }
 
+        pfree(tbl_opts.data);
         pfree(opts_json.data);
     }
 
@@ -3147,7 +3469,7 @@ pgclone_database(PG_FUNCTION_ARGS)
         {
             appendStringInfo(&opts_json,
                 "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s, "
-                "\"consistent\": true, \"snapshot_id\": \"%s\"}",
+                "\"consistent\": true, \"snapshot_id\": \"%s\"",
                 opts.include_indexes ? "true" : "false",
                 opts.include_constraints ? "true" : "false",
                 opts.include_triggers ? "true" : "false",
@@ -3157,12 +3479,24 @@ pgclone_database(PG_FUNCTION_ARGS)
         {
             appendStringInfo(&opts_json,
                 "{\"indexes\": %s, \"constraints\": %s, \"triggers\": %s, "
-                "\"consistent\": %s}",
+                "\"consistent\": %s",
                 opts.include_indexes ? "true" : "false",
                 opts.include_constraints ? "true" : "false",
                 opts.include_triggers ? "true" : "false",
                 opts.consistent ? "true" : "false");
         }
+
+        /* v4.4.0: propagate per-table masks and table subset filters
+         * verbatim — each per-schema sub-call re-parses them and
+         * applies whatever entries match its own tables. */
+        if (opts.masks_raw != NULL)
+            appendStringInfo(&opts_json, ", \"masks\": %s", opts.masks_raw);
+        if (opts.tables_raw != NULL)
+            appendStringInfo(&opts_json, ", \"tables\": %s", opts.tables_raw);
+        if (opts.exclude_tables_raw != NULL)
+            appendStringInfo(&opts_json, ", \"exclude_tables\": %s",
+                             opts.exclude_tables_raw);
+        appendStringInfoChar(&opts_json, '}');
 
         for (i = 0; i < nschemas; i++)
         {
@@ -4908,7 +5242,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.3.2"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.4.0"));
 }
 
 /* ===============================================================

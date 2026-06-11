@@ -274,3 +274,40 @@ CREATE TRIGGER city_street_insert_trigger
 INSERT INTO dep_test.documents_to_resend (payload) VALUES ('seed');
 INSERT INTO dep_test.inbox_messages (message_id, "type", creation_date)
     VALUES (1, 'EMAIL', '2025-01-01 00:00:00');
+
+-- ============================================================
+-- v4.4.0: schema-level masking + table subset filter tests
+-- (pgTAP test group 25 — cloned with "tables"/"exclude_tables"/
+-- "masks" options; keep table names in sync with pgclone_test.sql)
+-- ============================================================
+CREATE SCHEMA IF NOT EXISTS filter_test;
+
+CREATE TABLE filter_test.keep_users (
+    id        SERIAL PRIMARY KEY,
+    email     VARCHAR(255) NOT NULL,
+    full_name VARCHAR(100) NOT NULL,
+    ssn       VARCHAR(11)
+);
+
+INSERT INTO filter_test.keep_users (email, full_name, ssn) VALUES
+    ('alice@example.com', 'Alice Adams', '111-22-3333'),
+    ('bob@test.org',      'Bob Brown',   '444-55-6666'),
+    ('carol@corp.io',     'Carol Clark', '777-88-9999');
+
+CREATE TABLE filter_test.keep_orders (
+    id            SERIAL PRIMARY KEY,
+    amount        NUMERIC NOT NULL,
+    contact_email VARCHAR(255)
+);
+
+INSERT INTO filter_test.keep_orders (amount, contact_email) VALUES
+    (10, 'orders1@example.com'),
+    (20, 'orders2@example.com');
+
+-- matched by the include regex but removed by the exclude regex
+CREATE TABLE filter_test.keep_orders_old (id INTEGER);
+INSERT INTO filter_test.keep_orders_old VALUES (1);
+
+-- not matched by the include regex at all
+CREATE TABLE filter_test.skip_audit_log (id INTEGER);
+INSERT INTO filter_test.skip_audit_log VALUES (1), (2);
