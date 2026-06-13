@@ -240,7 +240,15 @@ echo ""
 # ── 7. SECURITY ──────────────────────────────────────────────────
 echo "── Security ──"
 
-CONN_LOG=$(grep -rn 'elog.*(LOG\|elog.*(WARNING\|elog.*(ERROR\|elog.*(FATAL' src/*.c 2>/dev/null | grep -i 'conninfo\|password\|connstr' || true)
+# Look for connection-string values logged at LOG+ level. We only care
+# about the VALUE being passed as a printf argument, not the token
+# appearing inside the human-readable message literal (e.g. logging
+# libpq's parse-error text with a message like "could not parse
+# conninfo (%s)" is safe). So we blank out double-quoted strings on the
+# matched line before searching for the sensitive identifiers.
+CONN_LOG=$(grep -rn 'elog.*(LOG\|elog.*(WARNING\|elog.*(ERROR\|elog.*(FATAL' src/*.c 2>/dev/null \
+    | sed -E 's/"([^"\\]|\\.)*"//g' \
+    | grep -iE 'conninfo|password|connstr' || true)
 if [[ -z "$CONN_LOG" ]]; then
     pass "No connection strings logged above DEBUG1"
 else
