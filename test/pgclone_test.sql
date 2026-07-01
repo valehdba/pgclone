@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(87);
+SELECT plan(95);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -616,6 +616,70 @@ SELECT results_eq(
       WHERE contact_email IN ('orders1@example.com', 'orders2@example.com')$$,
     ARRAY[2],
     'keep_orders emails untouched — masks scoped per table');
+
+-- ============================================================
+-- TEST GROUP 26: issue #17 — type-aware masking
+--
+-- A mask whose output type the target column cannot store — e.g. the
+-- numeric "random_int" strategy on a BOOLEAN column named to match the
+-- %income% pattern — used to abort the streaming COPY with
+--   ERROR: invalid input syntax for type boolean: "60629"
+-- The mask must now be skipped (leaving the column intact) while
+-- compatible masks on other columns still apply.
+-- ============================================================
+-- 8 tests below — keep in sync with plan() above.
+
+-- Clone flags applying random_int to the boolean income_verified column
+-- (must be skipped) and email to the string contact_email column (must
+-- apply). The clone as a whole must succeed.
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'flags', 'flags_typed',
+        '{"mask": {"income_verified": "random_int", "contact_email": "email"}}'),
+    'clone with random_int mask on a boolean column succeeds (mask skipped)'
+);
+
+SELECT has_table('test_schema', 'flags_typed', 'flags_typed table created');
+
+-- Boolean values pass through unchanged (source has 2 true rows).
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.flags_typed WHERE income_verified',
+    ARRAY[2],
+    'boolean column left intact when its mask is type-incompatible');
+
+-- The compatible email mask still applied — no original address survives.
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM test_schema.flags_typed
+      WHERE contact_email = 'a@example.com'$$,
+    ARRAY[0],
+    'compatible email mask still applied to string column');
+
+-- discover_sensitive must NOT suggest a mask for the boolean income column.
+SELECT ok(
+    (SELECT pgclone.discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text NOT LIKE '%income_verified%'),
+    'discover skips boolean column income_verified');
+
+-- ...but still suggests one for the numeric income column.
+SELECT ok(
+    (SELECT pgclone.discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%monthly_income%'),
+    'discover still suggests a mask for numeric monthly_income');
+
+-- mask_in_place must skip the incompatible boolean mask and still succeed.
+SELECT lives_ok(
+    $$SELECT pgclone.mask_in_place(
+        'test_schema', 'flags_typed',
+        '{"income_verified": "random_int", "monthly_income": "random_int"}')$$,
+    'mask_in_place skips incompatible boolean mask and succeeds');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.flags_typed WHERE income_verified',
+    ARRAY[2],
+    'boolean column unchanged after mask_in_place skips its mask');
 
 SELECT * FROM finish();
 ROLLBACK;
