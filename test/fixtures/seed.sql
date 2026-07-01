@@ -200,6 +200,38 @@ INSERT INTO test_schema.flags (income_verified, monthly_income, contact_email) V
     (false, 6000, 'b@example.com'),
     (true,  7000, 'c@example.com');
 
+-- ---- Tables for issue #18: constraint- and length-aware masking ----
+-- mask18_parent exercises every #18 hazard:
+--   email  UNIQUE NOT NULL  -> a collapsing mask (name) breaks uniqueness;
+--                              only the injective "hash" is allowed.
+--   code   VARCHAR(4)       -> constant/partial masks would overflow the
+--                              declared length ("value too long").
+--   salary INTEGER          -> a text "constant" (REDACTED) cannot be stored.
+--   ssn    NOT NULL         -> a "null" mask would violate NOT NULL.
+-- mask18_child.parent_id is a FOREIGN KEY -> masking it breaks referential
+-- integrity, so it must be left unmasked.
+CREATE TABLE test_schema.mask18_parent (
+    id     SERIAL PRIMARY KEY,
+    email  VARCHAR(255) UNIQUE NOT NULL,
+    code   VARCHAR(4)   NOT NULL,
+    salary INTEGER      NOT NULL,
+    ssn    VARCHAR(11)  NOT NULL
+);
+
+INSERT INTO test_schema.mask18_parent (email, code, salary, ssn) VALUES
+    ('alice@example.com', 'AB', 5000, '111-11-1111'),
+    ('bob@example.com',   'CD', 6000, '222-22-2222'),
+    ('carol@example.com', 'EF', 7000, '333-33-3333');
+
+CREATE TABLE test_schema.mask18_child (
+    id        SERIAL PRIMARY KEY,
+    parent_id INTEGER NOT NULL REFERENCES test_schema.mask18_parent(id),
+    note      TEXT
+);
+
+INSERT INTO test_schema.mask18_child (parent_id, note) VALUES
+    (1, 'x'), (2, 'y'), (3, 'z');
+
 -- ---- Roles and permissions for clone_roles tests ----
 DO $$
 BEGIN
