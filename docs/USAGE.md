@@ -509,6 +509,19 @@ SELECT pgclone.table(conn, 'hr', 'employees', true, 'employees_dev',
 | `random_int` | Random in `[min, max]` | Ignores NULL (always produces value) |
 | `constant` | Fixed value | Ignores NULL (always produces value) |
 
+### Type compatibility (v4.4.1)
+
+Each strategy emits a value of a fixed kind, and that value has to be storable in the target column:
+
+| Strategy | Emits | Fits column types |
+|----------|-------|-------------------|
+| `email`, `name`, `phone`, `partial`, `hash` | text | string columns (`text`, `varchar`, `char`, …) |
+| `random_int` | integer | numeric or string columns |
+| `null` | SQL `NULL` | any nullable column |
+| `constant` | your literal | any type your value is valid for |
+
+If a mask is **incompatible** with a column's type — e.g. `random_int` on a `boolean` flag, or `hash` on an `integer` — pgclone now **skips that mask and copies the column unchanged**, emitting a `WARNING` instead of aborting the clone with `invalid input syntax for type …` (issue #17). `discover_sensitive` (below) never suggests an incompatible mask in the first place, so a generated mask file is safe to apply verbatim.
+
 ### Notes
 
 - Masking is applied on the **source** side inside `COPY (SELECT ...) TO STDOUT`, so masked data never enters the local database unmasked.
@@ -536,6 +549,27 @@ Returns JSON grouped by table with suggested mask strategies:
 ```
 
 The output can be used directly as the `"mask"` option value in a clone call. Detected patterns include: email, name (first/last/full), phone/mobile, SSN/national ID, salary/income, password/token/api_key, address/street, date of birth, credit card, and IP address.
+
+Type-incompatible suggestions are omitted automatically (v4.4.1): a `boolean` column that happens to match a financial pattern, for example, is left out rather than being paired with a numeric `random_int` strategy that the clone could not apply.
+
+### Driving masking from a file
+
+Because the options argument is just a JSON string, you can keep the (potentially large) mask definition in a file and let `psql` assemble the call — handy for automation and for tweaking the generated masks. Save `discover_sensitive`'s output, edit it, then reference it:
+
+```sh
+# 1. Generate a starting point (strip psql decoration with -tA)
+psql -tA -d mydb -c \
+  "SELECT pgclone.discover_sensitive('host=src dbname=app user=postgres','public')" \
+  > masks.json
+# 2. Edit masks.json as needed, then run the clone with the file's contents.
+#    psql's :'var' quotes and escapes the value into a SQL string literal.
+psql -d target_db \
+  -v masks="$(cat masks.json)" \
+  -c "SELECT pgclone.schema('host=src dbname=app user=postgres','public',true,
+        json_build_object('masks', :'masks'::json)::text)"
+```
+
+Any mechanism that produces the JSON string works — a heredoc, `\set masks \`cat masks.json\``, an application-side templating step, etc. pgclone only sees the final string.
 
 ---
 

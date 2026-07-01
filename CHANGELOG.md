@@ -2,6 +2,27 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.4.1]
+
+### Fixed
+- **Type-aware data masking — masks incompatible with a column's type no longer abort the clone** (issue #17). A mask strategy emits a value of a fixed kind — a text string (`email`/`name`/`phone`/`partial`/`hash`), an integer (`random_int`), SQL `NULL` (`null`), or a caller-supplied literal (`constant`). When that value was fed into a column whose type could not parse it, the clone failed deep inside the streaming `COPY`. The reported trigger: `pgclone.discover_sensitive()` matched a **boolean** column `base_income_replacement_allow` against the `%income%` financial pattern and suggested the numeric `random_int` strategy; applying it produced `ERROR: pgclone: COPY completed with error: ERROR: invalid input syntax for type boolean: "60629"`. Every mask-application site now checks the column's `pg_type.typcategory` first and **skips an incompatible mask with a `WARNING`** (leaving the column unchanged) instead of corrupting the `COPY` stream. Text masks fit string columns; `random_int` fits numeric or string columns; `null` and `constant` are left to the server to validate.
+- **`pgclone.discover_sensitive()` no longer suggests type-incompatible masks.** The scan now joins `pg_type` and omits a suggestion when the recommended strategy cannot be stored in the column's type (e.g. a numeric strategy for a boolean flag, or a text strategy for a numeric/date column), so a re-generated mask file is safe to apply verbatim.
+- **`pgclone.masking_report()`** flags a name-matched but type-incompatible column with a `Review manually: strategy X does not fit <type> column` recommendation rather than advising a mask that would fail.
+
+### Changed
+- **`pgclone.mask_in_place()`** skips incompatible column masks (with a `WARNING`) and, when *every* rule is incompatible, returns a clear `OK: masked 0 rows … (0 columns — all mask rules were incompatible with their column types)` instead of failing with an empty `UPDATE … SET`.
+- **`pgclone.create_masking_policy()`** leaves an incompatible column unmasked in the generated view, preserving the column's original type instead of silently changing it (e.g. `boolean` → `integer`).
+
+### Added
+- Internal C helpers in `src/pgclone.c`: `pgclone_mask_out_kind()` / `pgclone_strategy_fits()` / `pgclone_mask_kind_fits()` (mask-output-kind vs. `typcategory` compatibility), `pgclone_column_typcategory()` (per-column type-category lookup over a libpq connection), and `pgclone_masktype_name()` / `pgclone_typcat_desc()` (human-readable names for `WARNING` messages).
+- **pgTAP test group 26** (8 tests, plan 87 → 95) plus a `test_schema.flags` fixture (a boolean `income_verified` column whose name matches `%income%`, alongside a numeric `monthly_income` and string `contact_email`): verifies that a `random_int` mask on the boolean column is skipped and the clone succeeds, that the compatible email mask still applies, that `discover_sensitive` omits the boolean but keeps the numeric column, and that `mask_in_place` skips the incompatible mask.
+
+### Compatibility
+- No SQL signature changes — the fix is entirely in the C masking engine. `sql/pgclone--4.4.0--4.4.1.sql` only bumps the installed version.
+- Behavior change is limited to masks that previously **crashed** the clone (or, for `create_masking_policy`, silently changed a column's type): those columns are now passed through unmasked with a `WARNING`. Masks that already worked are unaffected.
+- Synchronous paths only, as with the rest of the masking feature — `*_async` jobs do not carry JSON options through shared memory and ignore `"mask"`/`"masks"`.
+- Pure C-string/libpq implementation; identical behavior on PG 14–18.
+
 ## [4.4.0]
 
 ### Added

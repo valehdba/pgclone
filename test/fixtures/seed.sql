@@ -181,6 +181,25 @@ INSERT INTO test_schema.employees (full_name, email, phone, salary, ssn, notes) 
     ('Diana Prince',   'diana@wonder.net',     '+1-555-333-4444', 120000, '456-78-9012', 'Director'),
     ('Eve Wilson',     'eve@example.com',      NULL,              55000, '567-89-0123', 'Intern');
 
+-- ---- Table for issue #17: type-aware masking ----
+-- income_verified is a BOOLEAN whose NAME matches the %income% financial
+-- pattern (which recommends the numeric "random_int" strategy). Applying
+-- random_int to a boolean used to abort the clone with
+--   ERROR: invalid input syntax for type boolean: "60629"
+-- monthly_income is a numeric column that random_int fits; contact_email
+-- is a string column that the "email" strategy fits.
+CREATE TABLE test_schema.flags (
+    id                SERIAL PRIMARY KEY,
+    income_verified   BOOLEAN NOT NULL DEFAULT false,
+    monthly_income    INTEGER NOT NULL,
+    contact_email     VARCHAR(255)
+);
+
+INSERT INTO test_schema.flags (income_verified, monthly_income, contact_email) VALUES
+    (true,  5000, 'a@example.com'),
+    (false, 6000, 'b@example.com'),
+    (true,  7000, 'c@example.com');
+
 -- ---- Roles and permissions for clone_roles tests ----
 DO $$
 BEGIN
