@@ -2,6 +2,31 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.4.2]
+
+### Fixed
+- **Constraint- and length-aware data masking** (issue #18). v4.4.1 made masking skip a strategy whose *type* a column could not store; issue #18 reported three further ways a mask could still abort or corrupt a clone. All are now handled — the offending mask is skipped with a `WARNING` (or clamped), and the clone succeeds:
+  - **Length overflow** — a `constant` (default `'REDACTED'`), `partial`, `hash`, or even `random_int` value could exceed a `varchar(N)`/`char(N)` column and fail with `value too long for type character varying(N)`. Mask output for a length-limited string column is now clamped with `left(…, N)` so it always fits.
+  - **`constant` on a numeric column** — the default `'REDACTED'` (or any non-numeric text) cannot be stored in an `integer`/`numeric` column (`invalid input syntax`). A `constant` mask on a non-string column is now applied only when the literal is a valid number for that column, otherwise skipped.
+  - **`null` on a NOT NULL column** — a `null` mask that would violate a `NOT NULL` constraint is skipped.
+  - **UNIQUE / PRIMARY KEY columns** — a value-collapsing (`name`, `constant`, `null`) or collision-prone (`random_int`) mask would break uniqueness (`duplicate key`). Only the injective `hash` strategy is applied to a UNIQUE/PK column; the rest are skipped.
+  - **FOREIGN KEY columns** — masking a FK column would break referential integrity, so it is skipped.
+- **`pgclone.discover_sensitive()` and `pgclone.masking_report()` only suggest strategies the engine will actually apply.** Foreign-key columns are omitted; a UNIQUE/PK sensitive column, or a NOT NULL column whose default strategy is `null` (e.g. `ssn`), is steered to `hash` (which preserves distinctness and non-nullness) when the type permits. A generated mask file is therefore safe to apply verbatim.
+
+### Changed
+- **`pgclone.mask_in_place()`** applies the same length clamp and constraint/type skips; when every rule is skipped it returns `OK: masked 0 rows … (0 columns — all mask rules were skipped as unsafe for their columns)`.
+- **`pgclone.create_masking_policy()`** applies the type/`constant` checks (a masked view enforces no table constraints, so uniqueness/FK/NOT NULL skips do not apply there).
+
+### Added
+- Internal C helpers in `src/pgclone.c`: `ColMaskMeta` plus `pgclone_column_maskmeta()` / `pgclone_maskmeta_from_row()` and the shared `PGCLONE_MASKMETA_COLS` catalog fragment (per-column typcategory, declared length, NOT NULL, UNIQUE/PK, FK); `pgclone_mask_skip_reason()` (single decision point for every skip rule); `pgclone_append_mask_expr_clamped()` (length clamp); `pgclone_discover_strategy()` (align suggestions with what the engine applies); and `pgclone_looks_numeric()`.
+- **pgTAP test group 27** (12 tests, plan 95 → 107) plus `test_schema.mask18_parent` / `mask18_child` fixtures (a UNIQUE NOT NULL `email`, a `varchar(4)` `code`, an `integer` `salary`, a NOT NULL `ssn`, and a FK `parent_id`): verifies length clamping, constant-on-numeric skip, uniqueness preservation (`name` skipped, `hash` applied and distinct), NOT NULL and FK skips, and that `discover_sensitive` steers the unique email to `hash`.
+
+### Compatibility
+- No SQL signature changes — the fix is entirely in the C masking engine. `sql/pgclone--4.4.1--4.4.2.sql` only bumps the installed version.
+- Behavior change is limited to masks that previously **crashed** the clone or violated a constraint: those columns are now clamped (length) or passed through unmasked with a `WARNING`. Masks that already worked are unaffected.
+- Synchronous paths only, as with the rest of the masking feature — `*_async` jobs ignore `"mask"`/`"masks"`.
+- Pure C-string/libpq implementation; identical behavior on PG 14–18.
+
 ## [4.4.1]
 
 ### Fixed

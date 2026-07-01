@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(95);
+SELECT plan(107);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -680,6 +680,89 @@ SELECT results_eq(
     'SELECT count(*)::integer FROM test_schema.flags_typed WHERE income_verified',
     ARRAY[2],
     'boolean column unchanged after mask_in_place skips its mask');
+
+-- ============================================================
+-- TEST GROUP 27: issue #18 — constraint- and length-aware masking
+--
+-- A mask must not break the clone by overflowing a column's length,
+-- feeding a bad literal to a numeric column, or violating a
+-- NOT NULL / UNIQUE / FOREIGN KEY constraint. Such masks are skipped
+-- (with a WARNING) and the column is left unmasked; length-limited
+-- string columns are clamped so the value always fits.
+-- ============================================================
+-- 12 tests below — keep in sync with plan() above.
+
+-- Length + numeric-constant: constant on varchar(4) is clamped, constant
+-- "REDACTED" on an integer column is skipped — the clone still succeeds.
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'mask18_parent', 'm18_const',
+        '{"mask": {"code": {"type":"constant","value":"REDACTED"}, "salary": {"type":"constant","value":"REDACTED"}}}'),
+    'constant on varchar(4) + constant on integer: clone succeeds');
+
+SELECT has_table('test_schema', 'm18_const', 'm18_const table created');
+
+SELECT results_eq(
+    'SELECT bool_and(length(code) <= 4)::boolean FROM test_schema.m18_const',
+    ARRAY[true],
+    'constant on varchar(4) clamped to the column length');
+
+SELECT results_eq(
+    'SELECT sum(salary)::integer FROM test_schema.m18_const',
+    ARRAY[18000],
+    'constant on integer skipped — salary values intact');
+
+-- Uniqueness: a collapsing "name" mask on a UNIQUE column is skipped
+-- (values stay distinct); "hash" is applied and preserves distinctness.
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'mask18_parent', 'm18_uname', '{"mask": {"email": "name"}}'),
+    'name mask on UNIQUE email: clone succeeds (mask skipped)');
+
+SELECT results_eq(
+    'SELECT count(DISTINCT email)::integer FROM test_schema.m18_uname',
+    ARRAY[3],
+    'UNIQUE email left intact when a collapsing mask is requested');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'mask18_parent', 'm18_uhash', '{"mask": {"email": "hash"}}'),
+    'hash mask on UNIQUE email: clone succeeds');
+
+SELECT results_eq(
+    $$SELECT count(DISTINCT email)::integer FROM test_schema.m18_uhash
+      WHERE email <> 'alice@example.com'$$,
+    ARRAY[3],
+    'hash mask applied to UNIQUE email and stays distinct');
+
+-- NOT NULL: a null mask on a NOT NULL column is skipped.
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'mask18_parent', 'm18_null', '{"mask": {"ssn": "null"}}'),
+    'null mask on NOT NULL ssn: clone succeeds (mask skipped)');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM test_schema.m18_null WHERE ssn IS NOT NULL',
+    ARRAY[3],
+    'NOT NULL ssn left intact when a null mask is requested');
+
+-- Foreign key: masking a FK column is skipped (referential integrity).
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'mask18_child', 'm18_child', '{"mask": {"parent_id": {"type":"random_int"}}}'),
+    'random_int mask on FK parent_id: clone succeeds (mask skipped)');
+
+-- discover_sensitive steers a UNIQUE sensitive column to hash.
+SELECT ok(
+    (SELECT pgclone.discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%"email": "hash"%'),
+    'discover suggests hash for the UNIQUE email column');
 
 SELECT * FROM finish();
 ROLLBACK;

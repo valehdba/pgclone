@@ -522,6 +522,20 @@ Each strategy emits a value of a fixed kind, and that value has to be storable i
 
 If a mask is **incompatible** with a column's type — e.g. `random_int` on a `boolean` flag, or `hash` on an `integer` — pgclone now **skips that mask and copies the column unchanged**, emitting a `WARNING` instead of aborting the clone with `invalid input syntax for type …` (issue #17). `discover_sensitive` (below) never suggests an incompatible mask in the first place, so a generated mask file is safe to apply verbatim.
 
+### Length and constraint safety (v4.4.2)
+
+Masking never breaks a clone by overflowing a column or violating a constraint (issue #18):
+
+- **Length** — output for a `varchar(N)`/`char(N)` column is clamped with `left(…, N)` so a `constant` (`'REDACTED'`), `partial`, `hash`, or `random_int` value always fits instead of failing with `value too long for type character varying(N)`.
+- **`constant` on a numeric column** — applied only when the literal is a valid number for that column; otherwise skipped (so the default `'REDACTED'` on an `integer` column no longer errors).
+- **`NOT NULL`** — a `null` mask on a `NOT NULL` column is skipped.
+- **`UNIQUE` / `PRIMARY KEY`** — only the injective `hash` strategy is applied (it keeps rows distinct); value-collapsing or collision-prone strategies (`name`, `constant`, `null`, `random_int`) are skipped. To mask a unique sensitive column (e.g. a unique `email`), use `hash`.
+- **`FOREIGN KEY`** — masking a FK column is skipped to preserve referential integrity.
+
+Skipped masks emit a `WARNING` naming the column and reason and leave the column unmasked. `discover_sensitive` / `masking_report` account for all of this: they omit FK columns and steer UNIQUE/PK and NOT NULL sensitive columns to `hash`.
+
+> **Masking keys (PK/UQ/FK).** Integer primary/unique/foreign keys generally should not be masked — no built-in strategy both fits an integer and preserves the constraint, so they are left unmasked (integer PK/UQ) or skipped (FK). If you need referentially-consistent key masking, apply the deterministic `hash` to the same column across parent and child yourself (matching values hash identically), keeping the columns a text type.
+
 ### Notes
 
 - Masking is applied on the **source** side inside `COPY (SELECT ...) TO STDOUT`, so masked data never enters the local database unmasked.
