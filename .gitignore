@@ -5,6 +5,10 @@
 *.dll
 *.bc
 
+# Release artifacts
+*.zip
+*.tar.gz
+
 # PGXS generated
 results/
 regression.diffs

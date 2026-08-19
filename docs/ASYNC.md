@@ -96,6 +96,7 @@ SELECT pgclone.schema_async(
 - Maximum 512 tables per pool operation (`PGCLONE_MAX_POOL_TASKS`).
 - Only one pool operation can run at a time per database cluster.
 - Pool workers are visible in `pgclone.jobs_view` as individual table-type jobs.
+- **Async paths ignore JSON options that don't fit in shared memory:** `mask`, `masks`, `tables`, and `exclude_tables` are silently dropped in `pgclone.table_async()`, `pgclone.schema_async()`, and the parallel worker pool. Use the synchronous equivalents (`pgclone.table()`, `pgclone.schema()`) when you need masking or table filters.
 
 ### Snapshot-keeper resilience in async paths (v4.3.2)
 

@@ -433,21 +433,6 @@ column_attrs_equal(PGresult *a, int ai, PGresult *b, int bi)
     return true;
 }
 
-static void
-emit_only_in_table(StringInfo out, PGresult *res, int s, int e, const char *json_key)
-{
-    bool first_col = true;
-    int  i;
-
-    appendStringInfo(out, "\"%s\":[", json_key);
-    for (i = s; i < e; i++)
-    {
-        emit_column_object(out, res, i, first_col);
-        first_col = false;
-    }
-    appendStringInfoChar(out, ']');
-}
-
 /*
  * Compare two column ranges (one table on each side). Walk-merge by
  * column name. Append a "modified" table entry if any drift is found.

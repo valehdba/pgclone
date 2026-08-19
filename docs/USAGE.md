@@ -751,6 +751,7 @@ SELECT pgclone.clone_roles(
 
 - **Superuser on both source and target** — `pg_authid` (which stores encrypted passwords) is only accessible to superusers
 - System roles (`pg_*`) and the `postgres` role are excluded from cloning
+- Only roles with a stored password hash (SCRAM-SHA-256 or MD5) are re-created with credentials. Roles that authenticate exclusively through external mechanisms (peer, ident, LDAP, GSSAPI, cert) have `pg_authid.rolpassword IS NULL` on the source and are cloned with all attributes and privileges but **without a password** — configure the corresponding `pg_hba.conf` entry on the target so they can still authenticate.
 
 ---
 

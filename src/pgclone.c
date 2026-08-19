@@ -465,7 +465,13 @@ pgclone_parse_options(const char *json_str)
 
                 {
                     int len = quote_end - quote_start;
-                    if (len > 0 && len < PGCLONE_MAX_WHERE)
+                    if (len >= PGCLONE_MAX_WHERE)
+                        ereport(ERROR,
+                                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                                 errmsg("pgclone: \"where\" clause exceeds %d chars",
+                                        PGCLONE_MAX_WHERE - 1),
+                                 errhint("Simplify the filter, or push complex predicates into a view on the source.")));
+                    if (len > 0)
                     {
                         memcpy(opts.where_clause, quote_start, len);
                         opts.where_clause[len] = '\0';
@@ -1738,25 +1744,6 @@ pgclone_exec(PGconn *conn, const char *query)
 }
 
 /* ---------------------------------------------------------------
- * Internal helper: execute DDL on the local database via SPI
- * --------------------------------------------------------------- */
-static void
-pgclone_exec_local(const char *query)
-{
-    int ret;
-
-    ret = SPI_execute(query, false, 0);
-
-    if (ret != SPI_OK_UTILITY && ret != SPI_OK_SELECT &&
-        ret != SPI_OK_INSERT && ret != SPI_OK_UPDATE)
-    {
-        ereport(WARNING,
-                (errmsg("pgclone: local execution returned code %d for: %.128s",
-                        ret, query)));
-    }
-}
-
-/* ---------------------------------------------------------------
  * Internal helper: execute DDL on a libpq connection.
  * Used for loopback connection operations.
  * Returns true on success, false on failure (with WARNING).
@@ -2043,6 +2030,23 @@ pgclone_source_copy_cleanup(PGconn *conn)
 }
 
 /* ---------------------------------------------------------------
+ * Reject a source conninfo that would silently truncate into the
+ * fixed 1024-byte shared-memory slot on the async path. Called at
+ * every async SQL entry BEFORE any state is claimed so the caller
+ * gets a clear error instead of a mysterious "could not connect"
+ * later on. The limit intentionally leaves one byte for '\0'.
+ * --------------------------------------------------------------- */
+static void
+pgclone_check_conninfo_length(const char *conninfo)
+{
+    if (conninfo != NULL && strlen(conninfo) >= 1024)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: source conninfo exceeds 1023 chars"),
+                 errhint("Shorten the conninfo string; move long options into libpq environment or service file.")));
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: stream data from source to target using COPY.
  *
  * When columns or where_clause are provided, uses
@@ -2061,7 +2065,6 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     StringInfoData  cmd;
     char           *buf;
     int             ret;
-    int64           bytes_transferred = 0;
     int64           row_count = 0;
     bool            use_query_copy;
     bool            began_local_txn = false;
@@ -2259,12 +2262,12 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
     if (PQresultStatus(res) != PGRES_COPY_OUT)
     {
-        char *copy_errmsg = pstrdup(PQerrorMessage(source_conn));
         PQclear(res);
         pfree(cmd.data);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgclone: COPY OUT failed on source: %s", copy_errmsg)));
+                 errmsg("pgclone: COPY OUT failed on source: %s",
+                        PQerrorMessage(source_conn))));
     }
     PQclear(res);
 
@@ -2298,14 +2301,12 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
     if (PQresultStatus(res) != PGRES_COPY_IN)
     {
-        char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
         PQclear(res);
-
         pgclone_source_copy_cleanup(source_conn);
-
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-                 errmsg("pgclone: COPY IN failed on local: %s", copy_errmsg)));
+                 errmsg("pgclone: COPY IN failed on local: %s",
+                        PQerrorMessage(local_conn))));
     }
     PQclear(res);
 
@@ -2314,17 +2315,15 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     {
         if (PQputCopyData(local_conn, buf, ret) != 1)
         {
-            char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
             PQfreemem(buf);
             PQputCopyEnd(local_conn, "aborted");
             pgclone_source_copy_cleanup(source_conn);
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                      errmsg("pgclone: error writing COPY data to local: %s",
-                            copy_errmsg)));
+                            PQerrorMessage(local_conn))));
         }
 
-        bytes_transferred += ret;
         PQfreemem(buf);
         row_count++;
 
@@ -2338,16 +2337,17 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
 
     if (ret == -2)
     {
-        char *copy_errmsg = pstrdup(PQerrorMessage(source_conn));
         PQputCopyEnd(local_conn, "source error");
         /* Source is out of COPY_OUT (ret == -2) but the terminating
          * error PGresult must still be consumed so the connection
-         * is not left with a pending result. */
+         * is not left with a pending result. Do this BEFORE reading
+         * PQerrorMessage(source_conn) so we don't overwrite the
+         * initial error text with a follow-up "no COPY in progress". */
         pgclone_source_copy_cleanup(source_conn);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                  errmsg("pgclone: COPY stream error from source: %s",
-                        copy_errmsg)));
+                        PQerrorMessage(source_conn))));
     }
 
     /* Source stream ended cleanly (ret == -1). Consume its final
@@ -2356,23 +2356,19 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     pgclone_source_copy_cleanup(source_conn);
 
     if (PQputCopyEnd(local_conn, NULL) != 1)
-    {
-        char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                  errmsg("pgclone: error finalizing COPY on local: %s",
-                        copy_errmsg)));
-    }
+                        PQerrorMessage(local_conn))));
 
     res = PQgetResult(local_conn);
     if (PQresultStatus(res) != PGRES_COMMAND_OK)
     {
-        char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
         PQclear(res);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                  errmsg("pgclone: COPY completed with error: %s",
-                        copy_errmsg)));
+                        PQerrorMessage(local_conn))));
     }
 
     row_count = atol(PQcmdTuples(res));
@@ -5025,16 +5021,20 @@ pgclone_clone_roles(PG_FUNCTION_ARGS)
     int             roles_created = 0;
     int             roles_updated = 0;
     int             grants_applied = 0;
+    char           *authid_filter;
+    char           *grantee_filter;
+    char           *member_filter;
+    char           *acl_filter;
 
     /* Optional: comma-separated role names */
     if (PG_NARGS() >= 2 && !PG_ARGISNULL(1))
         role_filter = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
     /* Build reusable filter fragments */
-    char *authid_filter  = pgclone_build_role_filter(role_filter, "a.rolname");
-    char *grantee_filter = pgclone_build_role_filter(role_filter, "grantee");
-    char *member_filter  = pgclone_build_role_filter(role_filter, "r.rolname");
-    char *acl_filter     = pgclone_build_role_filter(role_filter, "r.rolname");
+    authid_filter  = pgclone_build_role_filter(role_filter, "a.rolname");
+    grantee_filter = pgclone_build_role_filter(role_filter, "grantee");
+    member_filter  = pgclone_build_role_filter(role_filter, "r.rolname");
+    acl_filter     = pgclone_build_role_filter(role_filter, "r.rolname");
 
     source_conn = pgclone_connect(source_conninfo);
     local_conn = pgclone_connect_local();
@@ -5889,6 +5889,8 @@ pgclone_table_async(PG_FUNCTION_ARGS)
     PgcloneJob    *job;
     int             job_id;
 
+    pgclone_check_conninfo_length(source_conninfo);
+
     if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
         target_name = text_to_cstring(PG_GETARG_TEXT_PP(4));
 
@@ -6018,6 +6020,8 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
 
     PgcloneJob    *job;
     int             job_id;
+
+    pgclone_check_conninfo_length(source_conninfo);
 
     if (PG_NARGS() >= 4 && !PG_ARGISNULL(3))
     {
