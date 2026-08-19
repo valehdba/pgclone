@@ -1920,6 +1920,39 @@ pgclone_validate_where_clause(const char *where_clause)
 }
 
 /* ---------------------------------------------------------------
+ * Drain a source-side COPY OUT stream and consume its terminating
+ * result(s). Safe to call on an idle connection.
+ *
+ * When a mid-COPY error aborts the target side, the source is still
+ * in PGRES_COPY_OUT and holds an un-fetched PGresult. Reusing that
+ * connection for the next command (or letting the caller's cleanup
+ * COMMIT run over it) silently masks a source-side COPY error and,
+ * in some libpq versions, blocks waiting on stale COPY buffers.
+ * (issue: P0-3 in the 4.4.2 review.)
+ * --------------------------------------------------------------- */
+static void
+pgclone_source_copy_cleanup(PGconn *conn)
+{
+    char     *buf;
+    int       ret;
+    PGresult *res;
+
+    if (conn == NULL || PQstatus(conn) != CONNECTION_OK)
+        return;
+
+    do
+    {
+        buf = NULL;
+        ret = PQgetCopyData(conn, &buf, 0);
+        if (buf)
+            PQfreemem(buf);
+    } while (ret > 0);
+
+    while ((res = PQgetResult(conn)) != NULL)
+        PQclear(res);
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: stream data from source to target using COPY.
  *
  * When columns or where_clause are provided, uses
@@ -2178,8 +2211,7 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
         char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
         PQclear(res);
 
-        PQgetCopyData(source_conn, &buf, 0);
-        if (buf) PQfreemem(buf);
+        pgclone_source_copy_cleanup(source_conn);
 
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
@@ -2195,6 +2227,7 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
             char *copy_errmsg = pstrdup(PQerrorMessage(local_conn));
             PQfreemem(buf);
             PQputCopyEnd(local_conn, "aborted");
+            pgclone_source_copy_cleanup(source_conn);
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                      errmsg("pgclone: error writing COPY data to local: %s",
@@ -2217,11 +2250,20 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     {
         char *copy_errmsg = pstrdup(PQerrorMessage(source_conn));
         PQputCopyEnd(local_conn, "source error");
+        /* Source is out of COPY_OUT (ret == -2) but the terminating
+         * error PGresult must still be consumed so the connection
+         * is not left with a pending result. */
+        pgclone_source_copy_cleanup(source_conn);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                  errmsg("pgclone: COPY stream error from source: %s",
                         copy_errmsg)));
     }
+
+    /* Source stream ended cleanly (ret == -1). Consume its final
+     * PGresult before we touch local so a source-side COPY error is
+     * not silently masked by the subsequent COMMIT on source_conn. */
+    pgclone_source_copy_cleanup(source_conn);
 
     if (PQputCopyEnd(local_conn, NULL) != 1)
     {

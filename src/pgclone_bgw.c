@@ -838,6 +838,111 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
 }
 
 /* ===============================================================
+ * Unexpected-exit cleanup for the three bgw entry points.
+ *
+ * A worker that ereport(ERROR)s past its normal cleanup: label, is
+ * SIGTERM'd, or otherwise proc_exit's without walking its own
+ * finalize block leaves its jobs[] slot RUNNING forever, and the
+ * pool parent job can hang because "last worker finalizes parent"
+ * never fires. A before_shmem_exit callback runs on every path
+ * that reaches proc_exit — including uncaught ERROR and shutdown
+ * requests — and still has access to shared memory.
+ *
+ * Registered once per bgw entry after signal setup. Idempotent: the
+ * normal COMPLETED/FAILED transition leaves this a no-op.
+ * (issue: P0-2 in the 4.4.2 review.)
+ * =============================================================== */
+typedef enum PgcloneBgwRole
+{
+    PGCLONE_BGW_ROLE_NONE = 0,
+    PGCLONE_BGW_ROLE_SINGLE,
+    PGCLONE_BGW_ROLE_POOL_WORKER,
+    PGCLONE_BGW_ROLE_POOL_COORD
+} PgcloneBgwRole;
+
+static int             pgclone_my_job_id = 0;
+static PgcloneBgwRole  pgclone_my_role   = PGCLONE_BGW_ROLE_NONE;
+
+static void
+pgclone_bgw_exit_cleanup(int code, Datum arg)
+{
+    PgcloneJob *job;
+
+    if (pgclone_state == NULL || pgclone_my_job_id == 0)
+        return;
+
+    LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
+
+    job = find_job(pgclone_my_job_id);
+    if (job != NULL &&
+        (job->status == PGCLONE_JOB_RUNNING ||
+         job->status == PGCLONE_JOB_PENDING))
+    {
+        job->status = PGCLONE_JOB_FAILED;
+        if (job->error_message[0] == '\0')
+            strlcpy(job->error_message,
+                    "worker exited unexpectedly",
+                    sizeof(job->error_message));
+        job->end_time = GetCurrentTimestamp();
+        strlcpy(job->current_phase,
+                "worker exited unexpectedly",
+                sizeof(job->current_phase));
+    }
+
+    /* A pool coordinator that dies mid-publish must unblock any
+     * worker still waiting on snapshot_ready. Safe to set after
+     * publish too — pool workers hold their own snapshot by then. */
+    if (pgclone_my_role == PGCLONE_BGW_ROLE_POOL_COORD)
+        pgclone_state->pool.snapshot_failed = true;
+
+    /* A pool worker that dies without walking its finalize block
+     * would leave the parent job RUNNING forever if it was the last
+     * live worker. Repeat the "all done → finalize parent" check. */
+    if (pgclone_my_role == PGCLONE_BGW_ROLE_POOL_WORKER &&
+        pgclone_state->pool.active)
+    {
+        PgcloneJob *parent = find_job(pgclone_state->pool.parent_job_id);
+        if (parent != NULL && parent->status == PGCLONE_JOB_RUNNING)
+        {
+            bool all_done = true;
+            int  i;
+
+            for (i = 0; i < pgclone_state->pool.num_workers; i++)
+            {
+                PgcloneJob *w = find_job(pgclone_state->pool.worker_job_ids[i]);
+                if (w != NULL &&
+                    (w->status == PGCLONE_JOB_RUNNING ||
+                     w->status == PGCLONE_JOB_PENDING))
+                {
+                    all_done = false;
+                    break;
+                }
+            }
+
+            if (all_done)
+            {
+                bool any_failed =
+                    (pgclone_state->pool.failed_count > 0) ||
+                    (pgclone_state->pool.completed_count <
+                     pgclone_state->pool.num_tasks);
+
+                parent->status = any_failed
+                    ? PGCLONE_JOB_FAILED
+                    : PGCLONE_JOB_COMPLETED;
+                parent->end_time = GetCurrentTimestamp();
+                snprintf(parent->current_phase, 64,
+                         "completed (%d/%d ok)",
+                         pgclone_state->pool.completed_count,
+                         pgclone_state->pool.num_tasks);
+                pgclone_state->pool.active = false;
+            }
+        }
+    }
+
+    LWLockRelease(pgclone_state->lock);
+}
+
+/* ===============================================================
  * Background worker main function
  *
  * Reads job parameters from shared memory, executes the clone,
@@ -872,6 +977,9 @@ pgclone_bgw_main(Datum main_arg)
 
     BackgroundWorkerUnblockSignals();
 
+    pgclone_my_job_id = job_id;
+    pgclone_my_role   = PGCLONE_BGW_ROLE_SINGLE;
+    before_shmem_exit(pgclone_bgw_exit_cleanup, (Datum) 0);
 
     if (!pgclone_state)
     {
@@ -1235,6 +1343,10 @@ pgclone_pool_worker_main(Datum main_arg)
     pqsignal(SIGTERM, die);
 #endif
     BackgroundWorkerUnblockSignals();
+
+    pgclone_my_job_id = job_id;
+    pgclone_my_role   = PGCLONE_BGW_ROLE_POOL_WORKER;
+    before_shmem_exit(pgclone_bgw_exit_cleanup, (Datum) 0);
 
     if (!pgclone_state)
     {
@@ -1676,6 +1788,10 @@ pgclone_pool_coordinator_main(Datum main_arg)
     pqsignal(SIGTERM, die);
 #endif
     BackgroundWorkerUnblockSignals();
+
+    pgclone_my_job_id = job_id;
+    pgclone_my_role   = PGCLONE_BGW_ROLE_POOL_COORD;
+    before_shmem_exit(pgclone_bgw_exit_cleanup, (Datum) 0);
 
     if (!pgclone_state)
     {
