@@ -283,7 +283,20 @@ pgclone_parse_pattern_array(const char *json_str, const char *key,
             break;
 
         if (qe > qs)
+        {
+            /* Cap regex length so a catastrophic-backtracking pattern
+             * (e.g. "(a+)+b") cannot pin the source's regex engine
+             * for unbounded time. 256 chars is far above any real
+             * table-name pattern. */
+            if ((qe - qs) > 256)
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("pgclone: regex pattern in \"%s\" exceeds 256 chars",
+                                key),
+                         errhint("Use a shorter pattern, or a set of narrower patterns.")));
+
             items[n++] = pgclone_json_unescape(qs, qe);
+        }
 
         cur = qe + 1;
     }
@@ -1850,23 +1863,40 @@ pgclone_connect_local(void)
 /* ---------------------------------------------------------------
  * Validate WHERE clause against SQL injection patterns.
  *
- * Rejects semicolons (statement chaining) and DDL/DML keywords
- * that have no place in a read-only filter expression.
- * This is a defense-in-depth layer — the source connection also
- * runs inside a READ ONLY transaction.
+ * Rejects semicolons (statement chaining), SQL comments (which can
+ * hide keywords from the substring scan below), DML/DDL keywords,
+ * subquery/set-operation keywords (which turn the clause into a
+ * boolean oracle over any table the source connection can read),
+ * and unbalanced parens outside of string literals (which are how
+ * an attacker breaks out of the enclosing COPY (SELECT ... WHERE)
+ * wrapper). This is a defense-in-depth layer — the source
+ * connection also runs inside a READ ONLY transaction.
  * --------------------------------------------------------------- */
 static void
 pgclone_validate_where_clause(const char *where_clause)
 {
-    /* Forbidden patterns: case-insensitive whole-word matches */
+    /* Forbidden patterns: case-insensitive whole-word matches.
+     * SELECT/WITH/UNION/INTERSECT/EXCEPT/VALUES block subqueries
+     * and set operations that turn the WHERE into a data-exfiltration
+     * oracle. FETCH/LIMIT/OFFSET/ORDER/RETURNING guard against
+     * appended-clause tricks. LOCK/PREPARE/DEALLOCATE/LISTEN/NOTIFY
+     * catch stray statement-form attacks. */
     static const char *forbidden[] = {
         "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
         "TRUNCATE", "GRANT", "REVOKE", "COPY", "EXECUTE",
         "CALL", "DO", "SET", "RESET", "LOAD",
+        "SELECT", "WITH", "UNION", "INTERSECT", "EXCEPT", "VALUES",
+        "FETCH", "RETURNING", "LOCK", "PREPARE", "DEALLOCATE",
+        "LISTEN", "NOTIFY", "ANALYZE", "VACUUM", "CLUSTER",
+        "CHECKPOINT", "IMPORT",
         NULL
     };
     const char *p;
     int         i;
+    int         paren_depth = 0;
+    bool        in_squote   = false;   /* inside '...' */
+    bool        in_dquote   = false;   /* inside "..." */
+    bool        in_dollar   = false;   /* inside $...$...$...$ */
     size_t      len = strlen(where_clause);
     char       *upper;
 
@@ -1876,6 +1906,66 @@ pgclone_validate_where_clause(const char *where_clause)
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("pgclone: WHERE clause must not contain semicolons"),
                  errhint("Remove ';' from the WHERE clause.")));
+
+    /* Reject SQL comments — a block-comment inside a keyword can
+     * hide it from the substring scan below, and line comments can
+     * hide a suffix that changes the parse. Neither is needed in a
+     * legitimate filter expression. */
+    if (strstr(where_clause, "--") != NULL ||
+        strstr(where_clause, "/*") != NULL ||
+        strstr(where_clause, "*/") != NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: WHERE clause must not contain SQL comments"),
+                 errhint("Remove '--' and '/* ... */' from the WHERE clause.")));
+
+    /* Verify parens balance outside of string / dollar-quote
+     * literals. An attacker breaks out of the COPY (SELECT ... WHERE
+     * <clause>) wrapper by injecting an unmatched ')' — anything
+     * that would leave the outer COPY() unbalanced is rejected here.
+     * String-literal contents are skipped so a legitimate clause
+     * like col = ')' still passes. */
+    for (p = where_clause; *p; p++)
+    {
+        char c = *p;
+
+        if (in_squote)
+        {
+            if (c == '\'' && p[1] == '\'') { p++; continue; }
+            if (c == '\'') in_squote = false;
+            continue;
+        }
+        if (in_dquote)
+        {
+            if (c == '"' && p[1] == '"') { p++; continue; }
+            if (c == '"') in_dquote = false;
+            continue;
+        }
+        if (in_dollar)
+        {
+            if (c == '$') in_dollar = false;
+            continue;
+        }
+
+        if (c == '\'') { in_squote = true; continue; }
+        if (c == '"')  { in_dquote = true; continue; }
+        if (c == '$')  { in_dollar = true; continue; }
+
+        if (c == '(') paren_depth++;
+        else if (c == ')')
+        {
+            paren_depth--;
+            if (paren_depth < 0)
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("pgclone: WHERE clause has unbalanced parentheses"),
+                         errhint("Every ')' must match an earlier '('.")));
+        }
+    }
+    if (paren_depth != 0 || in_squote || in_dquote || in_dollar)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: WHERE clause has unbalanced parentheses or quotes")));
 
     /* Build uppercase copy for keyword matching */
     upper = palloc(len + 1);
@@ -1910,7 +2000,7 @@ pgclone_validate_where_clause(const char *where_clause)
                         (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                          errmsg("pgclone: WHERE clause contains forbidden keyword: %s",
                                 forbidden[i]),
-                         errhint("The WHERE clause must be a read-only filter expression.")));
+                         errhint("The WHERE clause must be a read-only filter expression without subqueries or set operations.")));
             }
             found += klen;
         }
