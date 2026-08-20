@@ -113,6 +113,16 @@ if echo "$SPL" | grep -q "pgclone"; then
     if [ $KEEPER_EXIT -ne 0 ]; then
         TEST_EXIT=1
     fi
+
+    echo ""
+    echo "============================================"
+    echo "Running pgclone chaos tests (worker kill, slot saturation)..."
+    echo "============================================"
+    bash /build/pgclone/test/test_chaos.sh 2>&1
+    CHAOS_EXIT=$?
+    if [ $CHAOS_EXIT -ne 0 ]; then
+        TEST_EXIT=1
+    fi
 else
     echo "WARNING: pgclone not in shared_preload_libraries, skipping async tests"
     echo "To run async tests, add to postgresql.conf:"
