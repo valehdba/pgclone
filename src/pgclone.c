@@ -26,6 +26,7 @@
 #include "utils/timestamp.h"
 
 #include "pgclone_bgw.h"
+#include "pgclone_mask.h"
 #include "pgclone_snapshot.h"
 
 PG_MODULE_MAGIC;
@@ -36,10 +37,8 @@ PG_MODULE_MAGIC;
  * --------------------------------------------------------------- */
 #define PGCLONE_MAX_COLUMNS   64
 #define PGCLONE_MAX_WHERE     2048
-#define PGCLONE_MAX_MASKS     64
 
-/* v4.4.0: schema/database-level masking and table subset filters */
-#define PGCLONE_MAX_TABLE_MASKS    64
+/* v4.4.0: schema/database-level table subset filters */
 #define PGCLONE_MAX_TABLE_PATTERNS 64
 
 /* Snapshot identifiers exported by pg_export_snapshot() are short
@@ -47,31 +46,9 @@ PG_MODULE_MAGIC;
  * bytes is comfortable padding. */
 #define PGCLONE_SNAPSHOT_ID_LEN  64
 
-/* Mask strategy types */
-typedef enum PgcloneMaskType
-{
-    PGCLONE_MASK_NONE = 0,
-    PGCLONE_MASK_EMAIL,         /* a***@domain.com */
-    PGCLONE_MASK_NAME,          /* XXXX */
-    PGCLONE_MASK_PHONE,         /* ***-***-1234 */
-    PGCLONE_MASK_PARTIAL,       /* Jo***on — keep first/last N chars */
-    PGCLONE_MASK_HASH,          /* SHA256 — deterministic for referential integrity */
-    PGCLONE_MASK_NULL,          /* replace with NULL */
-    PGCLONE_MASK_RANDOM_INT,    /* random integer in [min, max] */
-    PGCLONE_MASK_CONSTANT       /* fixed replacement value */
-} PgcloneMaskType;
-
-/* Per-column masking rule */
-typedef struct MaskRule
-{
-    char              column[NAMEDATALEN];
-    PgcloneMaskType   type;
-    int               partial_prefix;  /* chars to keep at start (PARTIAL) */
-    int               partial_suffix;  /* chars to keep at end (PARTIAL) */
-    int               range_min;       /* RANDOM_INT min */
-    int               range_max;       /* RANDOM_INT max */
-    char              constant_val[256]; /* CONSTANT replacement */
-} MaskRule;
+/* Mask types (MaskRule, PgcloneMaskType, PgcloneMaskOutKind, ColMaskMeta,
+ * PGCLONE_MAX_MASKS, PGCLONE_MAX_TABLE_MASKS, PGCLONE_MASKMETA_COLS) are
+ * now declared in pgclone_mask.h. */
 
 typedef struct CloneOptions
 {
@@ -770,518 +747,6 @@ pgclone_parse_options(const char *json_str)
     return opts;
 }
 
-/* ---------------------------------------------------------------
- * Build a SQL expression that applies a masking strategy to a column.
- *
- * The expression is pure SQL executed server-side on the source,
- * so masking happens before data enters the COPY stream — no
- * row-by-row processing overhead.
- *
- * All expressions use pgcrypto-free SQL: md5() is built-in,
- * string functions are available on all PG 14+.
- * --------------------------------------------------------------- */
-static void
-pgclone_build_mask_expr(StringInfo buf, const char *col_ident,
-                        const MaskRule *rule)
-{
-    switch (rule->type)
-    {
-        case PGCLONE_MASK_EMAIL:
-            /*
-             * Preserves domain, masks local part:
-             *   "alice@example.com" -> "a***@example.com"
-             * NULL-safe via COALESCE.
-             */
-            appendStringInfo(buf,
-                "CASE WHEN %s IS NULL THEN NULL "
-                "WHEN position('@' in %s::text) > 0 THEN "
-                "  left(%s::text, 1) || '***@' || split_part(%s::text, '@', 2) "
-                "ELSE '***' END",
-                col_ident, col_ident, col_ident, col_ident);
-            break;
-
-        case PGCLONE_MASK_NAME:
-            /* Replace with fixed string, preserving NULL */
-            appendStringInfo(buf,
-                "CASE WHEN %s IS NULL THEN NULL ELSE 'XXXX' END",
-                col_ident);
-            break;
-
-        case PGCLONE_MASK_PHONE:
-            /*
-             * Keep last 4 characters, mask rest:
-             *   "+1-555-123-4567" -> "***-4567"
-             */
-            appendStringInfo(buf,
-                "CASE WHEN %s IS NULL THEN NULL "
-                "WHEN length(%s::text) > 4 THEN '***-' || right(%s::text, 4) "
-                "ELSE '****' END",
-                col_ident, col_ident, col_ident);
-            break;
-
-        case PGCLONE_MASK_PARTIAL:
-            /*
-             * Keep first N and last M chars, mask middle:
-             *   prefix=2, suffix=3: "Johnson" -> "Jo***son"
-             */
-            appendStringInfo(buf,
-                "CASE WHEN %s IS NULL THEN NULL "
-                "WHEN length(%s::text) <= %d THEN repeat('*', length(%s::text)) "
-                "ELSE left(%s::text, %d) || '***' || right(%s::text, %d) END",
-                col_ident,
-                col_ident, rule->partial_prefix + rule->partial_suffix,
-                col_ident,
-                col_ident, rule->partial_prefix,
-                col_ident, rule->partial_suffix);
-            break;
-
-        case PGCLONE_MASK_HASH:
-            /*
-             * Deterministic MD5 hash — same input always produces same output.
-             * Useful for columns that need referential integrity across tables
-             * (e.g., hash(email) in table A matches hash(email) in table B).
-             */
-            appendStringInfo(buf,
-                "CASE WHEN %s IS NULL THEN NULL "
-                "ELSE md5(%s::text) END",
-                col_ident, col_ident);
-            break;
-
-        case PGCLONE_MASK_NULL:
-            appendStringInfo(buf, "NULL");
-            break;
-
-        case PGCLONE_MASK_RANDOM_INT:
-            {
-                int rmin = rule->range_min;
-                int rmax = rule->range_max;
-
-                /* Default range if not specified (both zero from memset) */
-                if (rmin == 0 && rmax == 0)
-                    rmax = 99999;
-
-                /* Swap if inverted */
-                if (rmin > rmax)
-                {
-                    int tmp = rmin;
-                    rmin = rmax;
-                    rmax = tmp;
-                }
-
-                appendStringInfo(buf,
-                    "floor(random() * (%d - %d + 1) + %d)::integer",
-                    rmax, rmin, rmin);
-            }
-            break;
-
-        case PGCLONE_MASK_CONSTANT:
-            appendStringInfo(buf, "%s",
-                             quote_literal_cstr(rule->constant_val));
-            break;
-
-        case PGCLONE_MASK_NONE:
-            /* Should not reach here, but emit column as-is */
-            appendStringInfoString(buf, col_ident);
-            break;
-    }
-}
-
-/* ---------------------------------------------------------------
- * Find a mask rule for a given column name, or NULL if none.
- * --------------------------------------------------------------- */
-static const MaskRule *
-pgclone_find_mask_rule(const CloneOptions *opts, const char *col_name)
-{
-    int i;
-
-    if (opts == NULL || opts->num_masks == 0)
-        return NULL;
-
-    for (i = 0; i < opts->num_masks; i++)
-    {
-        if (strcmp(opts->masks[i].column, col_name) == 0)
-            return &opts->masks[i];
-    }
-    return NULL;
-}
-
-/* ---------------------------------------------------------------
- * v4.4.1 (issue #17): type-aware masking.
- *
- * A mask strategy emits a value of a fixed "kind" — a text string,
- * an integer, SQL NULL, or a caller-supplied literal. When that value
- * is fed into a column whose type cannot parse it (e.g. a numeric
- * mask like random_int applied to a boolean flag column named
- * "..._income_..."), the clone fails deep inside the streaming COPY
- * with a cryptic
- *   ERROR: invalid input syntax for type boolean: "60629"
- * These helpers let every mask-application site check up front whether
- * the strategy fits the column's type and skip the mask when it does
- * not, instead of corrupting the COPY stream.
- * --------------------------------------------------------------- */
-typedef enum PgcloneMaskOutKind
-{
-    MASK_OUT_ASIS = 0,   /* column emitted unchanged (no mask)          */
-    MASK_OUT_TEXT,       /* text value: email/name/phone/partial/hash   */
-    MASK_OUT_NUMERIC,    /* integer value: random_int                   */
-    MASK_OUT_NULLONLY,   /* SQL NULL: null                              */
-    MASK_OUT_ANY         /* caller-supplied literal: constant (trusted) */
-} PgcloneMaskOutKind;
-
-/* What kind of value does this mask strategy emit? */
-static PgcloneMaskOutKind
-pgclone_mask_out_kind(PgcloneMaskType t)
-{
-    switch (t)
-    {
-        case PGCLONE_MASK_EMAIL:
-        case PGCLONE_MASK_NAME:
-        case PGCLONE_MASK_PHONE:
-        case PGCLONE_MASK_PARTIAL:
-        case PGCLONE_MASK_HASH:
-            return MASK_OUT_TEXT;
-        case PGCLONE_MASK_RANDOM_INT:
-            return MASK_OUT_NUMERIC;
-        case PGCLONE_MASK_NULL:
-            return MASK_OUT_NULLONLY;
-        case PGCLONE_MASK_CONSTANT:
-            return MASK_OUT_ANY;
-        case PGCLONE_MASK_NONE:
-        default:
-            return MASK_OUT_ASIS;
-    }
-}
-
-/*
- * Can a value of kind `kind` be stored in a column whose pg_type.typcategory
- * is `typcat`? A '\0' typcat means "unknown" — we stay permissive and let the
- * server enforce types rather than skip a mask we cannot classify.
- *
- * The allow-list is deliberately conservative: text masks only fit string
- * columns ('S'); a numeric mask fits numeric ('N') or string ('S') columns
- * (an integer renders cleanly into both). NULL and caller-supplied constants
- * are left to the server (NULL casts to any type; a constant is the user's
- * explicit, trusted literal).
- */
-static bool
-pgclone_mask_kind_fits(PgcloneMaskOutKind kind, char typcat)
-{
-    if (typcat == '\0')
-        return true;
-
-    switch (kind)
-    {
-        case MASK_OUT_TEXT:
-            return typcat == 'S';
-        case MASK_OUT_NUMERIC:
-            return typcat == 'N' || typcat == 'S';
-        case MASK_OUT_NULLONLY:
-        case MASK_OUT_ANY:
-        case MASK_OUT_ASIS:
-        default:
-            return true;
-    }
-}
-
-/* Same test, keyed by the strategy string used by discover_sensitive /
- * masking_report. A discover-generated "constant" carries the built-in
- * "REDACTED" text value, so it is classified as text here (unlike a
- * user-supplied constant, which pgclone_mask_out_kind trusts as ANY). */
-static bool
-pgclone_strategy_fits(const char *strategy, char typcat)
-{
-    PgcloneMaskOutKind kind;
-
-    if (strategy == NULL)
-        return true;
-    else if (strcmp(strategy, "random_int") == 0)
-        kind = MASK_OUT_NUMERIC;
-    else if (strcmp(strategy, "null") == 0)
-        kind = MASK_OUT_NULLONLY;
-    else
-        kind = MASK_OUT_TEXT;   /* email/name/phone/partial/hash/constant */
-
-    return pgclone_mask_kind_fits(kind, typcat);
-}
-
-/* Human-readable mask strategy name, for WARNING messages. */
-static const char *
-pgclone_masktype_name(PgcloneMaskType t)
-{
-    switch (t)
-    {
-        case PGCLONE_MASK_EMAIL:      return "email";
-        case PGCLONE_MASK_NAME:       return "name";
-        case PGCLONE_MASK_PHONE:      return "phone";
-        case PGCLONE_MASK_PARTIAL:    return "partial";
-        case PGCLONE_MASK_HASH:       return "hash";
-        case PGCLONE_MASK_NULL:       return "null";
-        case PGCLONE_MASK_RANDOM_INT: return "random_int";
-        case PGCLONE_MASK_CONSTANT:   return "constant";
-        case PGCLONE_MASK_NONE:
-        default:                      return "none";
-    }
-}
-
-/* Human-readable pg_type.typcategory, for WARNING messages. */
-static const char *
-pgclone_typcat_desc(char typcat)
-{
-    switch (typcat)
-    {
-        case 'B': return "boolean";
-        case 'D': return "date/time";
-        case 'T': return "timespan";
-        case 'N': return "numeric";
-        case 'S': return "string";
-        case 'E': return "enum";
-        case 'G': return "geometric";
-        case 'I': return "network address";
-        case 'R': return "range";
-        case 'A': return "array";
-        case 'U': return "binary/user-defined";
-        default:  return "this";
-    }
-}
-
-/* ---------------------------------------------------------------
- * v4.4.2 (issue #18): constraint- and length-aware masking.
- *
- * Type compatibility alone (issue #17) is not enough — a mask can still
- * break a clone in three further ways, all reported in issue #18:
- *   1. length: a text/constant/partial mask can produce a value longer
- *      than a varchar(N)/char(N) column       -> "value too long".
- *   2. constant: the default 'REDACTED' (or any text) does not parse
- *      into a numeric column                   -> "invalid input syntax".
- *   3. constraints: collapsing a UNIQUE/PK column to one value, nulling
- *      a NOT NULL column, or masking a FOREIGN KEY column breaks the
- *      constraint                              -> duplicate/null/FK error.
- *
- * ColMaskMeta carries the per-column facts needed to decide, and the
- * helpers below either skip the mask (with a reason) or apply it with a
- * length clamp so the value always fits.
- * --------------------------------------------------------------- */
-typedef struct ColMaskMeta
-{
-    char  typcat;        /* pg_type.typcategory, or '\0' if unknown        */
-    int   char_maxlen;   /* declared varchar/char length, 0 = unlimited    */
-    bool  notnull;       /* column is NOT NULL                             */
-    bool  is_unique;     /* participates in a PK / UNIQUE index            */
-    bool  is_fk;         /* participates in a FOREIGN KEY constraint       */
-} ColMaskMeta;
-
-/* True when the whole string parses as a number (constant-on-numeric). */
-static bool
-pgclone_looks_numeric(const char *s)
-{
-    char *end;
-
-    if (s == NULL || *s == '\0')
-        return false;
-    errno = 0;
-    (void) strtod(s, &end);
-    if (errno != 0 || end == s)
-        return false;
-    while (*end == ' ' || *end == '\t')
-        end++;
-    return *end == '\0';
-}
-
-/*
- * The SQL that computes ColMaskMeta's columns for a table, in a fixed
- * order (typcategory, char_maxlen, notnull, is_unique, is_fk). Shared by
- * the single-column lookup and the bulk per-table queries so the column
- * order stays in sync. `a`, `c`, `t` must be bound to pg_attribute,
- * pg_class and pg_type in the surrounding query.
- */
-#define PGCLONE_MASKMETA_COLS \
-    "t.typcategory, " \
-    "CASE WHEN a.atttypmod > 4 AND t.typcategory = 'S' " \
-    "     THEN a.atttypmod - 4 ELSE 0 END, " \
-    "a.attnotnull, " \
-    "EXISTS (SELECT 1 FROM pg_catalog.pg_index i " \
-    "        WHERE i.indrelid = c.oid AND i.indisunique " \
-    "          AND a.attnum = ANY(i.indkey)), " \
-    "EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con " \
-    "        WHERE con.conrelid = c.oid AND con.contype = 'f' " \
-    "          AND a.attnum = ANY(con.conkey))"
-
-/* Fill a ColMaskMeta from a result row starting at column `base`. */
-static ColMaskMeta
-pgclone_maskmeta_from_row(PGresult *r, int row, int base)
-{
-    ColMaskMeta m;
-    char       *v;
-
-    memset(&m, 0, sizeof(m));
-    v = PQgetvalue(r, row, base + 0);
-    if (v != NULL && v[0] != '\0')
-        m.typcat = v[0];
-    m.char_maxlen = atoi(PQgetvalue(r, row, base + 1));
-    m.notnull   = (PQgetvalue(r, row, base + 2)[0] == 't');
-    m.is_unique = (PQgetvalue(r, row, base + 3)[0] == 't');
-    m.is_fk     = (PQgetvalue(r, row, base + 4)[0] == 't');
-    return m;
-}
-
-/*
- * Look up masking metadata for one schema.table.column over `conn`.
- * On any error an all-zero struct is returned (typcat '\0'), which the
- * decision logic treats permissively — the server then enforces types.
- */
-static ColMaskMeta
-pgclone_column_maskmeta(PGconn *conn, const char *schema_name,
-                        const char *table_name, const char *col_name)
-{
-    ColMaskMeta     meta;
-    StringInfoData  q;
-    PGresult       *r;
-
-    memset(&meta, 0, sizeof(meta));
-
-    initStringInfo(&q);
-    appendStringInfo(&q,
-        "SELECT " PGCLONE_MASKMETA_COLS " "
-        "FROM pg_catalog.pg_attribute a "
-        "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
-        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-        "JOIN pg_catalog.pg_type t ON t.oid = a.atttypid "
-        "WHERE n.nspname = %s AND c.relname = %s AND a.attname = %s "
-        "AND a.attnum > 0 AND NOT a.attisdropped",
-        quote_literal_cstr(schema_name),
-        quote_literal_cstr(table_name),
-        quote_literal_cstr(col_name));
-
-    r = PQexec(conn, q.data);
-    pfree(q.data);
-
-    if (PQresultStatus(r) == PGRES_TUPLES_OK && PQntuples(r) > 0)
-        meta = pgclone_maskmeta_from_row(r, 0, 0);
-    PQclear(r);
-    return meta;
-}
-
-/*
- * Decide whether a mask may be applied to a column. Returns NULL to apply
- * it, or a short human-readable reason to skip it (leaving the column
- * unmasked). Consolidates every safety rule so all call sites behave the
- * same:
- *   - issue #17: output type incompatible with the column type
- *   - issue #18: a constant literal that is not valid for a non-string type
- *   - issue #18: a null mask on a NOT NULL column
- *   - issue #18: masking a foreign-key column (breaks referential integrity)
- *   - issue #18: masking a UNIQUE/PK column with a value-collapsing or
- *     collision-prone strategy — only the injective `hash` keeps rows distinct
- */
-static const char *
-pgclone_mask_skip_reason(const MaskRule *rule, const ColMaskMeta *m)
-{
-    PgcloneMaskOutKind kind = pgclone_mask_out_kind(rule->type);
-
-    if (!pgclone_mask_kind_fits(kind, m->typcat))
-        return "output type is incompatible with the column type";
-
-    if (rule->type == PGCLONE_MASK_CONSTANT &&
-        m->typcat != 'S' && m->typcat != '\0')
-    {
-        if (!(m->typcat == 'N' && pgclone_looks_numeric(rule->constant_val)))
-            return "constant value is not valid for the column type";
-    }
-
-    if (rule->type == PGCLONE_MASK_NULL && m->notnull)
-        return "would put NULL in a NOT NULL column";
-
-    if (m->is_fk)
-        return "column is a foreign key (masking would break referential integrity)";
-
-    if (m->is_unique && rule->type != PGCLONE_MASK_HASH)
-        return "column is UNIQUE/PRIMARY KEY (only the \"hash\" strategy preserves uniqueness)";
-
-    return NULL;
-}
-
-/*
- * Adjust a discover_sensitive strategy suggestion so the masking engine
- * will actually apply it to a column with metadata `m` (issue #18):
- *   - foreign-key columns are never suggested (masking breaks FK);
- *   - a UNIQUE/PK column, or a NOT NULL column whose base strategy is
- *     "null", falls back to the injective "hash" (the one strategy the
- *     engine keeps on such columns) when the type permits, else nothing;
- *   - a suggestion whose output type does not fit the column is dropped.
- * Returns the strategy string to emit, or NULL to omit the column.
- */
-static const char *
-pgclone_discover_strategy(const char *base, const ColMaskMeta *m)
-{
-    const char *strat = base;
-
-    if (m->is_fk)
-        return NULL;
-
-    if ((m->is_unique && strcmp(strat, "hash") != 0) ||
-        (strcmp(strat, "null") == 0 && m->notnull))
-        strat = "hash";
-
-    if (!pgclone_strategy_fits(strat, m->typcat))
-        return NULL;
-
-    return strat;
-}
-
-/*
- * Append a mask expression for a column, clamped so it always fits a
- * length-limited string column (issue #18). char_maxlen == 0 means the
- * column has no character-length limit, so the expression is emitted as-is.
- * The ::text cast lets non-text outputs (e.g. random_int) be clamped too.
- */
-static void
-pgclone_append_mask_expr_clamped(StringInfo out, const char *col_ident,
-                                 const MaskRule *rule, int char_maxlen)
-{
-    if (char_maxlen > 0)
-    {
-        appendStringInfoString(out, "left((");
-        pgclone_build_mask_expr(out, col_ident, rule);
-        appendStringInfo(out, ")::text, %d)", char_maxlen);
-    }
-    else
-        pgclone_build_mask_expr(out, col_ident, rule);
-}
-
-/* ---------------------------------------------------------------
- * v4.4.0: Find the raw mask JSON for a table inside a schema clone,
- * or NULL if none. Schema-qualified keys ("schema.table") win over
- * bare table names so a database clone can disambiguate identically
- * named tables in different schemas.
- * --------------------------------------------------------------- */
-static const char *
-pgclone_find_table_mask(const CloneOptions *opts,
-                        const char *schema_name, const char *table_name)
-{
-    int   i;
-    char *qualified;
-
-    if (opts == NULL || opts->num_table_masks == 0)
-        return NULL;
-
-    qualified = psprintf("%s.%s", schema_name, table_name);
-    for (i = 0; i < opts->num_table_masks; i++)
-    {
-        if (strcmp(opts->table_mask_key[i], qualified) == 0)
-        {
-            pfree(qualified);
-            return opts->table_mask_json[i];
-        }
-    }
-    pfree(qualified);
-
-    for (i = 0; i < opts->num_table_masks; i++)
-    {
-        if (strcmp(opts->table_mask_key[i], table_name) == 0)
-            return opts->table_mask_json[i];
-    }
-    return NULL;
-}
 
 /* ---------------------------------------------------------------
  * Internal helper: pin the source session to a deterministic search_path.
@@ -2030,7 +1495,9 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
             {
                 const char *col_name = PQgetvalue(col_res, ci, 0);
                 const char *col_ident = quote_identifier(col_name);
-                const MaskRule *rule = pgclone_find_mask_rule(opts, col_name);
+                const MaskRule *rule = pgclone_find_mask_rule(opts->masks,
+                                                               opts->num_masks,
+                                                               col_name);
                 ColMaskMeta meta = pgclone_maskmeta_from_row(col_res, ci, 1);
 
                 if (ci > 0)
@@ -2074,7 +1541,9 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
             for (ci = 0; ci < opts->num_columns; ci++)
             {
                 const char *col_ident = quote_identifier(opts->columns[ci]);
-                const MaskRule *rule = pgclone_find_mask_rule(opts, opts->columns[ci]);
+                const MaskRule *rule = pgclone_find_mask_rule(opts->masks,
+                                                               opts->num_masks,
+                                                               opts->columns[ci]);
 
                 if (ci > 0)
                     appendStringInfoString(&select_cmd, ", ");
@@ -3407,7 +2876,10 @@ pgclone_schema(PG_FUNCTION_ARGS)
              * masking pipeline (query-based COPY with mask
              * expressions) applies unchanged. */
             const char *mask_json =
-                pgclone_find_table_mask(&opts, schema_name, table_names[i]);
+                pgclone_find_table_mask((const char *const *) opts.table_mask_key,
+                                        (const char *const *) opts.table_mask_json,
+                                        opts.num_table_masks,
+                                        schema_name, table_names[i]);
 
             resetStringInfo(&tbl_opts);
             appendStringInfoString(&tbl_opts, opts_json.data);
@@ -4628,7 +4100,9 @@ pgclone_create_masking_policy(PG_FUNCTION_ARGS)
         const char *col_name = PQgetvalue(col_res, ci, 0);
         const char *typcat_s = PQgetvalue(col_res, ci, 1);
         const char *col_ident = quote_identifier(col_name);
-        const MaskRule *rule = pgclone_find_mask_rule(&opts, col_name);
+        const MaskRule *rule = pgclone_find_mask_rule(opts.masks,
+                                                       opts.num_masks,
+                                                       col_name);
         /* A masked view enforces no constraints, so only the type/constant
          * checks apply here (leave notnull/unique/fk cleared). */
         ColMaskMeta meta;
