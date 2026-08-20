@@ -26,6 +26,7 @@
 #include "utils/timestamp.h"
 
 #include "pgclone_bgw.h"
+#include "pgclone_snapshot.h"
 
 PG_MODULE_MAGIC;
 
@@ -1481,149 +1482,50 @@ pgclone_connect(const char *conninfo)
 static void
 pgclone_begin_repeatable_read(PGconn *conn)
 {
-    PGresult *res;
-
-    if (PQtransactionStatus(conn) == PQTRANS_INTRANS)
-        return;
-
-    res = PQexec(conn, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-    {
-        char *errmsg_copy = pstrdup(PQerrorMessage(conn));
-        PQclear(res);
+    if (!pgclone_snap_begin_repeatable_read(conn))
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                  errmsg("pgclone: could not start REPEATABLE READ transaction on source: %s",
-                        errmsg_copy)));
-    }
-    PQclear(res);
-
-    /* Defeat server-side timeouts for the keeper's idle window.
-     * Failures here are non-fatal — TCP keepalives still protect
-     * us against the firewall path. */
-    {
-        StringInfoData setcmd;
-
-        initStringInfo(&setcmd);
-        appendStringInfoString(&setcmd,
-            "SET LOCAL idle_in_transaction_session_timeout = 0; "
-            "SET LOCAL statement_timeout = 0");
-
-        /* transaction_timeout (PG 17+) caps a transaction's *total*
-         * wall-clock age and fires whether the session is idle or
-         * active, so neither TCP keepalives nor
-         * idle_in_transaction_session_timeout = 0 defend against it:
-         * it reaps the snapshot keeper mid-clone (issue #5). The GUC
-         * does not exist on source servers < 17, where SET would
-         * raise "unrecognized configuration parameter", so gate on
-         * the SOURCE server version via PQserverVersion() — the
-         * source may run a different major version than this backend,
-         * so PG_VERSION_NUM is the wrong test here. */
-        if (PQserverVersion(conn) >= 170000)
-            appendStringInfoString(&setcmd,
-                "; SET LOCAL transaction_timeout = 0");
-
-        res = PQexec(conn, setcmd.data);
-        if (PQresultStatus(res) != PGRES_COMMAND_OK)
-            elog(DEBUG1, "pgclone: could not disable source-side timeouts: %s",
-                 PQerrorMessage(conn));
-        PQclear(res);
-        pfree(setcmd.data);
-    }
+                        PQerrorMessage(conn))));
 }
 
-/* COMMIT the source transaction. Safe to call when no transaction is
- * open (becomes a no-op with WARNING suppressed). */
+/* Sync-friendly wrapper. See pgclone_snap_commit_source. */
 static void
 pgclone_commit_source(PGconn *conn)
 {
-    PGresult *res;
-
-    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
-        return;
-
-    res = PQexec(conn, "COMMIT");
-    /* Errors here are non-fatal — the connection is about to be
-     * closed anyway. Log at DEBUG so we don't spam normal runs. */
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-        elog(DEBUG1, "pgclone: COMMIT on source returned: %s",
-             PQerrorMessage(conn));
-    PQclear(res);
+    pgclone_snap_commit_source(conn);
 }
 
-/* Export a snapshot ID from a connection that is already inside a
- * REPEATABLE READ READ ONLY transaction. Writes the ID into out_id.
- * The exporting transaction must stay open until all importers have
- * imported. */
+/* Sync-friendly wrapper. See pgclone_snap_export. */
 static void
 pgclone_export_snapshot(PGconn *conn, char *out_id, size_t out_id_len)
 {
-    PGresult *res;
-    const char *snap;
-    size_t      slen;
-
-    res = PQexec(conn, "SELECT pg_catalog.pg_export_snapshot()");
-    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1)
-    {
-        char *errmsg_copy = pstrdup(PQerrorMessage(conn));
-        PQclear(res);
+    if (!pgclone_snap_export(conn, out_id, out_id_len))
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                  errmsg("pgclone: could not export snapshot from source: %s",
-                        errmsg_copy)));
-    }
-
-    snap = PQgetvalue(res, 0, 0);
-    slen = strlen(snap);
-    if (slen >= out_id_len)
-    {
-        PQclear(res);
-        ereport(ERROR,
-                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                 errmsg("pgclone: exported snapshot id is %zu bytes, buffer is %zu",
-                        slen, out_id_len)));
-    }
-    memcpy(out_id, snap, slen);
-    out_id[slen] = '\0';
-    PQclear(res);
+                        PQerrorMessage(conn))));
 }
 
-/* Open BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY then SET
- * TRANSACTION SNAPSHOT '<id>'. The keeper that exported this snapshot
- * must still be alive (idle in transaction) at this point.
- *
- * v4.3.1: when SET TRANSACTION SNAPSHOT fails with PostgreSQL's
- * "invalid snapshot identifier" message — which the server emits
- * both for malformed IDs AND for IDs whose backing file has been
- * removed (keeper transaction terminated) — emit a hint pointing
- * at the most common cause. See issue #9. */
+/* Sync-friendly wrapper. See pgclone_snap_import. Detects the
+ * "invalid snapshot identifier" case a reaped keeper produces and
+ * attaches the operator-facing hint from issue #9. */
 static void
 pgclone_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
 {
-    PGresult       *res;
-    StringInfoData  cmd;
+    if (pgclone_snap_import(conn, snapshot_id))
+        return;
 
-    pgclone_begin_repeatable_read(conn);
-
-    initStringInfo(&cmd);
-    appendStringInfo(&cmd, "SET TRANSACTION SNAPSHOT %s",
-                     quote_literal_cstr(snapshot_id));
-    res = PQexec(conn, cmd.data);
-    pfree(cmd.data);
-
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
     {
-        char *errmsg_copy = pstrdup(PQerrorMessage(conn));
-        bool  looks_like_gone_snapshot =
-            (strstr(errmsg_copy, "invalid snapshot identifier") != NULL);
+        const char *errtxt = PQerrorMessage(conn);
+        bool gone = (errtxt != NULL &&
+                     strstr(errtxt, "invalid snapshot identifier") != NULL);
 
-        PQclear(res);
-
-        if (looks_like_gone_snapshot)
+        if (gone)
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                      errmsg("pgclone: could not import snapshot %s on source: %s",
-                            snapshot_id, errmsg_copy),
+                            snapshot_id, errtxt),
                      errhint("The exporting (keeper) transaction was likely "
                              "terminated mid-clone. Common causes: a firewall "
                              "or NAT gateway dropped the idle TCP session; a "
@@ -1643,52 +1545,26 @@ pgclone_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                      errmsg("pgclone: could not import snapshot %s on source: %s",
-                            snapshot_id, errmsg_copy)));
+                            snapshot_id, errtxt ? errtxt : "(no error message)")));
     }
-    PQclear(res);
 }
 
-/* Lightweight liveness check on the snapshot keeper. Issues a
- * cheap round-trip so libpq detects a silently-dropped TCP
- * session BEFORE the next importer tries to bind to a snapshot
- * the server has already reaped. On failure emits a clear ERROR
- * that names the root cause rather than letting the next SET
- * TRANSACTION SNAPSHOT fail with the misleading "invalid snapshot
- * identifier" message. No-op when conn is NULL or no transaction
- * is open (consistent mode disabled). v4.3.1 (issue #9). */
+/* Sync-friendly wrapper. See pgclone_snap_keeper_ping. Escalates
+ * a failed ping to ERROR with an operator-facing hint (issue #9). */
 static void
 pgclone_keeper_ping(PGconn *conn)
 {
-    PGresult *res;
-
-    if (conn == NULL)
-        return;
-    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
+    if (pgclone_snap_keeper_ping(conn))
         return;
 
-    if (PQstatus(conn) != CONNECTION_OK)
-        ereport(ERROR,
-                (errcode(ERRCODE_CONNECTION_FAILURE),
-                 errmsg("pgclone: snapshot keeper connection is no longer alive: %s",
-                        PQerrorMessage(conn)),
-                 errhint("The exported snapshot has been invalidated. "
-                         "Re-run the clone; if the failure repeats, the "
-                         "source's idle_in_transaction_session_timeout, a "
-                         "firewall idle timeout, or wal_sender_timeout is "
-                         "killing the keeper transaction.")));
-
-    res = PQexec(conn, "SELECT 1");
-    if (PQresultStatus(res) != PGRES_TUPLES_OK)
-    {
-        char *err_copy = pstrdup(PQerrorMessage(conn));
-        PQclear(res);
-        ereport(ERROR,
-                (errcode(ERRCODE_CONNECTION_FAILURE),
-                 errmsg("pgclone: snapshot keeper ping failed: %s", err_copy),
-                 errhint("The keeper transaction was terminated mid-clone. "
-                         "See pgclone issue #9.")));
-    }
-    PQclear(res);
+    ereport(ERROR,
+            (errcode(ERRCODE_CONNECTION_FAILURE),
+             errmsg("pgclone: snapshot keeper ping failed: %s",
+                    PQerrorMessage(conn)),
+             errhint("The keeper transaction was terminated mid-clone. "
+                     "Common causes: firewall idle drop, source-side "
+                     "idle_in_transaction_session_timeout, or (PG17+) "
+                     "transaction_timeout. See pgclone issue #9.")));
 }
 
 /* High-level helper: set up the source-side transaction state for a

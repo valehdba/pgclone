@@ -27,12 +27,9 @@
 #include "utils/guc.h"
 #include "libpq-fe.h"
 
-#if PG_VERSION_NUM >= 170000
-#include "postmaster/interrupt.h"
-#else
-#include "tcop/tcopprot.h"
-#endif
+#include "pgclone_compat.h"
 #include "pgclone_bgw.h"
+#include "pgclone_snapshot.h"
 
 /* Shared memory state */
 PgcloneSharedState *pgclone_state = NULL;
@@ -40,7 +37,7 @@ PgcloneSharedState *pgclone_state = NULL;
 /* Shmem hook chain */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
-#if PG_VERSION_NUM >= 150000
+#if PGCLONE_HAS_SHMEM_REQUEST_HOOK
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 #endif
 
@@ -86,7 +83,7 @@ pgclone_shmem_startup(void)
 static void
 pgclone_shmem_request(void)
 {
-#if PG_VERSION_NUM >= 150000
+#if PGCLONE_HAS_SHMEM_REQUEST_HOOK
     if (prev_shmem_request_hook)
         prev_shmem_request_hook();
 #endif
@@ -98,7 +95,7 @@ pgclone_shmem_request(void)
 void
 pgclone_shmem_init(void)
 {
-#if PG_VERSION_NUM >= 150000
+#if PGCLONE_HAS_SHMEM_REQUEST_HOOK
     /* PG 15+: register via shmem_request_hook */
     prev_shmem_request_hook = shmem_request_hook;
     shmem_request_hook = pgclone_shmem_request;
@@ -280,207 +277,79 @@ bgw_connect_with_keepalives(const char *conninfo)
 }
 
 /* ---------------------------------------------------------------
- * v4.3.0 Source-side snapshot helpers (bgw copy).
+ * v4.3.0 Source-side snapshot helpers.
  *
- * Mirror of the helpers in pgclone.c — duplicated rather than
- * exported to keep pgclone_bgw.c as an isolated translation unit.
- * Used to wrap source connections inside REPEATABLE READ READ ONLY
- * transactions and (for the pool case) export/import a shared
- * snapshot via pg_export_snapshot() / SET TRANSACTION SNAPSHOT.
- *
- * Returns true on success, false on failure (caller decides whether
- * to abort the job — these are non-fatal at the helper level).
+ * Bgw callers used to have their own copy of these; both paths now
+ * share the implementation in pgclone_snapshot.c. Local one-liner
+ * wrappers keep the WARNING-then-abort pattern the callers below
+ * expect, without dragging that policy into the shared helper.
  * --------------------------------------------------------------- */
 static bool
 bgw_begin_repeatable_read(PGconn *conn)
 {
-    PGresult *res;
-
-    if (PQtransactionStatus(conn) == PQTRANS_INTRANS)
+    if (pgclone_snap_begin_repeatable_read(conn))
         return true;
-
-    res = PQexec(conn, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-    {
-        elog(WARNING, "pgclone bgw: BEGIN REPEATABLE READ failed: %s",
-             PQerrorMessage(conn));
-        PQclear(res);
-        return false;
-    }
-    PQclear(res);
-
-    /* v4.3.2: defeat server-side timeouts for the keeper's idle
-     * window. SET LOCAL reverts at COMMIT; the GUCs are PGC_USERSET
-     * so no special privilege is required. Failures here are
-     * non-fatal — TCP keepalives still protect us against the
-     * firewall path. (issue #9 mirror in bgw) */
-    {
-        StringInfoData setcmd;
-
-        initStringInfo(&setcmd);
-        appendStringInfoString(&setcmd,
-            "SET LOCAL idle_in_transaction_session_timeout = 0; "
-            "SET LOCAL statement_timeout = 0");
-
-        /* transaction_timeout (PG 17+) caps a transaction's total
-         * wall-clock age and fires whether the session is idle or
-         * active — keepalives and idle_in_transaction_session_timeout
-         * = 0 do not defend against it, so it reaps the keeper
-         * mid-clone (issue #5). The GUC is unknown to source servers
-         * < 17, where SET raises an error, so gate on the source's
-         * PQserverVersion() rather than this backend's PG_VERSION_NUM. */
-        if (PQserverVersion(conn) >= 170000)
-            appendStringInfoString(&setcmd,
-                "; SET LOCAL transaction_timeout = 0");
-
-        res = PQexec(conn, setcmd.data);
-        if (PQresultStatus(res) != PGRES_COMMAND_OK)
-            elog(DEBUG1, "pgclone bgw: could not disable source-side timeouts: %s",
-                 PQerrorMessage(conn));
-        PQclear(res);
-        pfree(setcmd.data);
-    }
-    return true;
+    elog(WARNING, "pgclone bgw: BEGIN REPEATABLE READ failed: %s",
+         PQerrorMessage(conn));
+    return false;
 }
 
 static void
 bgw_commit_source(PGconn *conn)
 {
-    PGresult *res;
-
-    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
-        return;
-
-    res = PQexec(conn, "COMMIT");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-        elog(DEBUG1, "pgclone bgw: COMMIT on source returned: %s",
-             PQerrorMessage(conn));
-    PQclear(res);
+    pgclone_snap_commit_source(conn);
 }
 
-/* Export the current transaction's snapshot into out_id.
- * conn must already be in a REPEATABLE READ READ ONLY transaction. */
 static bool
 bgw_export_snapshot(PGconn *conn, char *out_id, size_t out_id_len)
 {
-    PGresult   *res;
-    const char *snap;
-    size_t      slen;
-
-    res = PQexec(conn, "SELECT pg_catalog.pg_export_snapshot()");
-    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) != 1)
-    {
-        elog(WARNING, "pgclone bgw: pg_export_snapshot failed: %s",
-             PQerrorMessage(conn));
-        PQclear(res);
-        return false;
-    }
-    snap = PQgetvalue(res, 0, 0);
-    slen = strlen(snap);
-    if (slen >= out_id_len)
-    {
-        elog(WARNING, "pgclone bgw: exported snapshot id is %zu bytes, buffer is %zu",
-             slen, out_id_len);
-        PQclear(res);
-        return false;
-    }
-    memcpy(out_id, snap, slen);
-    out_id[slen] = '\0';
-    PQclear(res);
-    return true;
+    if (pgclone_snap_export(conn, out_id, out_id_len))
+        return true;
+    elog(WARNING, "pgclone bgw: pg_export_snapshot failed: %s",
+         PQerrorMessage(conn));
+    return false;
 }
 
-/* BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY then SET TRANSACTION SNAPSHOT '<id>'.
- * The exporting connection must still be alive (idle in transaction).
- *
- * v4.3.2: when SET TRANSACTION SNAPSHOT fails with PostgreSQL's
- * "invalid snapshot identifier" message — which the server emits
- * both for malformed IDs AND for IDs whose backing file has been
- * reaped (keeper transaction terminated) — log a clearer line
- * with diagnostic context so async failures are easy to triage
- * (issue #9 mirror in bgw). */
 static bool
 bgw_begin_with_imported_snapshot(PGconn *conn, const char *snapshot_id)
 {
-    PGresult       *res;
-    StringInfoData  cmd;
+    const char *errtxt;
 
-    if (!bgw_begin_repeatable_read(conn))
-        return false;
+    if (pgclone_snap_import(conn, snapshot_id))
+        return true;
 
-    initStringInfo(&cmd);
-    /* snapshot ids are well-formed and short, but use parameterized
-     * literal quoting for defence-in-depth. */
-    appendStringInfo(&cmd, "SET TRANSACTION SNAPSHOT '%s'", snapshot_id);
-    res = PQexec(conn, cmd.data);
-    pfree(cmd.data);
-
-    if (PQresultStatus(res) != PGRES_COMMAND_OK)
-    {
-        const char *errtxt = PQerrorMessage(conn);
-
-        if (errtxt && strstr(errtxt, "invalid snapshot identifier"))
-            elog(WARNING,
-                 "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s"
-                 "HINT: The exporting (coordinator/keeper) transaction "
-                 "was likely terminated. Common causes: firewall idle drop, "
-                 "idle_in_transaction_session_timeout on the source, or — on "
-                 "a PostgreSQL 17+ source — a non-zero transaction_timeout "
-                 "(caps total transaction age, fires even on an active "
-                 "keeper). Async path mitigations: TCP keepalives are "
-                 "auto-injected; the keeper transaction issues SET LOCAL "
-                 "idle_in_transaction_session_timeout = 0, statement_timeout "
-                 "= 0, and (PG 17+) transaction_timeout = 0. "
-                 "Emergency workaround: pass {\"consistent\": false} in "
-                 "the options JSON. See issue #5 / #9.",
-                 snapshot_id, errtxt);
-        else
-            elog(WARNING, "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s",
-                 snapshot_id, errtxt ? errtxt : "(no error message)");
-
-        PQclear(res);
-        return false;
-    }
-    PQclear(res);
-    return true;
+    errtxt = PQerrorMessage(conn);
+    if (errtxt != NULL && strstr(errtxt, "invalid snapshot identifier"))
+        elog(WARNING,
+             "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s"
+             "HINT: The exporting (coordinator/keeper) transaction "
+             "was likely terminated. Common causes: firewall idle drop, "
+             "idle_in_transaction_session_timeout on the source, or — on "
+             "a PostgreSQL 17+ source — a non-zero transaction_timeout "
+             "(caps total transaction age, fires even on an active "
+             "keeper). Async path mitigations: TCP keepalives are "
+             "auto-injected; the keeper transaction issues SET LOCAL "
+             "idle_in_transaction_session_timeout = 0, statement_timeout "
+             "= 0, and (PG 17+) transaction_timeout = 0. "
+             "Emergency workaround: pass {\"consistent\": false} in "
+             "the options JSON. See issue #5 / #9.",
+             snapshot_id, errtxt);
+    else
+        elog(WARNING,
+             "pgclone bgw: SET TRANSACTION SNAPSHOT '%s' failed: %s",
+             snapshot_id, errtxt ? errtxt : "(no error message)");
+    return false;
 }
 
-/* Lightweight liveness check on the bgworker-owned snapshot keeper
- * connection (typically the pool coordinator's source_conn). Issues
- * a cheap round-trip so libpq detects a silently-dropped TCP
- * session BEFORE pool workers waste time waiting on a snapshot the
- * server has already reaped. Returns true if the keeper is healthy,
- * false otherwise (caller is expected to set snapshot_failed and
- * break out of the wait loop). No-op when conn is NULL or no
- * transaction is open. v4.3.2 (issue #9 mirror in bgw). */
 static bool
 bgw_keeper_ping(PGconn *conn)
 {
-    PGresult *res;
-
-    if (conn == NULL)
+    if (pgclone_snap_keeper_ping(conn))
         return true;
-    if (PQtransactionStatus(conn) != PQTRANS_INTRANS)
-        return true;
-
-    if (PQstatus(conn) != CONNECTION_OK)
-    {
-        elog(WARNING,
-             "pgclone bgw: snapshot keeper connection is no longer alive: %s",
-             PQerrorMessage(conn));
-        return false;
-    }
-
-    res = PQexec(conn, "SELECT 1");
-    if (PQresultStatus(res) != PGRES_TUPLES_OK)
-    {
-        elog(WARNING, "pgclone bgw: snapshot keeper ping failed: %s",
-             PQerrorMessage(conn));
-        PQclear(res);
-        return false;
-    }
-    PQclear(res);
-    return true;
+    elog(WARNING,
+         "pgclone bgw: snapshot keeper ping failed: %s",
+         PQerrorMessage(conn));
+    return false;
 }
 
 /* ---------------------------------------------------------------
@@ -968,13 +837,7 @@ pgclone_bgw_main(Datum main_arg)
 
     /* Very first thing — log that we entered the function */
 
-    /* Set up signal handlers */
-    #if PG_VERSION_NUM >= 170000
-        pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
-    #else
-        pqsignal(SIGTERM, die);
-    #endif
-
+    pqsignal(SIGTERM, pgclone_shutdown_handler);
     BackgroundWorkerUnblockSignals();
 
     pgclone_my_job_id = job_id;
@@ -1336,12 +1199,7 @@ pgclone_pool_worker_main(Datum main_arg)
     bool            is_last_worker = false;
     int             pool_failed_count = 0;
 
-    /* Signal handlers */
-#if PG_VERSION_NUM >= 170000
-    pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
-#else
-    pqsignal(SIGTERM, die);
-#endif
+    pqsignal(SIGTERM, pgclone_shutdown_handler);
     BackgroundWorkerUnblockSignals();
 
     pgclone_my_job_id = job_id;
@@ -1781,12 +1639,7 @@ pgclone_pool_coordinator_main(Datum main_arg)
     PgcloneJob     *job;
     PGconn         *source_conn = NULL;
 
-    /* Signal handlers */
-#if PG_VERSION_NUM >= 170000
-    pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
-#else
-    pqsignal(SIGTERM, die);
-#endif
+    pqsignal(SIGTERM, pgclone_shutdown_handler);
     BackgroundWorkerUnblockSignals();
 
     pgclone_my_job_id = job_id;
