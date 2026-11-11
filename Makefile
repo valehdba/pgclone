@@ -15,9 +15,8 @@ SHLIB_LINK   += -lpq
 ifdef WITH_ORACLE
 ORACLE_INC   ?= $(ORACLE_HOME)/sdk/include
 ORACLE_LIB   ?= $(ORACLE_HOME)
-PG_CPPFLAGS  += -DPGCLONE_WITH_ORACLE
+PG_CPPFLAGS  += -DPGCLONE_WITH_ORACLE -I$(ORACLE_INC)
 SHLIB_LINK   += -L$(ORACLE_LIB) -lclntsh
-src/pgclone_oci.o: PG_CPPFLAGS += -I$(ORACLE_INC)
 endif
 
 # PostgreSQL Extension build system
