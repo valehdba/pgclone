@@ -92,6 +92,22 @@ make PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 sudo make install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 ```
 
+### Troubleshooting: `make install` fails with `llvm-lto: No such file or directory`
+
+If PostgreSQL was itself built `--with-llvm` (check `pg_config --configure | grep llvm`), PGXS also builds a JIT bitcode file for every extension and links it with `llvm-lto`. Some LLVM packages (seen on RHEL/CentOS with a separately-installed `llvm-toolset`, e.g. `llvm20`) don't ship that specific tool, so the build fails like:
+
+```
+/bin/sh: /usr/lib64/llvm20/bin/llvm-lto: No such file or directory
+make: *** [.../pgxs.mk:241: install] Error 127
+```
+
+This is an LLVM/PGXS toolchain mismatch, not a pgclone issue — bitcode is only used for JIT-inlining expressions across a function's internals, which has no meaningful benefit for an I/O-bound cloning extension. Skip it with `with_llvm=no`:
+
+```bash
+make with_llvm=no
+sudo make with_llvm=no install
+```
+
 ### Enable
 
 ```sql
