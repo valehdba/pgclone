@@ -1078,6 +1078,89 @@ SELECT (pgclone.preflight(:src, 'app_schema')::jsonb ->> 'ready')::boolean
 
 ---
 
+## Cloning a Table from Oracle (v4.5.0)
+
+`pgclone.table_from_oracle()` copies a table (or view) from an Oracle database
+into PostgreSQL: structure, `NOT NULL`, `PRIMARY KEY` / `UNIQUE` constraints and,
+optionally, the data.
+
+### Build requirement
+
+Oracle support is **optional** and compiled in only when Oracle Instant Client
+(Basic + SDK) is available. Without it the extension builds as before and
+`table_from_oracle()` raises a clear error.
+
+```bash
+make WITH_ORACLE=1 ORACLE_HOME=/opt/oracle/instantclient_23_3
+sudo make install WITH_ORACLE=1 ORACLE_HOME=/opt/oracle/instantclient_23_3
+```
+
+The PostgreSQL server process must be able to load `libclntsh` at runtime
+(e.g. `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` or ldconfig).
+
+### Usage
+
+```sql
+-- Always preview first: returns the generated DDL, creates nothing.
+SELECT pgclone.table_from_oracle(
+    'host=ora.example.com port=1521 service=ORCLPDB1 user=scott password=tiger',
+    'HR', 'EMPLOYEES',
+    dry_run => true);
+
+-- Clone structure + data into public.employees
+SELECT pgclone.table_from_oracle(
+    'host=ora.example.com service=ORCLPDB1 user=scott password=tiger',
+    'HR', 'EMPLOYEES');
+
+-- Custom target, structure only; TNS alias connection
+SELECT pgclone.table_from_oracle(
+    'dsn=PRODDB user=scott',            -- password from PGCLONE_ORACLE_PASSWORD
+    'HR', 'EMPLOYEES',
+    include_data => false, target_schema => 'staging', target_table => 'emp');
+```
+
+| Argument | Default | Meaning |
+|----------|---------|---------|
+| `oracle_conninfo` | — | `host= port= service= user= password=` or `dsn= user= password=`. If `password` is omitted it is read from the `PGCLONE_ORACLE_PASSWORD` environment variable of the server process. |
+| `oracle_schema`, `oracle_table` | — | Exact name; if not found, the upper-cased name is tried (Oracle stores unquoted names in upper case). |
+| `include_data` | `true` | Copy rows (streamed with `COPY`). |
+| `target_schema` | `public` | Must already exist. |
+| `target_table` | lower-cased Oracle name | The target must **not** exist — the call never drops or overwrites anything. |
+| `dry_run` | `false` | Return the DDL only. |
+
+The whole operation (DDL + data) runs in one PostgreSQL transaction, so a failure
+leaves nothing behind. The Oracle side is read in a `READ ONLY` transaction for a
+consistent snapshot. Column names are lower-cased.
+
+### Type mapping
+
+`pgclone.oracle_type_to_pg(data_type, data_length, data_precision, data_scale, char_length)`
+returns the mapping without needing an Oracle connection.
+
+| Oracle | PostgreSQL |
+|--------|-----------|
+| `NUMBER(p,0)` | `smallint` (p ≤ 4), `integer` (≤ 9), `bigint` (≤ 18), else `numeric(p)` |
+| `NUMBER(p,s)` / `NUMBER` | `numeric(p,s)` / `numeric` |
+| `FLOAT`, `BINARY_DOUBLE` / `BINARY_FLOAT` | `double precision` (`real` for FLOAT ≤ 24 bits) / `real` |
+| `VARCHAR2(n)`, `NVARCHAR2(n)` | `varchar(n)` (n in characters) |
+| `CHAR(n)`, `NCHAR(n)` | `char(n)` |
+| `CLOB`, `NCLOB` | `text` (values up to 4 MB) |
+| `DATE` | `timestamp(0)` (Oracle `DATE` carries a time) |
+| `TIMESTAMP(n)` | `timestamp(min(n,6))` — nanoseconds are truncated to microseconds |
+| `TIMESTAMP WITH [LOCAL] TIME ZONE` | `timestamptz` |
+| `RAW(n)` | `bytea` |
+| `ROWID` | `varchar(18)` |
+
+Columns of any other type (`BLOB`, `BFILE`, `LONG`, `LONG RAW`, `XMLTYPE`, `INTERVAL`,
+`UROWID`, object types) are **skipped with a WARNING**; constraints that involve a
+skipped column are skipped with a NOTICE.
+
+### Not (yet) cloned
+
+Defaults, check/foreign-key constraints, non-unique indexes, triggers, comments,
+partitioning, identity columns, and masking/`WHERE` filtering are not handled for
+Oracle sources.
+
 ## JSON Options Reference
 
 | Option | Type | Default | Description |

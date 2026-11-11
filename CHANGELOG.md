@@ -2,6 +2,21 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.5.0]
+
+### Added
+- **Clone a table from Oracle into PostgreSQL**: `pgclone.table_from_oracle(oracle_conninfo, oracle_schema, oracle_table, include_data, target_schema, target_table, dry_run)`. Reads column and PK/UNIQUE metadata from `ALL_TAB_COLUMNS`/`ALL_CONSTRAINTS`, creates the table and streams rows with `COPY` in a single transaction. `dry_run` returns the DDL only; an existing target is never overwritten. See "Cloning a Table from Oracle" in `docs/USAGE.md`.
+- `pgclone.oracle_type_to_pg(...)` — the Oracle→PostgreSQL type mapping, callable without an Oracle client.
+- Optional OCI build: `make WITH_ORACLE=1 ORACLE_HOME=<instantclient>`. Without it the extension builds unchanged and `table_from_oracle()` raises a descriptive error.
+- New sources `src/pgclone_oracle.c` (mapping, DDL, loader) and `src/pgclone_oci.{c,h}` (OCI wrapper isolated from PostgreSQL headers, since `oci.h` and `postgres.h` both define `text`).
+- pgTAP test group 29 (plan 133 → 142).
+
+### Changed
+- `pgclone_connect_local()` is no longer `static` (shared with the Oracle module).
+
+### Limitations
+- BLOB/BFILE/LONG/XMLTYPE/INTERVAL columns are skipped with a warning; defaults, FK/check constraints and non-unique indexes are not carried over.
+
 ## [4.4.4]
 
 ### Fixed
