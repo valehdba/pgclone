@@ -41,6 +41,7 @@ void ora_close(OraCursor *cur) { (void) cur; }
 #include <oci.h>
 
 #define ORA_PREFETCH_ROWS 1000
+#define PGCLONE_AL32UTF8_ID 873   /* Oracle charset id of AL32UTF8 */
 
 struct OraConn
 {
@@ -98,7 +99,7 @@ ora_connect(const char *connect_string, const char *user, const char *password,
 
     /* AL32UTF8 client character set: PostgreSQL side is UTF-8. */
     rc = OCIEnvNlsCreate(&conn->env, OCI_THREADED | OCI_OBJECT, NULL, NULL, NULL,
-                         NULL, 0, NULL, OCI_UTF8ID, OCI_UTF8ID);
+                         NULL, 0, NULL, PGCLONE_AL32UTF8_ID, PGCLONE_AL32UTF8_ID);
     if (rc != OCI_SUCCESS || !conn->env)
     {
         snprintf(errbuf, errlen, "OCIEnvNlsCreate failed (is the Oracle client library usable?)");
