@@ -3,7 +3,7 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-4.4.2-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.4.2)
+[![Version](https://img.shields.io/badge/version-4.4.4-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.4.4)
 
 A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
 
@@ -148,6 +148,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v4.4.0: Schema/database-level in-line masking (`"masks"`) and regex table subset filters (`"tables"` / `"exclude_tables"`) — discussion #16
 - [x] v4.4.1: Type-aware masking — a mask that a column's type cannot store (e.g. `random_int` on a `boolean`) is skipped with a warning instead of aborting the clone; `discover_sensitive` no longer suggests incompatible masks — issue #17
 - [x] v4.4.2: Constraint- and length-aware masking — masks are clamped to a column's length and skipped when they would overflow, feed a bad literal to a numeric column, or violate a NOT NULL / UNIQUE / FOREIGN KEY constraint; UNIQUE/PK and NOT NULL sensitive columns are steered to `hash` — issue #18
+- [x] v4.4.3: `"conflict"` (`error`/`skip`/`replace`/`rename`) is now honored by the synchronous clone path (`pgclone.table()`/`pgclone.schema()`/`pgclone.database()`), not just the async job path — issue #22
+- [x] v4.4.4: Auto-discovery of bank account numbers/IBAN; `pgclone.masking_report()` gains a `(conninfo, schema)` overload to audit a remote source directly — issue #23
 - [ ] v4.5.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License

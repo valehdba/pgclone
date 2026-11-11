@@ -2,6 +2,19 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.4.4]
+
+### Fixed
+- **`pgclone.version()` was accidentally left reporting `4.4.2` in the 4.4.3 release** — the hardcoded version string in `pgclone_version()` is bumped by hand each release and was missed for 4.4.3. Now correctly reports `pgclone 4.4.4`.
+
+### Added
+- **Auto-discovery of bank account numbers** (issue #23). `pgclone.discover_sensitive()` and `pgclone.masking_report()` now match `bank_account`, `bankaccount`, `account_number`, `accountnumber`, `acct_number`, `acctnumber`, and `iban` (case-insensitive) and suggest the `null` strategy — the same full-redaction treatment already used for SSN and credit card numbers, since a bank account number identifies a specific person's account rather than just a bank.
+- **`pgclone.masking_report(source_conninfo, schema_name)`** — a 2-arg overload of the existing GDPR/compliance report that audits a **remote** schema directly, the same way `pgclone.discover_sensitive()` already does, instead of requiring a local (already-cloned) copy first. This is the "report of auto-discovered sensitive columns with no masking applied, and why" the issue asked for — `pgclone.masking_report()` already produced exactly that (with a `recommendation` column explaining FK/type/constraint reasons a column was left unmasked); it just couldn't be run pre-clone against a remote source until now.
+
+### Compatibility
+- No behavior change for existing callers of `pgclone.discover_sensitive()`/`pgclone.masking_report(schema_name)` beyond the new "Bank Account" category appearing when a matching column name exists — nothing previously suggested is changed or removed.
+- `sql/pgclone--4.4.3--4.4.4.sql` only adds the new `masking_report(TEXT, TEXT)` overload; no existing function signature changes.
+
 ## [4.4.3]
 
 ### Fixed

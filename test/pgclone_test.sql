@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(126);
+SELECT plan(133);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -929,6 +929,75 @@ SELECT results_eq(
     'SELECT count(*)::integer FROM issue22_schema.widget',
     ARRAY[2],
     'issue22_schema.widget holds exactly the source row count — replaced, not appended to');
+
+-- ============================================================
+-- TEST GROUP 29: issue #23 — auto-discover bank account numbers,
+-- and audit a remote source with masking_report()
+--
+-- test_schema.customer_accounts (fixtures/seed.sql) has a NOT NULL
+-- bank_account_number and a nullable iban column. NOT NULL steers
+-- the rule's default "null" strategy to "hash" (same convention as
+-- NOT NULL ssn in mask18_parent); iban keeps "null".
+-- ============================================================
+-- 7 tests below — keep in sync with plan() above.
+
+SELECT ok(
+    (SELECT pgclone.discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%"bank_account_number": "hash"%'),
+    'discover steers NOT NULL bank_account_number to hash');
+
+SELECT ok(
+    (SELECT pgclone.discover_sensitive(
+        current_setting('app.source_conninfo'),
+        'test_schema')::text LIKE '%"iban": "null"%'),
+    'discover suggests null for the nullable iban column');
+
+SELECT lives_ok(
+    format('SELECT * FROM pgclone.masking_report(%L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema'),
+    'pgclone.masking_report(conninfo, schema) — remote overload runs without error');
+
+SELECT ok(
+    (SELECT EXISTS (
+        SELECT 1 FROM pgclone.masking_report(
+            current_setting('app.source_conninfo'), 'test_schema')
+        WHERE table_name = 'customer_accounts'
+          AND column_name = 'bank_account_number'
+          AND sensitivity = 'Bank Account'
+          AND mask_status = 'UNMASKED'
+          AND recommendation LIKE '%hash%'
+    )),
+    'remote masking_report flags bank_account_number as Bank Account / UNMASKED / hash');
+
+SELECT ok(
+    (SELECT EXISTS (
+        SELECT 1 FROM pgclone.masking_report(
+            current_setting('app.source_conninfo'), 'test_schema')
+        WHERE table_name = 'customer_accounts'
+          AND column_name = 'iban'
+          AND sensitivity = 'Bank Account'
+          AND mask_status = 'UNMASKED'
+          AND recommendation LIKE '%null%'
+    )),
+    'remote masking_report flags iban as Bank Account / UNMASKED / null');
+
+-- The original 1-arg local overload still works unmodified — by now
+-- test_schema.customer_accounts also exists locally (cloned in TEST
+-- GROUP 5's full schema clone, which ran after the fixture was seeded).
+SELECT lives_ok(
+    format('SELECT * FROM pgclone.masking_report(%L)', 'test_schema'),
+    'pgclone.masking_report(schema) — local 1-arg overload still works');
+
+SELECT ok(
+    (SELECT EXISTS (
+        SELECT 1 FROM pgclone.masking_report('test_schema')
+        WHERE table_name = 'customer_accounts'
+          AND column_name = 'bank_account_number'
+          AND sensitivity = 'Bank Account'
+    )),
+    'local masking_report also flags the cloned bank_account_number column');
 
 SELECT * FROM finish();
 ROLLBACK;

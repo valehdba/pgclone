@@ -3885,6 +3885,16 @@ static const SensitivityRule sensitivity_rules[] = {
     {"%credit_card%",    "Credit Card",        "null"},
     {"%ccn%",            "Credit Card",        "null"},
     {"%cvv%",            "Credit Card",        "null"},
+    /* Bank account (issue #23) — a text field, treated like
+     * SSN/credit card (fully nulled, not partially masked): it
+     * identifies a specific person's account, not just a bank. */
+    {"%bank_account%",   "Bank Account",       "null"},
+    {"%bankaccount%",    "Bank Account",       "null"},
+    {"%account_number%", "Bank Account",       "null"},
+    {"%accountnumber%",  "Bank Account",       "null"},
+    {"%acct_number%",    "Bank Account",       "null"},
+    {"%acctnumber%",     "Bank Account",       "null"},
+    {"%iban%",           "Bank Account",       "null"},
     /* IP / location */
     {"%ip_address%",     "IP Address",         "hash"},
     {"%ipaddress%",      "IP Address",         "hash"},
@@ -5150,12 +5160,21 @@ pgclone_verify(PG_FUNCTION_ARGS)
 
 /* ===============================================================
  * FUNCTION: pgclone_masking_report(schema_name)
+ *           pgclone_masking_report(source_conninfo, schema_name)
  *
  * SET-RETURNING FUNCTION that generates a GDPR/compliance audit
- * report for a local schema. For each table and column:
+ * report — a list of every sensitive column with no masking applied
+ * and why (issue #23: "a report ... of tables/columns that have
+ * been auto-discovered but have not been selected for a masking
+ * strategy"). For each table and column:
  *   1. Detects if the column name matches sensitive data patterns
  *   2. Checks if a masked view (table_masked) exists
  *   3. Reports the masking status and recommendation
+ *
+ * v4.4.4 (issue #23): a 2-arg overload takes a source_conninfo so
+ * the audit can run directly against a remote source — before
+ * anything is even cloned — the same way pgclone_discover_sensitive()
+ * does, instead of requiring a local copy of the schema first.
  *
  * Returns columns:
  *   schema_name, table_name, column_name, sensitivity,
@@ -5199,16 +5218,34 @@ pgclone_masking_report(PG_FUNCTION_ARGS)
         TupleDesc       tupdesc;
         ReportState    *state;
 
-        text       *schema_t    = PG_GETARG_TEXT_PP(0);
-        char       *schema_name = text_to_cstring(schema_t);
+        /* v4.4.4 (issue #23): optional 2-arg overload —
+         * masking_report(source_conninfo, schema_name) audits a
+         * REMOTE schema (e.g. the source, before anything is even
+         * cloned) instead of the local database. MUST check ==2,
+         * NOT >=2 — see pgclone_schema()'s arg-dispatch comment for
+         * why a fixed count matters here. */
+        char           *source_conninfo = NULL;
+        text           *schema_t;
+        char           *schema_name;
 
-        PGconn         *local_conn;
+        PGconn         *report_conn;
         PGresult       *col_res;
         PGresult       *view_check;
         StringInfoData  query;
         StringInfoData  view_query;
         int             nrows, i;
         int             alloc_size;
+
+        if (PG_NARGS() == 2)
+        {
+            source_conninfo = text_to_cstring(PG_GETARG_TEXT_PP(0));
+            schema_t = PG_GETARG_TEXT_PP(1);
+        }
+        else
+        {
+            schema_t = PG_GETARG_TEXT_PP(0);
+        }
+        schema_name = text_to_cstring(schema_t);
 
         funcctx = SRF_FIRSTCALL_INIT();
         oldctx  = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -5222,7 +5259,9 @@ pgclone_masking_report(PG_FUNCTION_ARGS)
         TupleDescInitEntry(tupdesc, 6, "recommendation", TEXTOID, -1, 0);
         funcctx->tuple_desc = BlessTupleDesc(tupdesc);
 
-        local_conn = pgclone_connect_local();
+        report_conn = (source_conninfo != NULL)
+                      ? pgclone_connect(source_conninfo)
+                      : pgclone_connect_local();
 
         /* Get all columns in the schema */
         initStringInfo(&query);
@@ -5238,13 +5277,13 @@ pgclone_masking_report(PG_FUNCTION_ARGS)
             "ORDER BY c.relname, a.attnum",
             quote_literal_cstr(schema_name));
 
-        col_res = PQexec(local_conn, query.data);
+        col_res = PQexec(report_conn, query.data);
 
         if (PQresultStatus(col_res) != PGRES_TUPLES_OK)
         {
-            char *errmsg_str = pstrdup(PQerrorMessage(local_conn));
+            char *errmsg_str = pstrdup(PQerrorMessage(report_conn));
             PQclear(col_res);
-            PQfinish(local_conn);
+            PQfinish(report_conn);
             pfree(query.data);
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
@@ -5293,7 +5332,7 @@ pgclone_masking_report(PG_FUNCTION_ARGS)
                         "AND c.relkind = 'v'",
                         quote_literal_cstr(schema_name), tbl);
 
-                    view_check = PQexec(local_conn, view_query.data);
+                    view_check = PQexec(report_conn, view_query.data);
                     last_table_has_view = (PQresultStatus(view_check) == PGRES_TUPLES_OK &&
                                            PQntuples(view_check) > 0);
                     PQclear(view_check);
@@ -5345,7 +5384,7 @@ pgclone_masking_report(PG_FUNCTION_ARGS)
         pfree(view_query.data);
         pfree(query.data);
         PQclear(col_res);
-        PQfinish(local_conn);
+        PQfinish(report_conn);
 
         funcctx->user_fctx = state;
         MemoryContextSwitchTo(oldctx);
@@ -5390,7 +5429,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.4.2"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.4.4"));
 }
 
 /* ===============================================================

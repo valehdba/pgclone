@@ -562,7 +562,7 @@ Returns JSON grouped by table with suggested mask strategies:
 {"employees": {"email": "email", "full_name": "name", "phone": "phone", "salary": "random_int", "ssn": "null"}, "users": {"password": "hash", "api_key": "hash"}}
 ```
 
-The output can be used directly as the `"mask"` option value in a clone call. Detected patterns include: email, name (first/last/full), phone/mobile, SSN/national ID, salary/income, password/token/api_key, address/street, date of birth, credit card, and IP address.
+The output can be used directly as the `"mask"` option value in a clone call. Detected patterns include: email, name (first/last/full), phone/mobile, SSN/national ID, salary/income, password/token/api_key, address/street, date of birth, credit card, bank account/IBAN (v4.4.4), and IP address.
 
 Type-incompatible suggestions are omitted automatically (v4.4.1): a `boolean` column that happens to match a financial pattern, for example, is left out rather than being paired with a numeric `random_int` strategy that the clone could not apply.
 
@@ -811,6 +811,17 @@ Generate an audit report listing all sensitive columns in a schema, their maskin
 SELECT * FROM pgclone.masking_report('public');
 ```
 
+### Auditing a remote source directly (v4.4.4)
+
+Pass a `source_conninfo` as the first argument to run the same audit against a **remote** schema — e.g. the source, before anything has even been cloned yet — instead of requiring a local copy first:
+
+```sql
+SELECT * FROM pgclone.masking_report(
+    'host=prod dbname=myapp user=postgres',
+    'public'
+) WHERE mask_status = 'UNMASKED';
+```
+
 ```
  schema_name | table_name | column_name | sensitivity  | mask_status   | recommendation
 -------------+------------+-------------+--------------+---------------+--------------------------------------
@@ -827,7 +838,7 @@ SELECT * FROM pgclone.masking_report('public');
 
 | Column | Description |
 |--------|-------------|
-| `sensitivity` | Category: Email, PII - Name, Phone, National ID, Financial, Credential, Address, Date of Birth, Credit Card, IP Address |
+| `sensitivity` | Category: Email, PII - Name, Phone, National ID, Financial, Credential, Address, Date of Birth, Credit Card, Bank Account, IP Address |
 | `mask_status` | `MASKED (view)` if a `_masked` view exists, `UNMASKED` otherwise |
 | `recommendation` | "OK - masked via view" or "Apply mask strategy: X" |
 
@@ -852,7 +863,8 @@ SELECT * FROM pgclone.masking_report('public');
 
 - Only sensitive columns appear in the report (non-sensitive columns are filtered out).
 - The report checks for masked views created by `pgclone.create_masking_policy()`.
-- Uses the same ~40 sensitivity patterns as `pgclone.discover_sensitive()`.
+- Uses the same ~49 sensitivity patterns as `pgclone.discover_sensitive()`.
+- A 2-arg overload, `pgclone.masking_report(source_conninfo, schema)`, audits a remote schema directly instead of a local one — see above.
 
 ---
 
@@ -1110,6 +1122,7 @@ SELECT (pgclone.preflight(:src, 'app_schema')::jsonb ->> 'ready')::boolean
 | `pgclone.verify(conninfo)` | table | Compare row counts for all tables across source and target |
 | `pgclone.verify(conninfo, schema)` | table | Compare row counts for tables in a specific schema |
 | `pgclone.masking_report(schema)` | table | GDPR/compliance audit: sensitive columns, mask status, recommendations |
+| `pgclone.masking_report(conninfo, schema)` | table | Same audit, run directly against a remote source schema |
 | `pgclone.diff(conninfo, schema)` | text (JSON) | DDL drift report: tables, columns, indexes, constraints, triggers, views, sequences |
 | `pgclone.preflight(conninfo, schema)` | text (JSON) | Pre-flight checks: connection, versions, permissions, name conflicts, missing roles/extensions/tablespaces |
 | `pgclone.table_async(...)` | int | Async table clone (returns job_id) |

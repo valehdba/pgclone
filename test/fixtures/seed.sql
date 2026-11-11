@@ -386,3 +386,21 @@ ALTER SEQUENCE issue22_schema.widget_id_seq OWNED BY issue22_schema.widget.widge
 INSERT INTO issue22_schema.widget (widget_id, label) VALUES
     (1, 'source-widget-1'), (2, 'source-widget-2');
 SELECT setval('issue22_schema.widget_id_seq', 2, true);
+
+-- ============================================================
+-- issue #23 — auto-discover bank account numbers (pgTAP test
+-- group 29). A standalone table in test_schema so the new
+-- "Bank Account" sensitivity rule can be exercised by
+-- discover_sensitive()/masking_report() without touching any
+-- table other groups depend on.
+-- ============================================================
+CREATE TABLE test_schema.customer_accounts (
+    id                  SERIAL PRIMARY KEY,
+    customer_name       TEXT NOT NULL,
+    bank_account_number TEXT NOT NULL,
+    iban                TEXT
+);
+
+INSERT INTO test_schema.customer_accounts (customer_name, bank_account_number, iban) VALUES
+    ('Alice Adams', '123456789', 'DE89370400440532013000'),
+    ('Bob Brown',   '987654321', 'GB29NWBK60161331926819');
