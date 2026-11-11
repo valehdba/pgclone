@@ -356,7 +356,7 @@ jobs:
 
       - name: Seed Oracle
         run: |
-          export LD_LIBRARY_PATH="$ORACLE_HOME"
+          export LD_LIBRARY_PATH="$ORACLE_HOME" NLS_LANG=.AL32UTF8
           "$ORACLE_HOME/sqlplus" -L -S app/apppass@//localhost:1521/FREEPDB1 @test/fixtures/oracle_seed.sql
 
       - name: Start target PostgreSQL

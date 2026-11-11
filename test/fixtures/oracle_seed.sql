@@ -23,7 +23,7 @@ CREATE TABLE pgc_types (
 
 INSERT INTO pgc_types VALUES (
     1, 1234, 123456789012345678, 12345.67, 3.14159, 2.5,
-    'Əli Vəliyev' || CHR(9) || 'tab', 'ABC', RPAD('y', 4000, 'y'),
+    UNISTR('\018Fli V\0259liyev') || CHR(9) || 'tab', 'ABC', RPAD('y', 4000, 'y'),
     TO_DATE('2024-02-29 13:14:15', 'YYYY-MM-DD HH24:MI:SS'),
     TIMESTAMP '2024-01-02 03:04:05.123456',
     TIMESTAMP '2024-01-02 03:04:05.5 +02:00',

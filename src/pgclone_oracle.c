@@ -25,7 +25,7 @@
 extern PGconn *pgclone_connect_local(void);
 
 #define ORA_ERRLEN        1024
-#define ORA_LOB_MAX_BYTES (4 * 1024 * 1024)   /* per-value cap for CLOB/NCLOB */
+#define ORA_LOB_CHUNK_BYTES (64 * 1024)   /* CLOB read-chunk size (values are read in full) */
 #define COPY_FLUSH_BYTES  (64 * 1024)
 
 PG_FUNCTION_INFO_V1(pgclone_table_from_oracle);
@@ -446,7 +446,8 @@ fetch_columns(OraConn *conn, const char *schema, const char *table,
                     break;
                 case OK_CLOB:
                     c->select_expr = id;
-                    c->bufsz = ORA_LOB_MAX_BYTES;
+                    c->fetch_kind = ORA_COL_CLOB;
+                    c->bufsz = ORA_LOB_CHUNK_BYTES;
                     break;
                 case OK_NUMBER:
                     c->select_expr = psprintf("TO_CHAR(%s, 'TM9')", id);

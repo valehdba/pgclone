@@ -19,6 +19,8 @@ typedef struct OraCursor OraCursor;
 
 #define ORA_COL_TEXT   0    /* fetched as character data (SQLT_CHR) */
 #define ORA_COL_BINARY 1    /* fetched as raw bytes      (SQLT_BIN) */
+#define ORA_COL_CLOB   2    /* CLOB/NCLOB read in full via a LOB locator;
+                             * bufsz is the read-chunk size, not a limit */
 
 extern int  ora_is_available(void);
 
@@ -37,7 +39,8 @@ extern OraCursor *ora_open(OraConn *conn, const char *sql, int ncols,
                            char *errbuf, size_t errlen);
 extern int  ora_fetch(OraCursor *cur, char *errbuf, size_t errlen);
 
-/* Value of column `col` in the current row; NULL for SQL NULL. */
+/* Value of column `col` in the current row; NULL for SQL NULL.
+ * Valid until the next ora_fetch(). */
 extern const char *ora_value(OraCursor *cur, int col, size_t *len);
 extern void ora_close(OraCursor *cur);
 

@@ -58,7 +58,13 @@ typedef struct OraColBuf
     sb2         ind;
     ub2         len;
     ub2         rc;
+    /* CLOB columns: locator + the fully-read value */
+    OCILobLocator *lob;
+    int         is_lob;
+    size_t      lob_len;
 } OraColBuf;
+
+#define ORA_LOB_MAX_TOTAL ((size_t) 1024 * 1024 * 1024)   /* PostgreSQL text limit */
 
 struct OraCursor
 {
@@ -186,11 +192,27 @@ ora_open(OraConn *conn, const char *sql, int ncols, const int *kinds,
 
         cur->cols[i].bufsz = bufsz[i];
         cur->cols[i].buf = malloc(bufsz[i] + 1);
-        rc = OCIDefineByPos(cur->stmt, &def, conn->err, (ub4) (i + 1),
-                            cur->cols[i].buf, (sb4) bufsz[i],
-                            kinds[i] == ORA_COL_BINARY ? SQLT_BIN : SQLT_CHR,
-                            &cur->cols[i].ind, &cur->cols[i].len,
-                            &cur->cols[i].rc, OCI_DEFAULT);
+        if (kinds[i] == ORA_COL_CLOB)
+        {
+            /* Fetch a LOB locator; the content is read in ora_fetch(). The
+             * plain character define cannot return more than 64 KB because
+             * OCI reports the value length in 16 bits. */
+            cur->cols[i].is_lob = 1;
+            rc = OCIDescriptorAlloc(conn->env, (void **) &cur->cols[i].lob,
+                                    OCI_DTYPE_LOB, 0, NULL);
+            if (!OK(rc))
+                goto fail;
+            rc = OCIDefineByPos(cur->stmt, &def, conn->err, (ub4) (i + 1),
+                                &cur->cols[i].lob, (sb4) sizeof(OCILobLocator *),
+                                SQLT_CLOB, &cur->cols[i].ind, NULL,
+                                &cur->cols[i].rc, OCI_DEFAULT);
+        }
+        else
+            rc = OCIDefineByPos(cur->stmt, &def, conn->err, (ub4) (i + 1),
+                                cur->cols[i].buf, (sb4) bufsz[i],
+                                kinds[i] == ORA_COL_BINARY ? SQLT_BIN : SQLT_CHR,
+                                &cur->cols[i].ind, &cur->cols[i].len,
+                                &cur->cols[i].rc, OCI_DEFAULT);
         if (!OK(rc))
             goto fail;
     }
@@ -208,6 +230,65 @@ fail:
     return NULL;
 }
 
+/*
+ * Read a whole CLOB/NCLOB into c->buf (grown as needed) using streaming
+ * OCILobRead2. The buffer's initial size doubles as the read-chunk size.
+ */
+static int
+ora_read_clob(OraCursor *cur, OraColBuf *c, char *errbuf, size_t errlen)
+{
+    OraConn *conn = cur->conn;
+    size_t   cap = c->bufsz, total = 0;
+    char    *chunk = malloc(cap);
+    oraub8   byte_amt = 0, char_amt = 0;
+    ub1      piece = OCI_FIRST_PIECE, csfrm = SQLCS_IMPLICIT;
+    sword    rc;
+
+    if (!chunk)
+    {
+        snprintf(errbuf, errlen, "out of memory");
+        return -1;
+    }
+    OCILobCharSetForm(conn->env, conn->err, c->lob, &csfrm);
+    c->lob_len = 0;
+
+    for (;;)
+    {
+        byte_amt = 0;               /* 0 = streaming: read to the end, piece by piece */
+        rc = OCILobRead2(conn->svc, conn->err, c->lob, &byte_amt, &char_amt, 1,
+                         chunk, (oraub8) cap, piece, NULL, NULL, 0, csfrm);
+        if (rc != OCI_SUCCESS && rc != OCI_NEED_DATA && rc != OCI_SUCCESS_WITH_INFO)
+        {
+            ora_geterr(conn, errbuf, errlen, "Oracle LOB read");
+            free(chunk);
+            return -1;
+        }
+        if (total + byte_amt > ORA_LOB_MAX_TOTAL)
+        {
+            snprintf(errbuf, errlen, "CLOB value exceeds 1 GB");
+            free(chunk);
+            return -1;
+        }
+        if (total + byte_amt > c->bufsz)
+        {
+            size_t ncap = c->bufsz;
+
+            while (ncap < total + byte_amt)
+                ncap *= 2;
+            c->buf = realloc(c->buf, ncap + 1);
+            c->bufsz = (unsigned) (ncap > 0xFFFFFFFFu ? 0xFFFFFFFFu : ncap);
+        }
+        memcpy(c->buf + total, chunk, (size_t) byte_amt);
+        total += (size_t) byte_amt;
+        if (rc != OCI_NEED_DATA)
+            break;
+        piece = OCI_NEXT_PIECE;
+    }
+    free(chunk);
+    c->lob_len = total;
+    return 0;
+}
+
 int
 ora_fetch(OraCursor *cur, char *errbuf, size_t errlen)
 {
@@ -222,9 +303,17 @@ ora_fetch(OraCursor *cur, char *errbuf, size_t errlen)
         ora_geterr(cur->conn, errbuf, errlen, "Oracle fetch");
         return -1;
     }
-    /* A value larger than its buffer comes back as rc 1406 (truncated). */
     for (i = 0; i < cur->ncols; i++)
     {
+        OraColBuf *c = &cur->cols[i];
+
+        if (c->is_lob)
+        {
+            if (c->ind != -1 && ora_read_clob(cur, c, errbuf, errlen) < 0)
+                return -1;
+            continue;
+        }
+        /* A value larger than its buffer comes back as rc 1406 (truncated). */
         if (cur->cols[i].ind != -1 &&
             (cur->cols[i].rc == 1406 || cur->cols[i].ind > 0))
         {
@@ -244,7 +333,8 @@ ora_value(OraCursor *cur, int col, size_t *len)
     if (cur->cols[col].ind == -1)
         return NULL;
     if (len)
-        *len = cur->cols[col].len;
+        *len = cur->cols[col].is_lob ? cur->cols[col].lob_len
+                                     : cur->cols[col].len;
     return cur->cols[col].buf;
 }
 
@@ -258,7 +348,11 @@ ora_close(OraCursor *cur)
     if (cur->stmt)
         OCIHandleFree(cur->stmt, OCI_HTYPE_STMT);
     for (i = 0; i < cur->ncols; i++)
+    {
+        if (cur->cols[i].lob)
+            OCIDescriptorFree(cur->cols[i].lob, OCI_DTYPE_LOB);
         free(cur->cols[i].buf);
+    }
     free(cur->cols);
     free(cur);
 }

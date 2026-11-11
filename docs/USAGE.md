@@ -1144,7 +1144,7 @@ returns the mapping without needing an Oracle connection.
 | `FLOAT`, `BINARY_DOUBLE` / `BINARY_FLOAT` | `double precision` (`real` for FLOAT ≤ 24 bits) / `real` |
 | `VARCHAR2(n)`, `NVARCHAR2(n)` | `varchar(n)` (n in characters) |
 | `CHAR(n)`, `NCHAR(n)` | `char(n)` |
-| `CLOB`, `NCLOB` | `text` (values up to 4 MB) |
+| `CLOB`, `NCLOB` | `text` (read in full through a LOB locator, up to 1 GB per value) |
 | `DATE` | `timestamp(0)` (Oracle `DATE` carries a time) |
 | `TIMESTAMP(n)` | `timestamp(min(n,6))` — nanoseconds are truncated to microseconds |
 | `TIMESTAMP WITH [LOCAL] TIME ZONE` | `timestamptz` |
