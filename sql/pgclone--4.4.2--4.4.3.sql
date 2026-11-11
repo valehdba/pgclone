@@ -1,0 +1,41 @@
+/* pgclone--4.4.2--4.4.3.sql */
+\echo Use "ALTER EXTENSION pgclone UPDATE" to load this file. \quit
+
+-- v4.4.3: Conflict resolution ignored in the synchronous clone path
+-- (GitHub issue #22).
+--
+-- No SQL signature changes — the fix lives entirely in the C clone
+-- engine (src/pgclone.c), so this upgrade script only bumps the
+-- installed version.
+--
+-- Background
+-- ----------
+-- The JSON options argument of pgclone.table()/pgclone.schema() has
+-- always documented a "conflict" key ("error" default / "skip" /
+-- "replace" / "rename") for handling a target that already exists.
+-- Only the async bgworker path (pgclone_bgw.c) actually implemented
+-- it. The synchronous C functions parsed no such key at all: every
+-- table and sequence was created with a plain
+-- "CREATE ... IF NOT EXISTS", so "replace" (and the other
+-- strategies) were silently ignored — reported as a stale target
+-- table (and its sequence) never being dropped/recreated even with
+-- '{"conflict": "replace"}'.
+--
+-- Fix
+-- ---
+--   * CloneOptions (the sync option struct) gained a "conflict"
+--     field, parsed the same way the async path already parses it.
+--   * A new conflict-resolution helper (mirroring the bgworker's
+--     bgw_handle_conflict()) runs before creating a table or
+--     sequence: error/skip/replace/rename are now honored for
+--     pgclone.table() and for the sequences pgclone.schema() creates
+--     directly.
+--   * pgclone.schema() and pgclone.database() propagate "conflict"
+--     into the JSON options of every per-table / per-schema
+--     sub-call, the same way "masks"/"tables"/"exclude_tables" are
+--     already propagated.
+--   * Only acts when "conflict" is explicitly supplied — a call that
+--     never used the option keeps the exact previous behavior
+--     (idempotent "CREATE ... IF NOT EXISTS", no error).
+
+-- (No catalog changes.)

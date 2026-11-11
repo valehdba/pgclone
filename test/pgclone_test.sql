@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(107);
+SELECT plan(126);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -763,6 +763,172 @@ SELECT ok(
         current_setting('app.source_conninfo'),
         'test_schema')::text LIKE '%"email": "hash"%'),
     'discover suggests hash for the UNIQUE email column');
+
+-- ============================================================
+-- TEST GROUP 28: issue #22 — conflict resolution in the
+-- synchronous clone path (pgclone.table / pgclone.schema)
+--
+-- "conflict" was parsed but never acted on outside the async
+-- bgworker path, so "replace" (and "skip"/"rename"/"error") were
+-- silently ignored for sync calls — the target table/sequence just
+-- got a plain "CREATE ... IF NOT EXISTS" no matter what strategy
+-- was requested.
+--
+-- NOTE on how "stale" targets are seeded below: pgclone.table()/
+-- pgclone.schema() do their local DDL/DML over a brand-new loopback
+-- libpq connection (a separate backend session that commits and
+-- disconnects on its own), not the pgTAP session running this whole
+-- file inside one big BEGIN ... ROLLBACK. Seeding a "stale" target
+-- with a plain CREATE TABLE/INSERT here would leave it uncommitted
+-- (invisible to that other session) while also holding a lock that
+-- session's later DROP/ALTER would wait on — a self-deadlock. So
+-- every "stale" target here is created by an *earlier pgclone.table()
+-- call* (via its own short-lived committing connection) with a
+-- "where" filter that clones a strict subset of the rows; the
+-- distinguishing signal is the row count after the real conflict= call
+-- — e.g. 6 (1 stale + all 5 appended) if "conflict" were still being
+-- silently ignored, vs. 5 (replaced) or 1 (skipped).
+-- ============================================================
+-- 19 tests below — keep in sync with plan() above.
+
+-- conflict=replace: re-cloning over an existing (1-row) target must
+-- drop and re-create it from the source, not append to it.
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_replace', '{"where": "num = 1"}'),
+    'c22_replace: seed a stale 1-row target via an earlier plain clone');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_replace', '{"conflict": "replace"}'),
+    'pgclone.table conflict=replace drops and recreates the target');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM public.c22_replace',
+    ARRAY[5],
+    'c22_replace holds exactly the source row count — replaced, not appended to');
+
+-- conflict=skip: an existing target table is left completely alone
+-- (no re-create, no data copy at all).
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_skip', '{"where": "num = 1"}'),
+    'c22_skip: seed a stale 1-row target via an earlier plain clone');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_skip', '{"conflict": "skip"}'),
+    'pgclone.table conflict=skip succeeds without touching the target');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM public.c22_skip',
+    ARRAY[1],
+    'c22_skip: untouched — still the one seeded row, nothing appended');
+
+-- conflict=error: an existing target table raises instead of being
+-- silently left as plain "CREATE ... IF NOT EXISTS" used to do.
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_error', '{"where": "num = 1"}'),
+    'c22_error: seed a stale 1-row target via an earlier plain clone');
+
+SELECT throws_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_error', '{"conflict": "error"}'),
+    '42P07',
+    'pgclone: table "public"."c22_error" already exists on target',
+    'pgclone.table conflict=error raises when the target already exists'
+);
+
+-- conflict=rename: the existing target is preserved under a
+-- "_old" suffix and a fresh target is cloned in its place.
+-- ("constraints": false avoids an unrelated, pre-existing naming
+-- collision: a renamed table keeps its PRIMARY KEY's backing index
+-- name, e.g. "c22_rename_pkey", which the freshly-created table of
+-- the same name would then collide with schema-wide when cloning
+-- its own primary key — orthogonal to what issue #22 is about, and
+-- not something this test asserts on.)
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_rename',
+        '{"where": "num = 1", "constraints": false}'),
+    'c22_rename: seed a stale 1-row target via an earlier plain clone');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_rename',
+        '{"conflict": "rename", "constraints": false}'),
+    'pgclone.table conflict=rename renames the old target and clones fresh');
+
+SELECT has_table('public', 'c22_rename_old',
+    'c22_rename_old exists — the stale target was preserved, not dropped');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM public.c22_rename',
+    ARRAY[5],
+    'c22_rename holds the fresh source row count');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM public.c22_rename_old',
+    ARRAY[1],
+    'c22_rename_old still holds exactly the stale row');
+
+-- No "conflict" option at all: legacy behavior is unchanged — a
+-- plain "CREATE ... IF NOT EXISTS" (existing columns/constraints
+-- untouched) and the data copy still runs, appending to what is
+-- already there. ("constraints": false on both calls avoids a
+-- source-id collision against the PK this table would otherwise
+-- inherit from simple_test, which is incidental to what this test
+-- is checking.)
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_default',
+        '{"where": "num = 1", "constraints": false}'),
+    'c22_default: seed a stale 1-row target via an earlier plain clone');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c22_default', '{"constraints": false}'),
+    'pgclone.table with no "conflict" option keeps the legacy behavior');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM public.c22_default',
+    ARRAY[6],
+    'c22_default: legacy behavior unchanged — 1 stale row + all 5 appended');
+
+-- conflict=replace via pgclone.schema: the option must propagate
+-- down to each per-table sub-call *and* apply to the sequence
+-- created directly by the schema clone (comment on issue #22:
+-- "same for sequences"). The stale 1-row target is seeded by a
+-- direct pgclone.table() call against the same schema/table (which
+-- also pre-creates the dependent sequence), so the real
+-- pgclone.schema() call below is the only thing under test.
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'issue22_schema', 'widget', 'widget', '{"where": "widget_id = 1"}'),
+    'issue22_schema.widget: seed a stale 1-row target + its sequence');
+
+SELECT lives_ok(
+    format('SELECT pgclone.schema(%L, %L, true, %L)',
+        current_setting('app.source_conninfo'),
+        'issue22_schema', '{"conflict": "replace"}'),
+    'pgclone.schema conflict=replace propagates to the table and its sequence');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM issue22_schema.widget',
+    ARRAY[2],
+    'issue22_schema.widget holds exactly the source row count — replaced, not appended to');
 
 SELECT * FROM finish();
 ROLLBACK;

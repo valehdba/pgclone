@@ -362,3 +362,27 @@ INSERT INTO filter_test.keep_orders_old VALUES (1);
 -- not matched by the include regex at all
 CREATE TABLE filter_test.skip_audit_log (id INTEGER);
 INSERT INTO filter_test.skip_audit_log VALUES (1), (2);
+
+-- ============================================================
+-- issue #22 — conflict resolution in the synchronous clone path
+-- (pgTAP test group 28). A tiny dedicated schema so
+-- pgclone.schema()'s "conflict" option can be exercised end-to-end
+-- (sequence + table) without touching tables other groups depend on.
+-- ============================================================
+CREATE SCHEMA IF NOT EXISTS issue22_schema;
+
+CREATE SEQUENCE issue22_schema.widget_id_seq START WITH 1;
+
+CREATE TABLE issue22_schema.widget (
+    widget_id bigint NOT NULL DEFAULT nextval('issue22_schema.widget_id_seq'),
+    label     text
+);
+
+-- Owned-by (not just a bare nextval() default) so pgclone_table()'s
+-- dependent-sequence pre-create/sync steps (pg_depend deptype='a')
+-- pick it up the same way a SERIAL/BIGSERIAL column would.
+ALTER SEQUENCE issue22_schema.widget_id_seq OWNED BY issue22_schema.widget.widget_id;
+
+INSERT INTO issue22_schema.widget (widget_id, label) VALUES
+    (1, 'source-widget-1'), (2, 'source-widget-2');
+SELECT setval('issue22_schema.widget_id_seq', 2, true);

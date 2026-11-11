@@ -110,6 +110,16 @@ typedef struct CloneOptions
      * When empty and consistent=true, the operation is a leaf and
      * just runs in REPEATABLE READ READ ONLY without exporting. */
     char snapshot_id[PGCLONE_SNAPSHOT_ID_LEN];
+
+    /* v4.4.3 (fix issue #22): conflict resolution for the synchronous
+     * clone path (pgclone.table / pgclone.schema / pgclone.database).
+     * Previously only the async bgworker path (pgclone_bgw.c) honored
+     * "conflict"; here it was silently ignored and every target just
+     * got "CREATE ... IF NOT EXISTS". conflict_specified tracks
+     * whether the caller actually passed a "conflict" key, so callers
+     * that don't use the option keep that exact legacy behavior. */
+    bool conflict_specified;
+    PgcloneConflictStrategy conflict;
 } CloneOptions;
 
 /* Default: everything enabled, no column/where/mask filter */
@@ -128,6 +138,8 @@ pgclone_default_options(void)
     opts.num_masks           = 0;
     opts.consistent          = true;     /* v4.3.0: consistent snapshot by default */
     opts.snapshot_id[0]      = '\0';
+    opts.conflict_specified  = false;
+    opts.conflict            = PGCLONE_CONFLICT_ERROR;
     return opts;
 }
 
@@ -315,6 +327,33 @@ pgclone_parse_options(const char *json_str)
     if (strstr(json_str, "\"matviews\": false") != NULL ||
         strstr(json_str, "\"matviews\":false") != NULL)
         opts.include_matviews = false;
+
+    /* v4.4.3 (fix issue #22): "conflict": "error"/"skip"/"replace"/"rename" —
+     * previously only parsed/honored by the async job path. */
+    if (strstr(json_str, "\"conflict\": \"skip\"") != NULL ||
+        strstr(json_str, "\"conflict\":\"skip\"") != NULL)
+    {
+        opts.conflict = PGCLONE_CONFLICT_SKIP;
+        opts.conflict_specified = true;
+    }
+    else if (strstr(json_str, "\"conflict\": \"replace\"") != NULL ||
+             strstr(json_str, "\"conflict\":\"replace\"") != NULL)
+    {
+        opts.conflict = PGCLONE_CONFLICT_REPLACE;
+        opts.conflict_specified = true;
+    }
+    else if (strstr(json_str, "\"conflict\": \"rename\"") != NULL ||
+             strstr(json_str, "\"conflict\":\"rename\"") != NULL)
+    {
+        opts.conflict = PGCLONE_CONFLICT_RENAME;
+        opts.conflict_specified = true;
+    }
+    else if (strstr(json_str, "\"conflict\": \"error\"") != NULL ||
+             strstr(json_str, "\"conflict\":\"error\"") != NULL)
+    {
+        opts.conflict = PGCLONE_CONFLICT_ERROR;
+        opts.conflict_specified = true;
+    }
 
     /* v4.3.0: opt-out of consistent-snapshot wrapping */
     if (strstr(json_str, "\"consistent\": false") != NULL ||
@@ -2127,6 +2166,136 @@ pgclone_triggers(PGconn *source_conn, PGconn *target_conn,
  * All variants go through the same C function. Arguments are
  * detected by PG_NARGS() and PG_ARGISNULL().
  * =============================================================== */
+
+typedef enum
+{
+    PGCLONE_SYNC_CONFLICT_PROCEED,  /* no existing object, or conflict resolved */
+    PGCLONE_SYNC_CONFLICT_SKIP      /* existing object, strategy=skip: caller must skip it */
+} PgcloneSyncConflictResult;
+
+/* String form of a conflict strategy, for propagating opts.conflict
+ * verbatim into a sub-call's JSON options (pgclone_schema's per-table
+ * calls, pgclone_database's per-schema calls). */
+static const char *
+pgclone_conflict_strategy_name(PgcloneConflictStrategy strategy)
+{
+    switch (strategy)
+    {
+        case PGCLONE_CONFLICT_SKIP:    return "skip";
+        case PGCLONE_CONFLICT_REPLACE: return "replace";
+        case PGCLONE_CONFLICT_RENAME:  return "rename";
+        case PGCLONE_CONFLICT_ERROR:
+        default:                       return "error";
+    }
+}
+
+/* ---------------------------------------------------------------
+ * v4.4.3 (fix issue #22): conflict resolution for the synchronous
+ * clone path. This mirrors bgw_handle_conflict() in pgclone_bgw.c,
+ * which only the async bgworker path used to call — the sync
+ * pgclone_table()/pgclone_schema() functions accepted a "conflict"
+ * option in their JSON but never actually acted on it, so
+ * "replace" (and "skip"/"rename"/"error") were silently ignored and
+ * every target just got "CREATE ... IF NOT EXISTS".
+ *
+ * Only acts when the caller explicitly set "conflict"
+ * (opts->conflict_specified); otherwise returns PROCEED immediately
+ * so callers that never used the option keep the exact legacy
+ * behavior (plain "CREATE ... IF NOT EXISTS", silently idempotent).
+ *
+ * `kind` must be the literal "TABLE" or "SEQUENCE" (it is spliced
+ * directly into DROP/ALTER DDL, so never pass caller-controlled
+ * text here).
+ * --------------------------------------------------------------- */
+static PgcloneSyncConflictResult
+pgclone_sync_handle_conflict(PGconn *local_conn, const char *kind,
+                             const char *schema_name, const char *target_name,
+                             const CloneOptions *opts)
+{
+    PGresult       *res;
+    StringInfoData  buf;
+    bool            exists;
+    bool            is_table = (strcmp(kind, "TABLE") == 0);
+    const char     *label = is_table ? "table" : "sequence";
+
+    if (!opts->conflict_specified)
+        return PGCLONE_SYNC_CONFLICT_PROCEED;
+
+    initStringInfo(&buf);
+    if (is_table)
+        appendStringInfo(&buf,
+            "SELECT 1 FROM pg_catalog.pg_tables "
+            "WHERE schemaname = %s AND tablename = %s",
+            quote_literal_cstr(schema_name), quote_literal_cstr(target_name));
+    else
+        appendStringInfo(&buf,
+            "SELECT 1 FROM pg_catalog.pg_sequences "
+            "WHERE schemaname = %s AND sequencename = %s",
+            quote_literal_cstr(schema_name), quote_literal_cstr(target_name));
+
+    res = PQexec(local_conn, buf.data);
+    exists = (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0);
+    PQclear(res);
+
+    if (!exists)
+    {
+        pfree(buf.data);
+        return PGCLONE_SYNC_CONFLICT_PROCEED;
+    }
+
+    switch (opts->conflict)
+    {
+        case PGCLONE_CONFLICT_ERROR:
+            pfree(buf.data);
+            ereport(ERROR,
+                    (errcode(ERRCODE_DUPLICATE_TABLE),
+                     errmsg("pgclone: %s \"%s\".\"%s\" already exists on target",
+                            label, schema_name, target_name),
+                     errhint("Use a \"conflict\" option of \"skip\", \"replace\", or \"rename\" to control this.")));
+            return PGCLONE_SYNC_CONFLICT_SKIP;  /* unreachable */
+
+        case PGCLONE_CONFLICT_SKIP:
+            elog(NOTICE, "pgclone: skipping %s \"%s\".\"%s\" (already exists, conflict=skip)",
+                 label, schema_name, target_name);
+            pfree(buf.data);
+            return PGCLONE_SYNC_CONFLICT_SKIP;
+
+        case PGCLONE_CONFLICT_REPLACE:
+            resetStringInfo(&buf);
+            appendStringInfo(&buf, "DROP %s IF EXISTS %s.%s CASCADE",
+                             kind,
+                             quote_identifier(schema_name),
+                             quote_identifier(target_name));
+            pgclone_exec_conn(local_conn, buf.data);
+            elog(NOTICE, "pgclone: dropped existing %s \"%s\".\"%s\" (conflict=replace)",
+                 label, schema_name, target_name);
+            pfree(buf.data);
+            return PGCLONE_SYNC_CONFLICT_PROCEED;
+
+        case PGCLONE_CONFLICT_RENAME:
+            {
+                char *old_name = psprintf("%s_old", target_name);
+
+                resetStringInfo(&buf);
+                appendStringInfo(&buf, "ALTER %s %s.%s RENAME TO %s",
+                                 kind,
+                                 quote_identifier(schema_name),
+                                 quote_identifier(target_name),
+                                 quote_identifier(old_name));
+                pgclone_exec_conn(local_conn, buf.data);
+                elog(NOTICE, "pgclone: renamed existing %s \"%s\".\"%s\" to \"%s\" (conflict=rename)",
+                     label, schema_name, target_name, old_name);
+                pfree(old_name);
+            }
+            pfree(buf.data);
+            return PGCLONE_SYNC_CONFLICT_PROCEED;
+
+        default:
+            pfree(buf.data);
+            return PGCLONE_SYNC_CONFLICT_PROCEED;
+    }
+}
+
 PG_FUNCTION_INFO_V1(pgclone_table);
 
 Datum
@@ -2269,6 +2438,18 @@ pgclone_table(PG_FUNCTION_ARGS)
         appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                          quote_identifier(schema_name));
         pgclone_exec_conn(local_conn, buf.data);
+    }
+
+    /* ---- Step 1b2: Handle conflict on the target table (fix issue #22) ---- */
+    if (pgclone_sync_handle_conflict(local_conn, "TABLE", schema_name,
+                                      target_name, &opts)
+        == PGCLONE_SYNC_CONFLICT_SKIP)
+    {
+        PQclear(res);
+        PQfinish(local_conn);
+        pgclone_setup_source_txn_done(source_conn, &opts);
+        PQfinish(source_conn);
+        PG_RETURN_TEXT_P(cstring_to_text_with_len("SKIPPED", 7));
     }
 
     /* ---- Step 1c: Pre-create sequences this table depends on ---- */
@@ -2640,6 +2821,15 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
     for (i = 0; i < PQntuples(res); i++)
     {
+        /* v4.4.3 (fix issue #22): conflict resolution — previously
+         * every sequence just got "CREATE SEQUENCE IF NOT EXISTS",
+         * so "conflict": "replace" never actually dropped and
+         * re-created an existing sequence. */
+        if (pgclone_sync_handle_conflict(local_conn, "SEQUENCE", schema_name,
+                                          PQgetvalue(res, i, 0), &opts)
+            == PGCLONE_SYNC_CONFLICT_SKIP)
+            continue;
+
         resetStringInfo(&buf);
         appendStringInfo(&buf,
             "CREATE SEQUENCE IF NOT EXISTS %s.%s "
@@ -2865,6 +3055,14 @@ pgclone_schema(PG_FUNCTION_ARGS)
                 opts.include_constraints ? "true" : "false",
                 opts.consistent ? "true" : "false");
         }
+
+        /* v4.4.3 (fix issue #22): propagate the conflict strategy to
+         * each per-table sub-call so "conflict": "replace" (etc.)
+         * actually applies to the tables, not just the sequences
+         * handled directly above in Step 2. */
+        if (opts.conflict_specified)
+            appendStringInfo(&opts_json, ", \"conflict\": \"%s\"",
+                             pgclone_conflict_strategy_name(opts.conflict));
 
         for (i = 0; i < ntables; i++)
         {
@@ -3353,6 +3551,13 @@ pgclone_database(PG_FUNCTION_ARGS)
         if (opts.exclude_tables_raw != NULL)
             appendStringInfo(&opts_json, ", \"exclude_tables\": %s",
                              opts.exclude_tables_raw);
+
+        /* v4.4.3 (fix issue #22): propagate the conflict strategy to
+         * each per-schema sub-call. */
+        if (opts.conflict_specified)
+            appendStringInfo(&opts_json, ", \"conflict\": \"%s\"",
+                             pgclone_conflict_strategy_name(opts.conflict));
+
         appendStringInfoChar(&opts_json, '}');
 
         for (i = 0; i < nschemas; i++)
