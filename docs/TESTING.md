@@ -4,7 +4,7 @@ PgClone has a comprehensive test suite that runs across PostgreSQL versions 14�
 
 ## Test Suite Overview
 
-The test suite is organized into six test groups:
+The test suite is organized into seven test groups (the Oracle integration suite is described in section 7):
 
 ### 1. pgTAP Sync Tests (66 tests)
 
@@ -81,6 +81,28 @@ Without the v4.3.1 fix, groups 1 and 3 would fail deterministically. Without the
 
 ---
 
+### 7. Oracle Integration Test (43 checks)
+
+Located in `test/test_oracle.sh`, seeded by `test/fixtures/oracle_seed.sql`. It needs a pgclone built with `WITH_ORACLE=1` and a reachable Oracle database, so it is not part of the Docker Compose runs; CI executes it in the dedicated `oracle` job against an `oracle-free` service container. It covers:
+
+- `dry_run` output (DDL, `PRIMARY KEY`, `UNIQUE`, skipped `BLOB`) and that a dry run creates nothing
+- the Oracle → PostgreSQL column types and the PK / UNIQUE / `NOT NULL` constraints
+- value fidelity: `NUMBER` precision/scale, `BINARY_DOUBLE`, unicode, tabs/backslashes/newlines (COPY escaping), NULLs, a 100,000-character `CLOB`, `DATE` with time, microsecond `TIMESTAMP`, `TIMESTAMP WITH TIME ZONE`, `RAW`
+- a 20,000-row table (several COPY flushes)
+- `include_data => false`, an existing target (never overwritten), a missing Oracle table and a wrong password (no leftover table)
+
+The type-mapping function `pgclone.oracle_type_to_pg()` and the "built without Oracle" error path are additionally covered by pgTAP group 29 in `test/pgclone_test.sql`, which runs in the normal PG 14–18 matrix.
+
+To run it yourself:
+
+```bash
+export ORACLE_CONNINFO="host=localhost port=1521 service=FREEPDB1 user=app password=apppass"
+sqlplus app/apppass@//localhost:1521/FREEPDB1 @test/fixtures/oracle_seed.sql
+PGHOST=localhost PGPORT=5434 PGUSER=postgres bash test/test_oracle.sh
+```
+
+---
+
 ## Running Tests Locally
 
 ### Prerequisites
@@ -151,11 +173,15 @@ The extension installs a `.so` file into PostgreSQL's `pkglibdir`. When the targ
 
 ## GitHub Actions CI
 
-The CI pipeline (`.github/workflows/ci.yml`) runs on every push to `main`, `fix/**`, and `feature/**` branches, and on PRs to `main`.
+The CI pipeline (`.github/workflows/ci.yml`) runs on every push to `main`, `fix/**`, `feature/**`, and `feat/**` branches, and on PRs to `main`.
 
 ### Matrix Strategy
 
 Tests run in parallel across PostgreSQL 14, 15, 16, 17, and 18 with `fail-fast: false` — so a failure on one version doesn't cancel the others.
+
+### Oracle job
+
+A second job, `oracle`, runs on PostgreSQL 14 and 18. It starts the `gvenzl/oracle-free` service container, installs Oracle Instant Client (Basic Light + SDK + SQL*Plus), builds pgclone with `WITH_ORACLE=1`, seeds Oracle, starts a target PostgreSQL with `libclntsh` on its library path, and runs `test/test_oracle.sh`.
 
 ### CI Steps
 

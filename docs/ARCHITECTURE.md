@@ -38,15 +38,24 @@ pgclone/
 │                          #     capacity, name conflicts, missing
 │                          #     extensions/roles/tablespaces
 │                          #   - Read-only on both sides; isolated unit
+│   ├── pgclone_oracle.c   # v4.5.0 — Oracle → PostgreSQL table clone
+│   │                      #   - pgclone_table_from_oracle(), pgclone_oracle_type_to_pg()
+│   │                      #   - Metadata (ALL_TAB_COLUMNS / ALL_CONSTRAINTS),
+│   │                      #     type mapping, DDL, COPY text-format loader
+│   ├── pgclone_oci.c      # v4.5.0 — OCI wrapper; includes NO PostgreSQL headers
+│   └── pgclone_oci.h      #   - Plain-C API (ora_connect / ora_open / ora_fetch ...)
+│                          #   - Real OCI only with -DPGCLONE_WITH_ORACLE; else stubs
 ├── sql/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
 │   ├── fixtures/seed.sql  # Test data
+│   ├── fixtures/oracle_seed.sql # Oracle-side seed for test_oracle.sh
 │   ├── pgclone_test.sql   # 66 pgTAP tests (groups 1–20)
 │   ├── test_loopback.sh   # 21 loopback-DDL tests (roles, verify, report, DDM)
 │   ├── run_tests.sh       # Test orchestrator
 │   ├── run_all.sh         # Multi-version runner
 │   ├── test_async.sh      # Async test suite (21 tests incl. worker pool)
+│   ├── test_oracle.sh     # Oracle integration test (needs Oracle; run by CI job `oracle`)
 │   └── test_database_create.sh
 ├── .github/workflows/ci.yml  # GitHub Actions CI (PG 14–18 matrix)
 ├── Dockerfile             # Multi-version build container
@@ -159,6 +168,17 @@ This approach has three key benefits:
 3. **Composable** — masks work with existing `columns`, `where`, `indexes`, `constraints`, and `triggers` options without special handling.
 
 When masks are specified without an explicit column list, pgclone queries `pg_catalog.pg_attribute` on the source to discover column names, then applies mask expressions to matching columns while passing others through unmodified.
+
+---
+
+### Oracle → PostgreSQL cloning (v4.5.0)
+
+`pgclone.table_from_oracle()` reads Oracle through OCI and loads PostgreSQL over the same loopback libpq connection the other clone paths use.
+
+- **OCI isolation.** `oci.h` and `postgres.h` both typedef `text`, so they cannot share a translation unit. All OCI calls live in `pgclone_oci.c`, behind the PostgreSQL-free interface in `pgclone_oci.h`; `pgclone_oracle.c` only sees that interface. Without `-DPGCLONE_WITH_ORACLE` the OCI file compiles to stubs that report "built without Oracle support", so the default build has no Oracle dependency at all.
+- **Metadata.** Columns come from `ALL_TAB_COLUMNS` (which already omits hidden columns), constraints from `ALL_CONSTRAINTS` / `ALL_CONS_COLUMNS` (enabled `P` and `U` only). `map_oracle_type()` turns each column into a PostgreSQL type; unsupported types are skipped with a WARNING and any constraint touching them is dropped with a NOTICE.
+- **Data path.** Every value is fetched as text (numbers and datetimes through explicit `TO_CHAR` formats, with `NLS_NUMERIC_CHARACTERS='.,'` and the session time zone forced to UTC so output is locale-independent), `RAW` as bytes, and `CLOB`/`NCLOB` through a LOB locator read with streaming `OCILobRead2` (a plain character define silently truncates at 64 KB because OCI reports lengths in 16 bits). Rows are escaped into COPY text format and streamed with `PQputCopyData` in ~64 KB batches.
+- **Atomicity and consistency.** The Oracle side runs under `SET TRANSACTION READ ONLY` (one consistent snapshot). The PostgreSQL side does `BEGIN`, `CREATE TABLE`, `COPY`, `COMMIT`, with a `ROLLBACK` in the error path, so a failure leaves no partial table. An existing target is never overwritten.
 
 ---
 
@@ -306,3 +326,11 @@ include $(PGXS)
 ```
 
 This integrates with `pg_config` to find the correct include paths, library directories, and installation locations for the target PostgreSQL version.
+
+### Optional Oracle support
+
+`pgclone_oracle.o` and `pgclone_oci.o` are always built. Passing `WITH_ORACLE=1` additionally defines `PGCLONE_WITH_ORACLE`, adds `$(ORACLE_HOME)/sdk/include` to the include path (through `PG_CPPFLAGS`, which PGXS folds into `CPPFLAGS` — a later target-specific append would be ignored) and links `-lclntsh` from `$(ORACLE_LIB)` (default `$(ORACLE_HOME)`):
+
+```bash
+make WITH_ORACLE=1 ORACLE_HOME=/opt/oracle/instantclient_23_5
+```
