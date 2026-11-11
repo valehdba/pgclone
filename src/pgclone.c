@@ -27,6 +27,9 @@
 
 #include "pgclone_bgw.h"
 #include "pgclone_mask.h"
+
+/* Shared with pgclone_oracle.c (non-static since v4.5.0). */
+extern PGconn *pgclone_connect_local(void);
 #include "pgclone_snapshot.h"
 
 PG_MODULE_MAGIC;
@@ -1191,7 +1194,7 @@ pgclone_append_local_host(StringInfo conninfo)
 /* ---------------------------------------------------------------
  * Internal helper: get a libpq connection to the LOCAL database.
  * --------------------------------------------------------------- */
-static PGconn *
+PGconn *
 pgclone_connect_local(void)
 {
     PGconn         *conn;
@@ -5429,7 +5432,7 @@ PG_FUNCTION_INFO_V1(pgclone_version);
 Datum
 pgclone_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.4.4"));
+    PG_RETURN_TEXT_P(cstring_to_text("pgclone 4.5.0"));
 }
 
 /* ===============================================================

@@ -2,7 +2,7 @@ name: pgclone CI
 
 on:
   push:
-    branches: [ main, 'fix/**', 'feature/**' ]
+    branches: [ main, 'fix/**', 'feature/**', 'feat/**' ]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -294,3 +294,106 @@ jobs:
           [ -f "$PGLOG" ] && tail -150 "$PGLOG" || echo "No log found"
           echo "=== Port usage ==="
           sudo ss -tlnp | grep -E '5432|5433|5434' || true
+
+  oracle:
+    name: "Oracle -> PostgreSQL (PG ${{ matrix.pg_version }}, Oracle Free)"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [14, 18]
+
+    env:
+      IC_VERSION: "23.5.0.24.07"
+      IC_PATH: "2350000"
+      IC_DIR: instantclient_23_5
+
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: oracle
+          APP_USER: app
+          APP_USER_PASSWORD: apppass
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 30s
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg_version }}
+        run: |
+          PG_VER=${{ matrix.pg_version }}
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-common ca-certificates curl gnupg unzip libaio1
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-$PG_VER postgresql-server-dev-$PG_VER libpq-dev build-essential
+
+      - name: Install Oracle Instant Client (basiclite + sdk + sqlplus)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ic" && cd "$RUNNER_TEMP/ic"
+          for pkg in basiclite sdk sqlplus; do
+            curl -fsSLO "https://download.oracle.com/otn_software/linux/instantclient/${IC_PATH}/instantclient-${pkg}-linux.x64-${IC_VERSION}.zip"
+            unzip -qo "instantclient-${pkg}-linux.x64-${IC_VERSION}.zip"
+          done
+          echo "ORACLE_HOME=$RUNNER_TEMP/ic/$IC_DIR" >> "$GITHUB_ENV"
+
+      - name: Build and install pgclone with Oracle support
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+          make PG_CONFIG=$PG_CONFIG CFLAGS="-Isrc" WITH_ORACLE=1 ORACLE_HOME="$ORACLE_HOME"
+          sudo make install PG_CONFIG=$PG_CONFIG WITH_ORACLE=1 ORACLE_HOME="$ORACLE_HOME"
+          ldd /usr/lib/postgresql/${{ matrix.pg_version }}/lib/pgclone.so | grep -i clntsh
+
+      - name: Seed Oracle
+        run: |
+          export LD_LIBRARY_PATH="$ORACLE_HOME" NLS_LANG=.AL32UTF8
+          "$ORACLE_HOME/sqlplus" -L -S app/apppass@//localhost:1521/FREEPDB1 @test/fixtures/oracle_seed.sql
+
+      - name: Start target PostgreSQL
+        run: |
+          PG_VER=${{ matrix.pg_version }}
+          PGBIN=/usr/lib/postgresql/$PG_VER/bin
+          PGDATA="$RUNNER_TEMP/pg_target_$PG_VER"
+          PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
+
+          sudo systemctl stop postgresql 2>/dev/null || true
+          "$PGBIN/initdb" -D "$PGDATA" --username=postgres --auth=trust
+          {
+            echo "port = 5434"
+            echo "listen_addresses = 'localhost'"
+            echo "max_connections = 50"
+            echo "huge_pages = off"
+            echo "shared_preload_libraries = 'pgclone'"
+            echo "max_worker_processes = 32"
+            echo "unix_socket_directories = '/tmp'"
+            echo "logging_collector = off"
+          } >> "$PGDATA/postgresql.conf"
+
+          # The server process must be able to load libclntsh.
+          export LD_LIBRARY_PATH="$ORACLE_HOME"
+          "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" -w -t 30 start
+          "$PGBIN/createdb" -h localhost -p 5434 -U postgres target_db
+
+      - name: "Test: table_from_oracle (real Oracle Free)"
+        env:
+          PGHOST: localhost
+          PGPORT: 5434
+          PGUSER: postgres
+          ORACLE_CONNINFO: "host=localhost port=1521 service=FREEPDB1 user=app password=apppass"
+        run: bash test/test_oracle.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          PGLOG="$RUNNER_TEMP/pg_target_${{ matrix.pg_version }}.log"
+          [ -f "$PGLOG" ] && tail -150 "$PGLOG" || echo "No log found"

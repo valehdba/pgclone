@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(133);
+SELECT plan(142);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -998,6 +998,32 @@ SELECT ok(
           AND sensitivity = 'Bank Account'
     )),
     'local masking_report also flags the cloned bank_account_number column');
+
+-- ============================================================
+-- TEST GROUP 29: Oracle -> PostgreSQL type mapping (no Oracle
+-- client needed) and the not-built-with-Oracle error path.
+-- 9 tests below — keep in sync with plan() above.
+-- ============================================================
+SELECT is(pgclone.oracle_type_to_pg('NUMBER', 22, 9, 0, NULL), 'integer',
+    'oracle_type_to_pg: NUMBER(9) -> integer');
+SELECT is(pgclone.oracle_type_to_pg('NUMBER', 22, 18, 0, NULL), 'bigint',
+    'oracle_type_to_pg: NUMBER(18) -> bigint');
+SELECT is(pgclone.oracle_type_to_pg('NUMBER', 22, 10, 2, NULL), 'numeric(10,2)',
+    'oracle_type_to_pg: NUMBER(10,2) -> numeric(10,2)');
+SELECT is(pgclone.oracle_type_to_pg('NUMBER', 22, 3, 5, NULL), 'numeric(5,5)',
+    'oracle_type_to_pg: scale > precision widened (PG14-safe)');
+SELECT is(pgclone.oracle_type_to_pg('VARCHAR2', 100, NULL, NULL, 25), 'varchar(25)',
+    'oracle_type_to_pg: VARCHAR2 uses CHAR_LENGTH');
+SELECT is(pgclone.oracle_type_to_pg('DATE', 7, NULL, NULL, NULL), 'timestamp(0)',
+    'oracle_type_to_pg: DATE -> timestamp(0)');
+SELECT is(pgclone.oracle_type_to_pg('TIMESTAMP(9)', 11, NULL, 9, NULL), 'timestamp(6)',
+    'oracle_type_to_pg: TIMESTAMP(9) capped at 6 fractional digits');
+SELECT is(pgclone.oracle_type_to_pg('XMLTYPE'), NULL,
+    'oracle_type_to_pg: unsupported type -> NULL');
+SELECT throws_ok(
+    $$SELECT pgclone.table_from_oracle('host=h service=s user=u password=p', 'HR', 'EMP')$$,
+    NULL, NULL,
+    'table_from_oracle fails cleanly (no Oracle build, or unreachable server)');
 
 SELECT * FROM finish();
 ROLLBACK;
