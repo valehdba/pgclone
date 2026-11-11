@@ -390,7 +390,7 @@ fetch_columns(OraConn *conn, const char *schema, const char *table,
         "TO_CHAR(data_precision), TO_CHAR(data_scale), nullable, "
         "TO_CHAR(char_length) "
         "FROM all_tab_columns WHERE owner = %s AND table_name = %s "
-        "AND hidden_column = 'NO' ORDER BY column_id",
+        "ORDER BY column_id",   /* ALL_TAB_COLUMNS already omits hidden columns */
         ora_literal(schema), ora_literal(table));
 
     cur = ora_open(conn, q.data, 7, kinds, bufsz, err, sizeof(err));
