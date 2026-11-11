@@ -3,13 +3,14 @@
 [![CI](https://github.com/valehdba/pgclone/actions/workflows/ci.yml/badge.svg)](https://github.com/valehdba/pgclone/actions/workflows/ci.yml)
 [![Postgres 14–18](https://img.shields.io/badge/Postgres-14%E2%80%9318-336791?logo=postgresql&logoColor=white)](https://github.com/valehdba/pgclone)
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/version-4.4.4-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.4.4)
+[![Version](https://img.shields.io/badge/version-4.5.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.5.0)
 
-A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts.
+A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts. Since v4.5.0 it can also pull a table straight out of an **Oracle** database into PostgreSQL.
 
 ## Key Features
 
 - **Clone anything** - tables, schemas, functions, entire databases, roles and permissions
+- **Oracle → PostgreSQL** - clone an Oracle table (structure, NOT NULL, PK/UNIQUE, data) with automatic type mapping, a `dry_run` DDL preview and an all-or-nothing transaction (optional OCI build)
 - **Fast data transfer** - uses PostgreSQL COPY protocol
 - **Data masking** - anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
 - **Auto-discovery** - scan source schemas for sensitive columns and get suggested mask rules
@@ -52,6 +53,12 @@ SELECT pgclone.database(
     'host=source-server dbname=mydb user=postgres password=secret',
     true
 );
+
+-- Clone a table from Oracle (needs the optional Oracle build, see Installation)
+SELECT pgclone.table_from_oracle(
+    'host=ora-server port=1521 service=ORCLPDB1 user=scott password=tiger',
+    'HR', 'EMPLOYEES'
+);
 ```
 
 ## Requirements
@@ -60,6 +67,7 @@ SELECT pgclone.database(
 - PostgreSQL development headers (`postgresql-server-dev-XX`)
 - `libpq` development library (`libpq-dev`)
 - GCC or compatible C compiler
+- *Optional, for Oracle cloning:* Oracle Instant Client **Basic/Basic Light + SDK** (provides `oci.h` and `libclntsh`)
 
 ## Installation
 
@@ -91,6 +99,17 @@ sudo make install
 make PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 sudo make install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 ```
+
+### Build with Oracle support (optional)
+
+`pgclone.table_from_oracle()` talks to Oracle through OCI, so it is compiled in only on request. A normal build is unaffected and the function then raises a clear "built without Oracle support" error.
+
+```bash
+make WITH_ORACLE=1 ORACLE_HOME=/opt/oracle/instantclient_23_5
+sudo make install WITH_ORACLE=1 ORACLE_HOME=/opt/oracle/instantclient_23_5
+```
+
+The PostgreSQL server process must be able to load `libclntsh` at runtime (`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` or ldconfig). See [Cloning a Table from Oracle](docs/USAGE.md#cloning-a-table-from-oracle-v450) for usage, type mapping and limitations.
 
 ### Troubleshooting: `make install` fails with `llvm-lto: No such file or directory`
 
@@ -127,11 +146,11 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 
 | Document | Description |
 |----------|-------------|
-| [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, and examples |
+| [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, Oracle cloning, and examples |
 | [Async Operations](docs/ASYNC.md) | Background workers, progress tracking, parallel cloning |
-| [Testing](docs/TESTING.md) | Test infrastructure, 115 tests across 4 suites, Docker, CI/CD |
+| [Testing](docs/TESTING.md) | Test infrastructure, pgTAP and integration suites (incl. Oracle Free), Docker, CI/CD |
 | [Manual Testing](docs/TESTING_MANUAL.md) | Step-by-step manual test scenarios for all functionalities |
-| [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, PG version compatibility |
+| [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, Oracle/OCI isolation, PG version compatibility |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 
 ## Roadmap
@@ -166,7 +185,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v4.4.2: Constraint- and length-aware masking — masks are clamped to a column's length and skipped when they would overflow, feed a bad literal to a numeric column, or violate a NOT NULL / UNIQUE / FOREIGN KEY constraint; UNIQUE/PK and NOT NULL sensitive columns are steered to `hash` — issue #18
 - [x] v4.4.3: `"conflict"` (`error`/`skip`/`replace`/`rename`) is now honored by the synchronous clone path (`pgclone.table()`/`pgclone.schema()`/`pgclone.database()`), not just the async job path — issue #22
 - [x] v4.4.4: Auto-discovery of bank account numbers/IBAN; `pgclone.masking_report()` gains a `(conninfo, schema)` overload to audit a remote source directly — issue #23
-- [ ] v4.5.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
+- [x] v4.5.0: Clone a table from Oracle into PostgreSQL — `pgclone.table_from_oracle()` with Oracle→PG type mapping, `dry_run`, CLOB/RAW support and an optional OCI build (`WITH_ORACLE=1`); verified in CI against Oracle Free
+- [ ] v4.6.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License
 

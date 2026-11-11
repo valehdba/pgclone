@@ -22,6 +22,7 @@ Complete reference for all pgclone functions and options.
 - [Clone Roles and Permissions](#clone-roles-and-permissions-v340)
 - [Clone Verification](#clone-verification-v350)
 - [GDPR/Compliance Masking Report](#gdprcompliance-masking-report-v360)
+- [Cloning a Table from Oracle](#cloning-a-table-from-oracle-v450)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -1208,6 +1209,8 @@ Oracle sources.
 | `pgclone.masking_report(conninfo, schema)` | table | Same audit, run directly against a remote source schema |
 | `pgclone.diff(conninfo, schema)` | text (JSON) | DDL drift report: tables, columns, indexes, constraints, triggers, views, sequences |
 | `pgclone.preflight(conninfo, schema)` | text (JSON) | Pre-flight checks: connection, versions, permissions, name conflicts, missing roles/extensions/tablespaces |
+| `pgclone.table_from_oracle(oracle_conninfo, oracle_schema, oracle_table, include_data, target_schema, target_table, dry_run)` | text | Clone an Oracle table into PostgreSQL (needs a `WITH_ORACLE=1` build); `dry_run` returns the DDL only |
+| `pgclone.oracle_type_to_pg(data_type, data_length, data_precision, data_scale, char_length)` | text | Oracle → PostgreSQL type mapping used by the clone (works without an Oracle client) |
 | `pgclone.table_async(...)` | int | Async table clone (returns job_id) |
 | `pgclone.schema_async(...)` | int | Async schema clone (returns job_id) |
 | `pgclone.progress(job_id)` | json | Job progress as JSON |
@@ -1223,4 +1226,5 @@ Oracle sources.
 - Maximum 512 tables per parallel pool operation.
 - Only one pool-based parallel operation can run at a time per cluster.
 - `WHERE` clause in data filtering is validated against SQL injection patterns and executed inside a read-only transaction on the source. DDL/DML keywords and semicolons are rejected.
+- Oracle cloning (`pgclone.table_from_oracle()`) handles one table per call and has no masking, `WHERE` filtering, async mode or parallelism yet; see [its limitations](#cloning-a-table-from-oracle-v450).
 - Data masking (`"mask"` option) is currently supported in synchronous clone functions only. Async background workers do not yet pass mask rules.
