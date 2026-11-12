@@ -6,21 +6,37 @@
 #   ./test/run_all.sh              # Test on all PG versions
 #   ./test/run_all.sh 18           # Test on PG 18 only
 #   ./test/run_all.sh 16 17        # Test on PG 16 and 17
+#   ./test/run_all.sh oracle       # Oracle -> PostgreSQL tests (PG 14, 17, 18)
+#   ./test/run_all.sh oracle 17    # Oracle tests on PG 17 only
 # ============================================================
 
 set -e
 
-VERSIONS="${@:-14 15 16 17 18}"
+# "oracle" as the first argument switches to the Oracle -> PostgreSQL suite
+# (needs the oracle-db service; see Dockerfile.oracle).
+MODE="pg"
+if [ "${1:-}" = "oracle" ]; then
+    MODE="oracle"
+    shift
+    DEFAULT_VERSIONS="14 17 18"
+    DB_SERVICE="oracle-db"
+    SERVICE_PREFIX="test-oracle-pg"
+else
+    DEFAULT_VERSIONS="14 15 16 17 18"
+    DB_SERVICE="source-db"
+    SERVICE_PREFIX="test-pg"
+fi
+VERSIONS="${@:-$DEFAULT_VERSIONS}"
 
 echo "============================================"
 echo "pgclone multi-version test suite"
-echo "Testing on PostgreSQL: $VERSIONS"
+echo "Testing on PostgreSQL: $VERSIONS (suite: $MODE)"
 echo "============================================"
 echo ""
 
 # Build source database
-echo "Starting source database..."
-docker compose up -d source-db
+echo "Starting $DB_SERVICE..."
+docker compose up -d "$DB_SERVICE"
 sleep 3
 
 PASS=0
@@ -33,7 +49,7 @@ for ver in $VERSIONS; do
     echo "Testing on PostgreSQL $ver..."
     echo "============================================"
 
-    SERVICE="test-pg${ver}"
+    SERVICE="${SERVICE_PREFIX}${ver}"
 
     if docker compose build "$SERVICE" 2>&1 | tail -5; then
         TMPLOG=$(mktemp)

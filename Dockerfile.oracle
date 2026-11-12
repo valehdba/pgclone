@@ -1,0 +1,59 @@
+# Test image for pgclone.table_from_oracle(): PostgreSQL + Oracle Instant Client,
+# pgclone built with WITH_ORACLE=1. Used by the test-oracle-pg* compose services.
+#
+#   docker compose up -d oracle-db        # Oracle Free (x86-64 image)
+#   docker compose run --rm test-oracle-pg17
+ARG PG_VERSION=18
+FROM postgres:${PG_VERSION}
+
+ARG TARGETARCH
+ARG IC_VERSION=23.5.0.24.07
+ARG IC_PATH=2350000
+
+RUN apt-get update && apt-get install -y \
+        build-essential \
+        postgresql-server-dev-${PG_MAJOR} \
+        libpq-dev \
+        curl unzip \
+    && (apt-get install -y libaio1 || apt-get install -y libaio1t64) \
+    && rm -rf /var/lib/apt/lists/* \
+    && for d in /usr/lib/*-linux-gnu; do \
+         [ -e "$d/libaio.so.1" ] || { [ -e "$d/libaio.so.1t64" ] && ln -s libaio.so.1t64 "$d/libaio.so.1"; } || true; \
+       done
+
+# Oracle Instant Client: Basic Light + SDK (oci.h) + SQL*Plus (seeding).
+# x86-64 is pinned to the same version CI uses; Oracle only publishes an
+# unversioned "latest" package for arm64.
+RUN set -eux; \
+    mkdir -p /opt/oracle && cd /opt/oracle; \
+    for pkg in basiclite sdk sqlplus; do \
+      if [ "${TARGETARCH:-amd64}" = "arm64" ]; then \
+        url="https://download.oracle.com/otn_software/linux/instantclient/instantclient-${pkg}-linux-arm64.zip"; \
+      else \
+        url="https://download.oracle.com/otn_software/linux/instantclient/${IC_PATH}/instantclient-${pkg}-linux.x64-${IC_VERSION}.zip"; \
+      fi; \
+      curl -fsSL -o "${pkg}.zip" "$url"; \
+      unzip -qo "${pkg}.zip"; rm -f "${pkg}.zip"; \
+    done; \
+    ln -s /opt/oracle/instantclient_* /opt/oracle/instantclient
+
+ENV ORACLE_HOME=/opt/oracle/instantclient \
+    LD_LIBRARY_PATH=/opt/oracle/instantclient \
+    PATH=/opt/oracle/instantclient:${PATH}
+
+COPY . /build/pgclone
+WORKDIR /build/pgclone
+
+RUN make clean && make WITH_ORACLE=1 ORACLE_HOME="$ORACLE_HOME" \
+    && make install WITH_ORACLE=1 ORACLE_HOME="$ORACLE_HOME" \
+    && ldd "$(pg_config --pkglibdir)/pgclone.so" | grep -i clntsh
+
+# shared_preload_libraries + restart (same approach as the main Dockerfile)
+RUN echo '#!/bin/bash' > /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'echo "shared_preload_libraries = '\''pgclone'\''" >> "$PGDATA/postgresql.conf"' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'echo "max_worker_processes = 32" >> "$PGDATA/postgresql.conf"' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'pg_ctl -D "$PGDATA" -m fast -w restart' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    chmod +x /docker-entrypoint-initdb.d/00-configure-pgclone.sh
+
+COPY test/run_oracle_tests.sh /docker-entrypoint-initdb.d/99-run-oracle-tests.sh
+RUN chmod +x /docker-entrypoint-initdb.d/99-run-oracle-tests.sh
