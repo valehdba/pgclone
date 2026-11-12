@@ -2,6 +2,20 @@
 WHENEVER SQLERROR EXIT FAILURE
 SET DEFINE OFF
 
+-- Re-runnable: drop the fixture tables if a previous run left them behind.
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE pgc_types PURGE';
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE pgc_big PURGE';
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+
 CREATE TABLE pgc_types (
     id       NUMBER(9)               PRIMARY KEY,
     small_n  NUMBER(4),

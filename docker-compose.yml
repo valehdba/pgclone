@@ -82,3 +82,59 @@ services:
     depends_on:
       source-db:
         condition: service_healthy
+
+  # ---- Oracle -> PostgreSQL tests (pgclone.table_from_oracle) ----
+  # Oracle Free is published for x86-64 only; on Apple Silicon it runs under
+  # emulation (slow first start — enable Rosetta in Docker Desktop).
+  oracle-db:
+    image: gvenzl/oracle-free:23-slim-faststart
+    platform: linux/amd64
+    environment:
+      ORACLE_PASSWORD: oracle
+      APP_USER: app
+      APP_USER_PASSWORD: apppass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  test-oracle-pg14:
+    build:
+      context: .
+      dockerfile: Dockerfile.oracle
+      args:
+        PG_VERSION: "14"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+
+  test-oracle-pg17:
+    build:
+      context: .
+      dockerfile: Dockerfile.oracle
+      args:
+        PG_VERSION: "17"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+
+  test-oracle-pg18:
+    build:
+      context: .
+      dockerfile: Dockerfile.oracle
+      args:
+        PG_VERSION: "18"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      oracle-db:
+        condition: service_healthy

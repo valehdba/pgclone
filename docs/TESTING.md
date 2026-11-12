@@ -83,7 +83,7 @@ Without the v4.3.1 fix, groups 1 and 3 would fail deterministically. Without the
 
 ### 7. Oracle Integration Test (43 checks)
 
-Located in `test/test_oracle.sh`, seeded by `test/fixtures/oracle_seed.sql`. It needs a pgclone built with `WITH_ORACLE=1` and a reachable Oracle database, so it is not part of the Docker Compose runs; CI executes it in the dedicated `oracle` job against an `oracle-free` service container. It covers:
+Located in `test/test_oracle.sh`, seeded by `test/fixtures/oracle_seed.sql`. It needs a pgclone built with `WITH_ORACLE=1` and a reachable Oracle database, so it is **not** part of the default `./test/run_all.sh` run. It has its own Docker Compose setup (below), and CI executes it in the dedicated `oracle` job against an `oracle-free` service container. It covers:
 
 - `dry_run` output (DDL, `PRIMARY KEY`, `UNIQUE`, skipped `BLOB`) and that a dry run creates nothing
 - the Oracle → PostgreSQL column types and the PK / UNIQUE / `NOT NULL` constraints
@@ -92,6 +92,24 @@ Located in `test/test_oracle.sh`, seeded by `test/fixtures/oracle_seed.sql`. It 
 - `include_data => false`, an existing target (never overwritten), a missing Oracle table and a wrong password (no leftover table)
 
 The type-mapping function `pgclone.oracle_type_to_pg()` and the "built without Oracle" error path are additionally covered by pgTAP group 29 in `test/pgclone_test.sql`, which runs in the normal PG 14–18 matrix.
+
+#### Running it locally with Docker Compose
+
+```bash
+./test/run_all.sh oracle          # PG 14, 17 and 18 against Oracle Free
+./test/run_all.sh oracle 17       # a single PostgreSQL version
+
+# or by hand
+docker compose up -d oracle-db
+docker compose run --rm test-oracle-pg17
+docker compose down -v
+```
+
+`Dockerfile.oracle` builds PostgreSQL + Oracle Instant Client (Basic Light, SDK, SQL*Plus) and compiles pgclone with `WITH_ORACLE=1`. `test/run_oracle_tests.sh` (the container's init script) waits for the `oracle-db` service (`gvenzl/oracle-free`), seeds it, runs `test/test_oracle.sh` and prints `ALL TESTS PASSED` on success, which `run_all.sh` detects. The seed is re-runnable.
+
+> **Apple Silicon:** the Oracle Free image is x86-64 only, so `oracle-db` runs under emulation (`platform: linux/amd64`) — enable Rosetta in Docker Desktop and expect a slow first start (the runner waits up to 15 minutes). The PostgreSQL test image builds natively; on arm64 it uses Oracle's unversioned "latest" arm64 Instant Client, while x86-64 is pinned to 23.5 like CI.
+
+#### Running it against your own Oracle
 
 To run it yourself:
 
