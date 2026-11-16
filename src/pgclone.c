@@ -351,6 +351,12 @@ pgclone_parse_options(const char *json_str)
         opts.conflict = PGCLONE_CONFLICT_RENAME;
         opts.conflict_specified = true;
     }
+    else if (strstr(json_str, "\"conflict\": \"ignore\"") != NULL ||
+             strstr(json_str, "\"conflict\":\"ignore\"") != NULL)
+    {
+        opts.conflict = PGCLONE_CONFLICT_IGNORE;
+        opts.conflict_specified = true;
+    }
     else if (strstr(json_str, "\"conflict\": \"error\"") != NULL ||
              strstr(json_str, "\"conflict\":\"error\"") != NULL)
     {
@@ -2173,7 +2179,8 @@ pgclone_triggers(PGconn *source_conn, PGconn *target_conn,
 typedef enum
 {
     PGCLONE_SYNC_CONFLICT_PROCEED,  /* no existing object, or conflict resolved */
-    PGCLONE_SYNC_CONFLICT_SKIP      /* existing object, strategy=skip: caller must skip it */
+    PGCLONE_SYNC_CONFLICT_SKIP,     /* existing object, strategy=skip: caller must skip it */
+    PGCLONE_SYNC_CONFLICT_IGNORE_DDL /* existing table, strategy=ignore: skip DDL, still load data */
 } PgcloneSyncConflictResult;
 
 /* String form of a conflict strategy, for propagating opts.conflict
@@ -2187,6 +2194,7 @@ pgclone_conflict_strategy_name(PgcloneConflictStrategy strategy)
         case PGCLONE_CONFLICT_SKIP:    return "skip";
         case PGCLONE_CONFLICT_REPLACE: return "replace";
         case PGCLONE_CONFLICT_RENAME:  return "rename";
+        case PGCLONE_CONFLICT_IGNORE:  return "ignore";
         case PGCLONE_CONFLICT_ERROR:
         default:                       return "error";
     }
@@ -2254,8 +2262,20 @@ pgclone_sync_handle_conflict(PGconn *local_conn, const char *kind,
                     (errcode(ERRCODE_DUPLICATE_TABLE),
                      errmsg("pgclone: %s \"%s\".\"%s\" already exists on target",
                             label, schema_name, target_name),
-                     errhint("Use a \"conflict\" option of \"skip\", \"replace\", or \"rename\" to control this.")));
+                     errhint("Use a \"conflict\" option of \"skip\", \"replace\", \"rename\", or \"ignore\" to control this.")));
             return PGCLONE_SYNC_CONFLICT_SKIP;  /* unreachable */
+
+        case PGCLONE_CONFLICT_IGNORE:
+            pfree(buf.data);
+            if (is_table)
+            {
+                elog(NOTICE, "pgclone: table \"%s\".\"%s\" already exists, keeping its definition and continuing with data (conflict=ignore)",
+                     schema_name, target_name);
+                return PGCLONE_SYNC_CONFLICT_IGNORE_DDL;
+            }
+            elog(NOTICE, "pgclone: sequence \"%s\".\"%s\" already exists, keeping it (conflict=ignore)",
+                 schema_name, target_name);
+            return PGCLONE_SYNC_CONFLICT_SKIP;
 
         case PGCLONE_CONFLICT_SKIP:
             elog(NOTICE, "pgclone: skipping %s \"%s\".\"%s\" (already exists, conflict=skip)",
@@ -2319,6 +2339,8 @@ pgclone_table(PG_FUNCTION_ARGS)
     PGconn     *local_conn;
     PGresult   *res;
     StringInfoData buf;
+    PgcloneSyncConflictResult table_conflict;
+    bool        ddl_exists = false;
 
     /* Arg 4: target table name (optional) */
     if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
@@ -2444,9 +2466,10 @@ pgclone_table(PG_FUNCTION_ARGS)
     }
 
     /* ---- Step 1b2: Handle conflict on the target table (fix issue #22) ---- */
-    if (pgclone_sync_handle_conflict(local_conn, "TABLE", schema_name,
-                                      target_name, &opts)
-        == PGCLONE_SYNC_CONFLICT_SKIP)
+    table_conflict = pgclone_sync_handle_conflict(local_conn, "TABLE", schema_name,
+                                                  target_name, &opts);
+    ddl_exists = (table_conflict == PGCLONE_SYNC_CONFLICT_IGNORE_DDL);
+    if (table_conflict == PGCLONE_SYNC_CONFLICT_SKIP)
     {
         PQclear(res);
         PQfinish(local_conn);
@@ -2516,6 +2539,9 @@ pgclone_table(PG_FUNCTION_ARGS)
     }
 
     /* ---- Step 2: Create table via loopback ---- */
+    if (ddl_exists)
+        PQclear(res);   /* conflict=ignore: keep the existing definition */
+    else
     {
         PGresult *local_res;
         char     *ddl;
@@ -2672,7 +2698,7 @@ pgclone_table(PG_FUNCTION_ARGS)
     }
 
     /* ---- Step 4: Clone constraints if enabled ---- */
-    if (opts.include_constraints)
+    if (opts.include_constraints && !ddl_exists)
     {
         int con_count = pgclone_constraints(source_conn, local_conn,
                                               schema_name, table_name, target_name,
@@ -2683,7 +2709,7 @@ pgclone_table(PG_FUNCTION_ARGS)
     }
 
     /* ---- Step 5: Clone indexes if enabled ---- */
-    if (opts.include_indexes)
+    if (opts.include_indexes && !ddl_exists)
     {
         int idx_count = pgclone_indexes(source_conn, local_conn,
                                           schema_name, table_name, target_name,
@@ -2694,7 +2720,7 @@ pgclone_table(PG_FUNCTION_ARGS)
     }
 
     /* ---- Step 6: Clone triggers if enabled ---- */
-    if (opts.include_triggers)
+    if (opts.include_triggers && !ddl_exists)
     {
         int trig_count = pgclone_triggers(source_conn, local_conn,
                                             schema_name, table_name, target_name);
@@ -5505,6 +5531,9 @@ pgclone_table_async(PG_FUNCTION_ARGS)
         else if (strstr(options_json, "\"conflict\": \"rename\"") ||
                  strstr(options_json, "\"conflict\":\"rename\""))
             conflict = PGCLONE_CONFLICT_RENAME;
+        else if (strstr(options_json, "\"conflict\": \"ignore\"") ||
+                 strstr(options_json, "\"conflict\":\"ignore\""))
+            conflict = PGCLONE_CONFLICT_IGNORE;
 
         pfree(options_json);
     }
@@ -5634,6 +5663,9 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         else if (strstr(options_json, "\"conflict\": \"rename\"") ||
                  strstr(options_json, "\"conflict\":\"rename\""))
             conflict = PGCLONE_CONFLICT_RENAME;
+        else if (strstr(options_json, "\"conflict\": \"ignore\"") ||
+                 strstr(options_json, "\"conflict\":\"ignore\""))
+            conflict = PGCLONE_CONFLICT_IGNORE;
 
         pfree(options_json);
     }
