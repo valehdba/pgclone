@@ -26,6 +26,7 @@
 #include "utils/timestamp.h"
 
 #include "pgclone_bgw.h"
+#include "pgclone_compat.h"
 #include "pgclone_mask.h"
 
 /* Shared with pgclone_oracle.c (non-static since v4.5.0). */
@@ -1436,11 +1437,95 @@ pgclone_check_conninfo_length(const char *conninfo)
 }
 
 /* ---------------------------------------------------------------
+ * When the table has generated columns, fill `cols` with a
+ * comma-separated list of quote_identifier()'d non-generated user
+ * columns in attnum order and return true. COPY FROM cannot write a
+ * generated column, so callers must project that list on the way out
+ * and name it on the way in; the target recomputes the omitted
+ * columns from the generation expression kept in the table DDL.
+ *
+ * Returns false when every user column is copyable (plain COPY table
+ * is still correct) and leaves `cols` empty. Errors if the catalog
+ * query fails or every column is generated.
+ * --------------------------------------------------------------- */
+static bool
+pgclone_nongenerated_copy_list(PGconn *source_conn,
+                               const char *schema_name,
+                               const char *table_name,
+                               StringInfo cols)
+{
+    StringInfoData  query;
+    PGresult       *res;
+    int             nrows, i, ncopy = 0, ngenerated = 0;
+
+    initStringInfo(&query);
+    appendStringInfo(&query,
+        "SELECT a.attname, a.attgenerated "
+        "FROM pg_catalog.pg_attribute a "
+        "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s "
+        "AND a.attnum > 0 AND NOT a.attisdropped "
+        "ORDER BY a.attnum",
+        quote_literal_cstr(schema_name),
+        quote_literal_cstr(table_name));
+
+    res = PQexec(source_conn, query.data);
+    pfree(query.data);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        char *col_errmsg = pstrdup(PQerrorMessage(source_conn));
+        PQclear(res);
+        ereport(ERROR,
+                (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+                 errmsg("pgclone: could not read column list: %s", col_errmsg)));
+    }
+
+    nrows = PQntuples(res);
+    for (i = 0; i < nrows; i++)
+    {
+        const char *attgen = PQgetvalue(res, i, 1);
+
+        if (attgen[0] != '\0')
+        {
+            ngenerated++;
+            continue;
+        }
+
+        if (ncopy > 0)
+            appendStringInfoString(cols, ", ");
+        appendStringInfoString(cols, quote_identifier(PQgetvalue(res, i, 0)));
+        ncopy++;
+    }
+    PQclear(res);
+
+    if (ngenerated == 0)
+    {
+        resetStringInfo(cols);
+        return false;
+    }
+
+    if (ncopy == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("pgclone: table \"%s.%s\" has no copyable columns (every column is generated)",
+                        schema_name, table_name)));
+
+    return true;
+}
+
+/* ---------------------------------------------------------------
  * Internal helper: stream data from source to target using COPY.
  *
  * When columns or where_clause are provided, uses
  * COPY (SELECT cols FROM table WHERE filter) TO STDOUT
  * instead of COPY table TO STDOUT.
+ *
+ * Generated columns are omitted from that projection (and from a
+ * whole-table COPY, which is promoted to the same shape). COPY FROM
+ * rejects them. An explicit "columns" list is sent through as the
+ * caller wrote it; a generated column in that list still errors.
  *
  * If a WHERE clause is present, the source query runs inside a
  * READ ONLY transaction to prevent any side effects from injected SQL.
@@ -1452,11 +1537,13 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
 {
     PGresult       *res;
     StringInfoData  cmd;
+    StringInfoData  copy_cols;
     char           *buf;
     int             ret;
     int64           row_count = 0;
     bool            use_query_copy;
     bool            began_local_txn = false;
+    bool            skip_generated = false;
 
     /* Determine if we need query-based COPY (for columns/WHERE/masks) */
     use_query_copy = (opts != NULL &&
@@ -1487,6 +1574,29 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
             }
             PQclear(txres);
             began_local_txn = true;
+        }
+    }
+
+    /*
+     * Whole-table COPY (no explicit column list) includes generated
+     * values on the way out and then fails on the way in. Resolve the
+     * copyable list once and use it for both sides. Runs after any
+     * WHERE-clause transaction is opened so it sees that snapshot.
+     * Tables with no generated columns keep COPY table.
+     */
+    initStringInfo(&copy_cols);
+    if (opts == NULL || opts->num_columns == 0)
+    {
+        skip_generated = pgclone_nongenerated_copy_list(source_conn,
+                                                        schema_name,
+                                                        source_table,
+                                                        &copy_cols);
+        if (skip_generated)
+        {
+            use_query_copy = true;
+            elog(DEBUG1,
+                 "pgclone: omitting generated columns from COPY of %s.%s",
+                 schema_name, source_table);
         }
     }
 
@@ -1521,6 +1631,7 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
                 "JOIN pg_catalog.pg_type t ON t.oid = a.atttypid "
                 "WHERE n.nspname = %s AND c.relname = %s "
                 "AND a.attnum > 0 AND NOT a.attisdropped "
+                "AND a.attgenerated = '' "
                 "ORDER BY a.attnum",
                 quote_literal_cstr(schema_name),
                 quote_literal_cstr(source_table));
@@ -1625,6 +1736,12 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
                 appendStringInfoString(&select_cmd, col_ident);
             }
         }
+        else if (skip_generated)
+        {
+            /* WHERE-only (or generated-only) copy: project the
+             * non-generated columns so COPY IN can name them. */
+            appendStringInfoString(&select_cmd, copy_cols.data);
+        }
         else
         {
             appendStringInfoChar(&select_cmd, '*');
@@ -1657,6 +1774,7 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
     {
         PQclear(res);
         pfree(cmd.data);
+        pfree(copy_cols.data);
         ereport(ERROR,
                 (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
                  errmsg("pgclone: COPY OUT failed on source: %s",
@@ -1681,6 +1799,14 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
         }
         appendStringInfoString(&cmd, ") FROM STDIN WITH (FORMAT text)");
     }
+    else if (skip_generated)
+    {
+        appendStringInfo(&cmd,
+            "COPY %s.%s (%s) FROM STDIN WITH (FORMAT text)",
+            quote_identifier(schema_name),
+            quote_identifier(target_table),
+            copy_cols.data);
+    }
     else
     {
         appendStringInfo(&cmd,
@@ -1688,6 +1814,8 @@ pgclone_copy_data(PGconn *source_conn, PGconn *local_conn,
             quote_identifier(schema_name),
             quote_identifier(target_table));
     }
+
+    pfree(copy_cols.data);
 
     res = PQexec(local_conn, cmd.data);
     pfree(cmd.data);
@@ -2401,7 +2529,7 @@ pgclone_table(PG_FUNCTION_ARGS)
             "string_agg(quote_ident(a.attname) || ' ' || "
             "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
             "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
-            "CASE WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END, "
+            PGCLONE_COLUMN_ATTRDEF_SQL ", "
             "', ' ORDER BY a.attnum) || ')' AS ddl "
             "FROM pg_catalog.pg_class c "
             "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
@@ -2426,7 +2554,7 @@ pgclone_table(PG_FUNCTION_ARGS)
             "string_agg(quote_ident(a.attname) || ' ' || "
             "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
             "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
-            "CASE WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END, "
+            PGCLONE_COLUMN_ATTRDEF_SQL ", "
             "', ' ORDER BY a.attnum) || ')' AS ddl "
             "FROM pg_catalog.pg_class c "
             "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "

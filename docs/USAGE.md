@@ -169,6 +169,10 @@ SELECT pgclone.table(
 );
 ```
 
+### Generated columns
+
+`GENERATED ALWAYS AS (...) STORED` columns, and `VIRTUAL` generated columns on PostgreSQL 18, are cloned as generated columns rather than as defaults. COPY does not write them; the target computes each value from the generation expression. Omit generated columns from an explicit `"columns"` list — PostgreSQL rejects `COPY` into a generated column. A virtual generated column needs PostgreSQL 18 on the target. Generation expressions that call a function in the same schema still require that function to exist first, the same as a `DEFAULT` expression does.
+
 ---
 
 ## Schema Cloning

@@ -164,6 +164,8 @@ Data is transferred using PostgreSQL's COPY protocol, which is significantly fas
 
 This avoids parsing and re-serializing individual rows.
 
+`COPY table` cannot load a generated column: `COPY TO` emits the stored value and `COPY FROM` rejects it (`column "..." is a generated column`). When `pg_attribute.attgenerated` is set, both the synchronous path and the background worker switch to `COPY (SELECT <non-generated columns> ...) TO STDOUT` and `COPY table (<those columns>) FROM STDIN`. The `CREATE TABLE` reconstruction emits `GENERATED ALWAYS AS (expr) STORED` or, on PostgreSQL 18, `VIRTUAL`, instead of `DEFAULT`, so the target recomputes the column. Tables with no generated columns keep the plain `COPY table` form. Identity columns are still emitted as `DEFAULT`.
+
 ### Data Masking Architecture (v3.0.0)
 
 Data masking is implemented as **server-side SQL expressions** injected into the COPY query's SELECT list. Instead of `COPY table TO STDOUT`, pgclone generates:
@@ -185,7 +187,7 @@ This approach has three key benefits:
 2. **No dependencies** — all mask expressions use built-in PostgreSQL functions (`left()`, `right()`, `md5()`, `split_part()`, `random()`). No pgcrypto or external libraries.
 3. **Composable** — masks work with existing `columns`, `where`, `indexes`, `constraints`, and `triggers` options without special handling.
 
-When masks are specified without an explicit column list, pgclone queries `pg_catalog.pg_attribute` on the source to discover column names, then applies mask expressions to matching columns while passing others through unmodified.
+When masks are specified without an explicit column list, pgclone queries `pg_catalog.pg_attribute` on the source to discover column names, then applies mask expressions to matching columns while passing others through unmodified. Generated columns are omitted from that list; the target recomputes them.
 
 ---
 
