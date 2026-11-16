@@ -5,12 +5,13 @@
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
 [![Version](https://img.shields.io/badge/version-4.5.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.5.0)
 
-A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts. Since v4.5.0 it can also pull a table straight out of an **Oracle** database into PostgreSQL.
+A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts. Since v4.5.0 it can also pull a table straight out of an **Oracle** database, and since v4.6.0 out of **Microsoft SQL Server**, into PostgreSQL.
 
 ## Key Features
 
 - **Clone anything** - tables, schemas, functions, entire databases, roles and permissions
 - **Oracle → PostgreSQL** - clone an Oracle table (structure, NOT NULL, PK/UNIQUE, data) with automatic type mapping, a `dry_run` DDL preview and an all-or-nothing transaction (optional OCI build)
+- **SQL Server → PostgreSQL** - clone a SQL Server table or view (structure, NOT NULL, PK/UNIQUE, data) with automatic type mapping, a `dry_run` DDL preview and an all-or-nothing transaction (optional FreeTDS build)
 - **Fast data transfer** - uses PostgreSQL COPY protocol
 - **Data masking** - anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
 - **Auto-discovery** - scan source schemas for sensitive columns and get suggested mask rules
@@ -59,6 +60,12 @@ SELECT pgclone.table_from_oracle(
     'host=ora-server port=1521 service=ORCLPDB1 user=scott password=tiger',
     'HR', 'EMPLOYEES'
 );
+
+-- Clone a table from SQL Server (needs the optional FreeTDS build, see Installation)
+SELECT pgclone.table_from_sqlserver(
+    'host=mssql-server port=1433 database=Sales user=sa password=secret',
+    'dbo', 'Customers'
+);
 ```
 
 ## Requirements
@@ -68,6 +75,7 @@ SELECT pgclone.table_from_oracle(
 - `libpq` development library (`libpq-dev`)
 - GCC or compatible C compiler
 - *Optional, for Oracle cloning:* Oracle Instant Client **Basic/Basic Light + SDK** (provides `oci.h` and `libclntsh`)
+- *Optional, for SQL Server cloning:* FreeTDS development files (`freetds-dev` / `freetds-devel` / `brew install freetds`; provides `sybdb.h` and `libsybdb`)
 
 ## Installation
 
@@ -111,6 +119,21 @@ sudo make install WITH_ORACLE=1 ORACLE_HOME=/opt/oracle/instantclient_23_5
 
 The PostgreSQL server process must be able to load `libclntsh` at runtime (`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` or ldconfig). See [Cloning a Table from Oracle](docs/USAGE.md#cloning-a-table-from-oracle-v450) for usage, type mapping and limitations.
 
+### Build with SQL Server support (optional)
+
+`pgclone.table_from_sqlserver()` talks to SQL Server through FreeTDS (DB-Library), so it is compiled in only on request. A normal build is unaffected and the function then raises a clear "built without SQL Server support" error.
+
+```bash
+# Debian/Ubuntu: sudo apt-get install freetds-dev    macOS: brew install freetds
+make WITH_SQLSERVER=1
+sudo make install WITH_SQLSERVER=1
+
+# FreeTDS in a non-standard prefix (e.g. Homebrew on Apple Silicon)
+make WITH_SQLSERVER=1 FREETDS_HOME=/opt/homebrew
+```
+
+See [Cloning a Table from SQL Server](docs/USAGE.md#cloning-a-table-from-sql-server-v460) for usage, type mapping and limitations.
+
 ### Troubleshooting: `make install` fails with `llvm-lto: No such file or directory`
 
 If PostgreSQL was itself built `--with-llvm` (check `pg_config --configure | grep llvm`), PGXS also builds a JIT bitcode file for every extension and links it with `llvm-lto`. Some LLVM packages (seen on RHEL/CentOS with a separately-installed `llvm-toolset`, e.g. `llvm20`) don't ship that specific tool, so the build fails like:
@@ -146,11 +169,11 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 
 | Document | Description |
 |----------|-------------|
-| [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, Oracle cloning, and examples |
+| [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, Oracle and SQL Server cloning, and examples |
 | [Async Operations](docs/ASYNC.md) | Background workers, progress tracking, parallel cloning |
-| [Testing](docs/TESTING.md) | Test infrastructure, pgTAP and integration suites (incl. Oracle Free), Docker, CI/CD |
+| [Testing](docs/TESTING.md) | Test infrastructure, pgTAP and integration suites (incl. Oracle Free and SQL Server), Docker, CI/CD |
 | [Manual Testing](docs/TESTING_MANUAL.md) | Step-by-step manual test scenarios for all functionalities |
-| [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, Oracle/OCI isolation, PG version compatibility |
+| [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, Oracle/OCI and SQL Server/FreeTDS isolation, PG version compatibility |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 
 ## Roadmap
@@ -186,7 +209,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v4.4.3: `"conflict"` (`error`/`skip`/`replace`/`rename`) is now honored by the synchronous clone path (`pgclone.table()`/`pgclone.schema()`/`pgclone.database()`), not just the async job path — issue #22
 - [x] v4.4.4: Auto-discovery of bank account numbers/IBAN; `pgclone.masking_report()` gains a `(conninfo, schema)` overload to audit a remote source directly — issue #23
 - [x] v4.5.0: Clone a table from Oracle into PostgreSQL — `pgclone.table_from_oracle()` with Oracle→PG type mapping, `dry_run`, CLOB/RAW support and an optional OCI build (`WITH_ORACLE=1`); verified in CI against Oracle Free
-- [ ] v4.6.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
+- [x] v4.6.0: Clone a table from Microsoft SQL Server into PostgreSQL — `pgclone.table_from_sqlserver()` with SQL Server→PG type mapping, `dry_run`, `NVARCHAR(MAX)`/`VARBINARY`/`UNIQUEIDENTIFIER` support and an optional FreeTDS build (`WITH_SQLSERVER=1`); CI job against SQL Server 2022
+- [ ] v4.7.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License
 

@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(142);
+SELECT plan(153);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -1024,6 +1024,36 @@ SELECT throws_ok(
     $$SELECT pgclone.table_from_oracle('host=h service=s user=u password=p', 'HR', 'EMP')$$,
     NULL, NULL,
     'table_from_oracle fails cleanly (no Oracle build, or unreachable server)');
+
+-- ============================================================
+-- TEST GROUP 30: SQL Server -> PostgreSQL type mapping (no SQL
+-- Server client needed) and the not-built-with-SQL-Server error path.
+-- 11 tests below — keep in sync with plan() above.
+-- ============================================================
+SELECT is(pgclone.sqlserver_type_to_pg('int'), 'integer',
+    'sqlserver_type_to_pg: int -> integer');
+SELECT is(pgclone.sqlserver_type_to_pg('TinyInt'), 'smallint',
+    'sqlserver_type_to_pg: type name is case-insensitive, tinyint -> smallint');
+SELECT is(pgclone.sqlserver_type_to_pg('bit'), 'boolean',
+    'sqlserver_type_to_pg: bit -> boolean');
+SELECT is(pgclone.sqlserver_type_to_pg('decimal', 9, 10, 2), 'numeric(10,2)',
+    'sqlserver_type_to_pg: decimal(10,2) -> numeric(10,2)');
+SELECT is(pgclone.sqlserver_type_to_pg('nvarchar', 100), 'varchar(50)',
+    'sqlserver_type_to_pg: nvarchar max_length is bytes (100 -> 50 chars)');
+SELECT is(pgclone.sqlserver_type_to_pg('nvarchar', -1), 'text',
+    'sqlserver_type_to_pg: nvarchar(max) -> text');
+SELECT is(pgclone.sqlserver_type_to_pg('datetime'), 'timestamp(3)',
+    'sqlserver_type_to_pg: datetime -> timestamp(3)');
+SELECT is(pgclone.sqlserver_type_to_pg('datetime2', 8, 27, 7), 'timestamp(6)',
+    'sqlserver_type_to_pg: datetime2(7) capped at 6 fractional digits');
+SELECT is(pgclone.sqlserver_type_to_pg('uniqueidentifier'), 'uuid',
+    'sqlserver_type_to_pg: uniqueidentifier -> uuid');
+SELECT is(pgclone.sqlserver_type_to_pg('geography'), NULL,
+    'sqlserver_type_to_pg: unsupported type -> NULL');
+SELECT throws_ok(
+    $$SELECT pgclone.table_from_sqlserver('host=h database=d user=u password=p', 'dbo', 't')$$,
+    NULL, NULL,
+    'table_from_sqlserver fails cleanly (no SQL Server build, or unreachable server)');
 
 SELECT * FROM finish();
 ROLLBACK;

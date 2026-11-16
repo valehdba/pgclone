@@ -4,7 +4,7 @@ PgClone has a comprehensive test suite that runs across PostgreSQL versions 14�
 
 ## Test Suite Overview
 
-The test suite is organized into seven test groups (the Oracle integration suite is described in section 7):
+The test suite is organized into eight test groups (the Oracle and SQL Server integration suites are described in sections 7 and 8):
 
 ### 1. pgTAP Sync Tests (66 tests)
 
@@ -121,6 +121,44 @@ PGHOST=localhost PGPORT=5434 PGUSER=postgres bash test/test_oracle.sh
 
 ---
 
+### 8. SQL Server Integration Test (57 checks)
+
+Located in `test/test_sqlserver.sh`, seeded by `test/fixtures/sqlserver_seed.sql`. It needs a pgclone built with `WITH_SQLSERVER=1` and a reachable SQL Server, so it is **not** part of the default `./test/run_all.sh` run. CI executes it in the dedicated `sqlserver` job against a SQL Server 2022 service container. It covers:
+
+- `dry_run` output (DDL, `PRIMARY KEY`, `UNIQUE`, skipped `GEOGRAPHY`) and that a dry run creates nothing
+- the SQL Server → PostgreSQL column types and the PK / UNIQUE / `NOT NULL` constraints
+- value fidelity: `DECIMAL`, `MONEY`, `TINYINT`, `BIT`, `REAL`/`FLOAT`, unicode, tabs/backslashes/newlines (COPY escaping), NULLs, a 100,000-character `NVARCHAR(MAX)`, `DATE`, `TIME(3)`, `DATETIME`, microsecond `DATETIME2`, `DATETIMEOFFSET`, `UNIQUEIDENTIFIER`, `VARBINARY`
+- a 20,000-row table (several COPY flushes)
+- `include_data => false`, an existing target (never overwritten), a missing table and a wrong password (no leftover table)
+
+The type-mapping function `pgclone.sqlserver_type_to_pg()` and the "built without SQL Server" error path are additionally covered by pgTAP group 30 in `test/pgclone_test.sql`, which runs in the normal PG 14–18 matrix.
+
+#### Running it locally with Docker Compose
+
+```bash
+./test/run_all.sh sqlserver          # PG 14, 17 and 18 against SQL Server 2022
+./test/run_all.sh sqlserver 17       # a single PostgreSQL version
+
+# or by hand
+docker compose up -d sqlserver-db
+docker compose run --rm test-sqlserver-pg17
+docker compose down -v
+```
+
+`Dockerfile.sqlserver` builds PostgreSQL + FreeTDS and compiles pgclone with `WITH_SQLSERVER=1`. `test/run_sqlserver_tests.sh` (the container's init script) waits for the `sqlserver-db` service, seeds it with `tsql`, runs `test/test_sqlserver.sh` and prints `ALL TESTS PASSED` on success. The seed is re-runnable.
+
+> **Apple Silicon:** the SQL Server image is x86-64 only, so `sqlserver-db` runs under emulation (`platform: linux/amd64`) — enable Rosetta in Docker Desktop. It needs about 2 GB of RAM.
+
+#### Running it against your own SQL Server
+
+```bash
+export SQLSERVER_CONNINFO="host=localhost port=1433 database=pgc_test user=sa password=..."
+tsql -S localhost -p 1433 -U sa < test/fixtures/sqlserver_seed.sql
+PGHOST=localhost PGPORT=5434 PGUSER=postgres bash test/test_sqlserver.sh
+```
+
+---
+
 ## Running Tests Locally
 
 ### Prerequisites
@@ -200,6 +238,10 @@ Tests run in parallel across PostgreSQL 14, 15, 16, 17, and 18 with `fail-fast: 
 ### Oracle job
 
 A second job, `oracle`, runs on PostgreSQL 14 and 18. It starts the `gvenzl/oracle-free` service container, installs Oracle Instant Client (Basic Light + SDK + SQL*Plus), builds pgclone with `WITH_ORACLE=1`, seeds Oracle, starts a target PostgreSQL with `libclntsh` on its library path, and runs `test/test_oracle.sh`.
+
+### SQL Server job
+
+A third job, `sqlserver`, runs on PostgreSQL 14 and 18. It starts the `mcr.microsoft.com/mssql/server:2022-latest` service container, installs FreeTDS (`freetds-dev`, `freetds-bin`), builds pgclone with `WITH_SQLSERVER=1`, seeds SQL Server with `tsql`, starts a target PostgreSQL, and runs `test/test_sqlserver.sh`.
 
 ### CI Steps
 
