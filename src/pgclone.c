@@ -2262,8 +2262,20 @@ pgclone_sync_handle_conflict(PGconn *local_conn, const char *kind,
                     (errcode(ERRCODE_DUPLICATE_TABLE),
                      errmsg("pgclone: %s \"%s\".\"%s\" already exists on target",
                             label, schema_name, target_name),
-                     errhint("Use a \"conflict\" option of \"skip\", \"replace\", or \"rename\" to control this.")));
+                     errhint("Use a \"conflict\" option of \"skip\", \"replace\", \"rename\", or \"ignore\" to control this.")));
             return PGCLONE_SYNC_CONFLICT_SKIP;  /* unreachable */
+
+        case PGCLONE_CONFLICT_IGNORE:
+            pfree(buf.data);
+            if (is_table)
+            {
+                elog(NOTICE, "pgclone: table \"%s\".\"%s\" already exists, keeping its definition and continuing with data (conflict=ignore)",
+                     schema_name, target_name);
+                return PGCLONE_SYNC_CONFLICT_IGNORE_DDL;
+            }
+            elog(NOTICE, "pgclone: sequence \"%s\".\"%s\" already exists, keeping it (conflict=ignore)",
+                 schema_name, target_name);
+            return PGCLONE_SYNC_CONFLICT_SKIP;
 
         case PGCLONE_CONFLICT_SKIP:
             elog(NOTICE, "pgclone: skipping %s \"%s\".\"%s\" (already exists, conflict=skip)",

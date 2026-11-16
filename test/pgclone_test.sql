@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(164);
+SELECT plan(168);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -929,6 +929,37 @@ SELECT results_eq(
     'SELECT count(*)::integer FROM issue22_schema.widget',
     ARRAY[2],
     'issue22_schema.widget holds exactly the source row count — replaced, not appended to');
+
+-- ============================================================
+-- conflict=ignore (discussion #24): keep the pre-created target's
+-- definition (seeded without a primary key) and still load the data.
+-- The target is seeded through pgclone itself (loopback, committed)
+-- because an uncommitted CREATE TABLE here would block the loopback.
+-- 4 tests below — keep in sync with plan() above.
+-- ============================================================
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c24_ignore',
+        '{"where": "num = 1", "constraints": false, "indexes": false}'),
+    'c24_ignore: seed a 1-row target without a primary key');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'public', 'simple_test', 'c24_ignore',
+        '{"where": "num > 1", "conflict": "ignore"}'),
+    'pgclone.table conflict=ignore succeeds on an existing target');
+
+SELECT results_eq(
+    'SELECT count(*)::integer FROM public.c24_ignore',
+    ARRAY[5],
+    'c24_ignore: data was loaded into the existing table (1 seeded + 4 new)');
+
+SELECT results_eq(
+    $$SELECT count(*)::integer FROM pg_constraint WHERE conrelid = 'public.c24_ignore'::regclass$$,
+    ARRAY[0],
+    'c24_ignore: existing definition untouched — no constraints were added');
 
 -- ============================================================
 -- TEST GROUP 29: issue #23 — auto-discover bank account numbers,
