@@ -417,7 +417,17 @@ SELECT pgclone.table(..., '{"conflict": "replace"}');
 
 -- Rename existing to tablename_old
 SELECT pgclone.table(..., '{"conflict": "rename"}');
+
+-- Keep the existing table's DDL, report it, and still load the data
+SELECT pgclone.table(..., '{"conflict": "ignore"}');
 ```
+
+`ignore` is for pre-created targets (for example tables with custom storage
+parameters or a different compression method): if the target table exists,
+pgclone emits a NOTICE, does not touch its definition (no `CREATE TABLE`,
+constraints, indexes or triggers) and copies the data into it. Existing
+sequences are kept. Data is appended, so re-running against a populated
+table duplicates rows; truncate first if that matters.
 
 Conflict strategy can be combined with other options:
 
@@ -1368,7 +1378,7 @@ comments, partitioning, and masking/`WHERE` filtering are not handled for MySQL 
 | `matviews` | bool | `true` | Clone materialized views |
 | `columns` | array | all | Columns to include |
 | `where` | string | none | Row filter condition |
-| `conflict` | string | `"error"` | Conflict strategy: error, skip, replace, rename |
+| `conflict` | string | `"error"` | Conflict strategy: error, skip, replace, rename, ignore |
 | `parallel` | int | 1 | Number of parallel workers (async only) |
 | `mask` | object | none | Column masking rules: `{"col": "type"}` or `{"col": {"type":"...", ...}}` |
 | `masks` | object | none | v4.4.0, schema/database clone only: per-table in-line masking: `{"table": {<mask obj>}, "schema.table": {<mask obj>}}` |

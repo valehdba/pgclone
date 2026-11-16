@@ -358,7 +358,7 @@ bgw_keeper_ping(PGconn *conn)
 static bool
 bgw_handle_conflict(PGconn *local_conn, const char *schema_name,
                     const char *target_table,
-                    PgcloneConflictStrategy strategy)
+                    PgcloneConflictStrategy strategy, bool *ddl_exists)
 {
     PGresult       *res;
     StringInfoData  buf;
@@ -383,6 +383,14 @@ bgw_handle_conflict(PGconn *local_conn, const char *schema_name,
 
     switch (strategy)
     {
+        case PGCLONE_CONFLICT_IGNORE:
+            /* Keep the existing definition; caller skips DDL, still loads data */
+            elog(NOTICE, "pgclone: table %s.%s already exists, keeping its definition and continuing with data (conflict_strategy=ignore)",
+                 schema_name, target_table);
+            *ddl_exists = true;
+            pfree(buf.data);
+            return true;
+
         case PGCLONE_CONFLICT_ERROR:
             elog(WARNING, "pgclone: table %s.%s already exists (conflict_strategy=error)",
                  schema_name, target_table);
@@ -530,6 +538,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
     StringInfoData  buf;
     const char     *target;
     int64           rows;
+    bool            ddl_exists = false;
 
     /* Use target_name if set and different from source table */
     if (job->target_name[0] != '\0' && strcmp(job->target_name, table_name) != 0)
@@ -546,7 +555,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
 
     /* Handle conflicts */
     if (!bgw_handle_conflict(local_conn, job->schema_name, target,
-                             job->conflict_strategy))
+                             job->conflict_strategy, &ddl_exists))
     {
         if (job->conflict_strategy == PGCLONE_CONFLICT_SKIP)
             return true;  /* Not an error, just skipped */
@@ -575,16 +584,19 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
         "GROUP BY c.relname",
         job->schema_name, target, job->schema_name, table_name);
 
-    res = PQexec(source_conn, buf.data);
-    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0)
+    if (!ddl_exists)
     {
-        PQclear(res);
-        pfree(buf.data);
-        return false;
-    }
+        res = PQexec(source_conn, buf.data);
+        if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0)
+        {
+            PQclear(res);
+            pfree(buf.data);
+            return false;
+        }
 
-    bgw_exec(local_conn, PQgetvalue(res, 0, 0));
-    PQclear(res);
+        bgw_exec(local_conn, PQgetvalue(res, 0, 0));
+        PQclear(res);
+    }
 
 
     /* Copy data */
@@ -604,7 +616,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
     }
 
     /* Clone constraints */
-    if (job->include_constraints)
+    if (job->include_constraints && !ddl_exists)
     {
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
         strlcpy(job->current_phase, "creating constraints", 64);
@@ -640,7 +652,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
     }
 
     /* Clone indexes */
-    if (job->include_indexes)
+    if (job->include_indexes && !ddl_exists)
     {
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
         strlcpy(job->current_phase, "creating indexes", 64);
@@ -669,7 +681,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
     }
 
     /* Clone triggers */
-    if (job->include_triggers)
+    if (job->include_triggers && !ddl_exists)
     {
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
         strlcpy(job->current_phase, "creating triggers", 64);

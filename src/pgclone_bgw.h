@@ -43,7 +43,8 @@ typedef enum PgcloneConflictStrategy
     PGCLONE_CONFLICT_ERROR = 0,   /* Error if target exists (default) */
     PGCLONE_CONFLICT_SKIP,        /* Skip if target exists */
     PGCLONE_CONFLICT_REPLACE,     /* DROP and re-create target */
-    PGCLONE_CONFLICT_RENAME       /* Rename target with _old suffix */
+    PGCLONE_CONFLICT_RENAME,      /* Rename target with _old suffix */
+    PGCLONE_CONFLICT_IGNORE       /* Keep existing table's DDL, still load data */
 } PgcloneConflictStrategy;
 
 /* Single job entry in shared memory */
