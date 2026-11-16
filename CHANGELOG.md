@@ -2,6 +2,18 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.6.0]
+
+### Added
+- **Clone a table from Microsoft SQL Server into PostgreSQL**: `pgclone.table_from_sqlserver(sqlserver_conninfo, sqlserver_schema, sqlserver_table, include_data, target_schema, target_table, dry_run)`. Reads column and PK/UNIQUE metadata from `sys.columns` / `sys.indexes`, creates the table and streams rows with `COPY` in a single transaction. `dry_run` returns the DDL only; an existing target is never overwritten. Works on tables and views. See "Cloning a Table from SQL Server" in `docs/USAGE.md`.
+- `pgclone.sqlserver_type_to_pg(...)` — the SQL Server→PostgreSQL type mapping, callable without a SQL Server client.
+- Optional FreeTDS build: `make WITH_SQLSERVER=1 [FREETDS_HOME=<prefix>]`. Without it the extension builds unchanged and `table_from_sqlserver()` raises a descriptive error.
+- New sources `src/pgclone_sqlserver.c` (mapping, DDL, loader) and `src/pgclone_tds.{c,h}` (FreeTDS DB-Library wrapper isolated from PostgreSQL headers, since `sybdb.h` and `postgres.h` both define `BOOL`/`TRUE`/`FALSE`).
+- pgTAP test group 30 (plan 142 → 153), `test/test_sqlserver.sh` integration suite, `Dockerfile.sqlserver` + `sqlserver-db` / `test-sqlserver-pg*` compose services, `./test/run_all.sh sqlserver`, and a `sqlserver` CI job.
+
+### Limitations
+- `sql_variant`, `hierarchyid`, `geography`, `geometry` and CLR types are skipped with a warning; defaults, identity, FK/check constraints and non-unique indexes are not carried over. A single consistent snapshot needs `ALLOW_SNAPSHOT_ISOLATION` on the source database (otherwise a NOTICE is raised and the copy reads at READ COMMITTED).
+
 ## [4.5.0]
 
 ### Added
