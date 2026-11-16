@@ -10,13 +10,15 @@
 #   ./test/run_all.sh oracle 17    # Oracle tests on PG 17 only
 #   ./test/run_all.sh sqlserver    # SQL Server -> PostgreSQL tests (PG 14, 17, 18)
 #   ./test/run_all.sh sqlserver 17 # SQL Server tests on PG 17 only
+#   ./test/run_all.sh mysql        # MySQL -> PostgreSQL tests (PG 14, 17, 18)
+#   ./test/run_all.sh mysql 17     # MySQL tests on PG 17 only
 # ============================================================
 
 set -e
 
-# "oracle" / "sqlserver" as the first argument switch to the Oracle / SQL Server
-# -> PostgreSQL suites (need the oracle-db / sqlserver-db service; see
-# Dockerfile.oracle and Dockerfile.sqlserver).
+# "oracle" / "sqlserver" / "mysql" as the first argument switch to the Oracle /
+# SQL Server / MySQL -> PostgreSQL suites (need the oracle-db / sqlserver-db /
+# mysql-db service; see Dockerfile.oracle, Dockerfile.sqlserver, Dockerfile.mysql).
 MODE="pg"
 if [ "${1:-}" = "oracle" ]; then
     MODE="oracle"
@@ -30,6 +32,12 @@ elif [ "${1:-}" = "sqlserver" ]; then
     DEFAULT_VERSIONS="14 17 18"
     DB_SERVICE="sqlserver-db"
     SERVICE_PREFIX="test-sqlserver-pg"
+elif [ "${1:-}" = "mysql" ]; then
+    MODE="mysql"
+    shift
+    DEFAULT_VERSIONS="14 17 18"
+    DB_SERVICE="mysql-db"
+    SERVICE_PREFIX="test-mysql-pg"
 else
     DEFAULT_VERSIONS="14 15 16 17 18"
     DB_SERVICE="source-db"

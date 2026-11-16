@@ -488,3 +488,91 @@ jobs:
         run: |
           PGLOG="$RUNNER_TEMP/pg_target_${{ matrix.pg_version }}.log"
           [ -f "$PGLOG" ] && tail -150 "$PGLOG" || echo "No log found"
+
+  mysql:
+    name: "MySQL -> PostgreSQL (PG ${{ matrix.pg_version }}, MySQL 8.0)"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [14, 18]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start MySQL 8.0
+        # Started with docker run (not a service container) to pass the server
+        # argument that keeps root on mysql_native_password.
+        run: |
+          docker run -d --name mysql -p 3306:3306 \
+            -e MYSQL_ROOT_PASSWORD=Pgclone_Test1 \
+            mysql:8.0 --default-authentication-plugin=mysql_native_password
+
+      - name: Install PostgreSQL ${{ matrix.pg_version }} and the MySQL client library
+        run: |
+          PG_VER=${{ matrix.pg_version }}
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-common ca-certificates curl gnupg
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-$PG_VER postgresql-server-dev-$PG_VER libpq-dev build-essential libmariadb-dev mariadb-client
+
+      - name: Build and install pgclone with MySQL support
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
+          make PG_CONFIG=$PG_CONFIG CFLAGS="-Isrc" WITH_MYSQL=1
+          sudo make install PG_CONFIG=$PG_CONFIG WITH_MYSQL=1
+          ldd /usr/lib/postgresql/${{ matrix.pg_version }}/lib/pgclone.so | grep -i mariadb
+
+      - name: Wait for MySQL
+        run: |
+          for i in $(seq 1 40); do
+            if mariadb --skip-ssl -h 127.0.0.1 -P 3306 -uroot -pPgclone_Test1 -e "SELECT 1" >/dev/null 2>&1; then
+              echo "MySQL is ready"; exit 0
+            fi
+            sleep 3
+          done
+          echo "MySQL did not become ready"; docker logs mysql | tail -30; exit 1
+
+      - name: Seed MySQL
+        run: |
+          mariadb --skip-ssl --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -uroot -pPgclone_Test1 < test/fixtures/mysql_seed.sql
+
+      - name: Start target PostgreSQL
+        run: |
+          PG_VER=${{ matrix.pg_version }}
+          PGBIN=/usr/lib/postgresql/$PG_VER/bin
+          PGDATA="$RUNNER_TEMP/pg_target_$PG_VER"
+          PGLOG="$RUNNER_TEMP/pg_target_$PG_VER.log"
+
+          sudo systemctl stop postgresql 2>/dev/null || true
+          "$PGBIN/initdb" -D "$PGDATA" --username=postgres --auth=trust
+          {
+            echo "port = 5434"
+            echo "listen_addresses = 'localhost'"
+            echo "max_connections = 50"
+            echo "huge_pages = off"
+            echo "shared_preload_libraries = 'pgclone'"
+            echo "max_worker_processes = 32"
+            echo "unix_socket_directories = '/tmp'"
+            echo "logging_collector = off"
+          } >> "$PGDATA/postgresql.conf"
+
+          "$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGLOG" -w -t 30 start
+          "$PGBIN/createdb" -h localhost -p 5434 -U postgres target_db
+
+      - name: "Test: table_from_mysql (real MySQL 8.0)"
+        env:
+          PGHOST: localhost
+          PGPORT: 5434
+          PGUSER: postgres
+          MYSQL_CONNINFO: "host=127.0.0.1 port=3306 user=root password=Pgclone_Test1 ssl=no"
+        run: bash test/test_mysql.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          PGLOG="$RUNNER_TEMP/pg_target_${{ matrix.pg_version }}.log"
+          [ -f "$PGLOG" ] && tail -150 "$PGLOG" || echo "No log found"

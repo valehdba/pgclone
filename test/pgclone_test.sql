@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(153);
+SELECT plan(164);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -1054,6 +1054,36 @@ SELECT throws_ok(
     $$SELECT pgclone.table_from_sqlserver('host=h database=d user=u password=p', 'dbo', 't')$$,
     NULL, NULL,
     'table_from_sqlserver fails cleanly (no SQL Server build, or unreachable server)');
+
+-- ============================================================
+-- TEST GROUP 31: MySQL -> PostgreSQL type mapping (no MySQL
+-- client needed) and the not-built-with-MySQL error path.
+-- 11 tests below — keep in sync with plan() above.
+-- ============================================================
+SELECT is(pgclone.mysql_type_to_pg('tinyint', 'tinyint(1)'), 'smallint',
+    'mysql_type_to_pg: tinyint(1) stays smallint (not boolean)');
+SELECT is(pgclone.mysql_type_to_pg('SmallInt', 'smallint unsigned'), 'integer',
+    'mysql_type_to_pg: case-insensitive, smallint unsigned -> integer');
+SELECT is(pgclone.mysql_type_to_pg('int', 'int unsigned'), 'bigint',
+    'mysql_type_to_pg: int unsigned -> bigint');
+SELECT is(pgclone.mysql_type_to_pg('bigint', 'bigint unsigned'), 'numeric(20)',
+    'mysql_type_to_pg: bigint unsigned -> numeric(20)');
+SELECT is(pgclone.mysql_type_to_pg('decimal', 'decimal(10,2)', NULL, 10, 2), 'numeric(10,2)',
+    'mysql_type_to_pg: decimal(10,2) -> numeric(10,2)');
+SELECT is(pgclone.mysql_type_to_pg('varchar', 'varchar(50)', 50), 'varchar(50)',
+    'mysql_type_to_pg: varchar(50) -> varchar(50)');
+SELECT is(pgclone.mysql_type_to_pg('datetime', 'datetime(6)', NULL, NULL, NULL, 6), 'timestamp(6)',
+    'mysql_type_to_pg: datetime(6) -> timestamp(6)');
+SELECT is(pgclone.mysql_type_to_pg('timestamp', 'timestamp(3)', NULL, NULL, NULL, 3), 'timestamptz(3)',
+    'mysql_type_to_pg: timestamp(3) -> timestamptz(3)');
+SELECT is(pgclone.mysql_type_to_pg('time', 'time(3)', NULL, NULL, NULL, 3), 'interval(3)',
+    'mysql_type_to_pg: time(3) -> interval(3) (TIME exceeds 24h)');
+SELECT is(pgclone.mysql_type_to_pg('geometry'), NULL,
+    'mysql_type_to_pg: unsupported type -> NULL');
+SELECT throws_ok(
+    $$SELECT pgclone.table_from_mysql('host=h user=u password=p', 'db', 't')$$,
+    NULL, NULL,
+    'table_from_mysql fails cleanly (no MySQL build, or unreachable server)');
 
 SELECT * FROM finish();
 ROLLBACK;

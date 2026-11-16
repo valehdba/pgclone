@@ -2,6 +2,22 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [4.7.0]
+
+### Added
+- **Clone a table from MySQL / MariaDB into PostgreSQL**: `pgclone.table_from_mysql(mysql_conninfo, mysql_database, mysql_table, include_data, target_schema, target_table, dry_run)`. Reads column and PK/UNIQUE metadata from `information_schema.columns` / `statistics`, creates the table and streams rows (unbuffered `mysql_use_result`) with `COPY` in a single transaction. `dry_run` returns the DDL only; an existing target is never overwritten. Works on tables and views. See "Cloning a Table from MySQL" in `docs/USAGE.md`.
+- `pgclone.mysql_type_to_pg(...)` — the MySQL→PostgreSQL type mapping, callable without a MySQL client.
+- Optional MySQL client build: `make WITH_MYSQL=1 [MYSQL_CONFIG=<mariadb_config|mysql_config>]`; works with libmysqlclient and MariaDB Connector/C. Without it the extension builds unchanged and `table_from_mysql()` raises a descriptive error.
+- New sources `src/pgclone_mysql.c` (mapping, DDL, loader) and `src/pgclone_myc.{c,h}` (client wrapper isolated from PostgreSQL headers).
+- pgTAP test group 31 (plan 153 → 164), `test/test_mysql.sh` integration suite, `Dockerfile.mysql` + `mysql-db` / `test-mysql-pg*` compose services, `./test/run_all.sh mysql`, and a `mysql` CI job.
+
+### Notes
+- The source is read in one `START TRANSACTION WITH CONSISTENT SNAPSHOT` (InnoDB) with the session time zone forced to UTC; `TIMESTAMP` columns load as `timestamptz`.
+- `TINYINT(1)` maps to `smallint` (not `boolean`); `TIME` maps to `interval` (it spans ±838 hours); unsigned integers are widened (`INT UNSIGNED` → `bigint`, `BIGINT UNSIGNED` → `numeric(20)`); zero / partial-zero dates load as NULL (a NOTICE reports how many).
+
+### Limitations
+- Spatial types (`GEOMETRY`, `POINT`, ...) are skipped with a warning; defaults, auto-increment, FK/check constraints, prefix/functional unique indexes and non-unique indexes are not carried over.
+
 ## [4.6.0]
 
 ### Added

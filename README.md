@@ -5,13 +5,14 @@
 [![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](https://github.com/valehdba/pgclone/blob/main/LICENSE)
 [![Version](https://img.shields.io/badge/version-4.5.0-orange)](https://github.com/valehdba/pgclone/releases/tag/v4.5.0)
 
-A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts. Since v4.5.0 it can also pull a table straight out of an **Oracle** database, and since v4.6.0 out of **Microsoft SQL Server**, into PostgreSQL.
+A PostgreSQL extension that clones databases, schemas, tables, and functions between PostgreSQL instances — directly from SQL. No `pg_dump`, no `pg_restore`, no shell scripts. Since v4.5.0 it can also pull a table straight out of an **Oracle** database, since v4.6.0 out of **Microsoft SQL Server**, and since v4.7.0 out of **MySQL / MariaDB**, into PostgreSQL.
 
 ## Key Features
 
 - **Clone anything** - tables, schemas, functions, entire databases, roles and permissions
 - **Oracle → PostgreSQL** - clone an Oracle table (structure, NOT NULL, PK/UNIQUE, data) with automatic type mapping, a `dry_run` DDL preview and an all-or-nothing transaction (optional OCI build)
 - **SQL Server → PostgreSQL** - clone a SQL Server table or view (structure, NOT NULL, PK/UNIQUE, data) with automatic type mapping, a `dry_run` DDL preview and an all-or-nothing transaction (optional FreeTDS build)
+- **MySQL / MariaDB → PostgreSQL** - clone a MySQL table or view (structure, NOT NULL, PK/UNIQUE, data) with automatic type mapping, a consistent InnoDB snapshot, a `dry_run` DDL preview and an all-or-nothing transaction (optional MySQL client build)
 - **Fast data transfer** - uses PostgreSQL COPY protocol
 - **Data masking** - anonymize sensitive columns during cloning (email, name, phone, hash, partial, null, random, constant)
 - **Auto-discovery** - scan source schemas for sensitive columns and get suggested mask rules
@@ -66,6 +67,12 @@ SELECT pgclone.table_from_sqlserver(
     'host=mssql-server port=1433 database=Sales user=sa password=secret',
     'dbo', 'Customers'
 );
+
+-- Clone a table from MySQL / MariaDB (needs the optional MySQL client build, see Installation)
+SELECT pgclone.table_from_mysql(
+    'host=mysql-server port=3306 user=root password=secret',
+    'shop', 'orders'
+);
 ```
 
 ## Requirements
@@ -76,6 +83,7 @@ SELECT pgclone.table_from_sqlserver(
 - GCC or compatible C compiler
 - *Optional, for Oracle cloning:* Oracle Instant Client **Basic/Basic Light + SDK** (provides `oci.h` and `libclntsh`)
 - *Optional, for SQL Server cloning:* FreeTDS development files (`freetds-dev` / `freetds-devel` / `brew install freetds`; provides `sybdb.h` and `libsybdb`)
+- *Optional, for MySQL / MariaDB cloning:* a MySQL C client library with headers (`libmariadb-dev` / `mariadb-connector-c-devel` / `brew install mariadb-connector-c`, or libmysqlclient)
 
 ## Installation
 
@@ -134,6 +142,21 @@ make WITH_SQLSERVER=1 FREETDS_HOME=/opt/homebrew
 
 See [Cloning a Table from SQL Server](docs/USAGE.md#cloning-a-table-from-sql-server-v460) for usage, type mapping and limitations.
 
+### Build with MySQL support (optional)
+
+`pgclone.table_from_mysql()` talks to MySQL / MariaDB through the standard C client API, so it is compiled in only on request. A normal build is unaffected and the function then raises a clear "built without MySQL support" error.
+
+```bash
+# Debian/Ubuntu: sudo apt-get install libmariadb-dev    macOS: brew install mariadb-connector-c
+make WITH_MYSQL=1
+sudo make install WITH_MYSQL=1
+
+# pick a specific client library
+make WITH_MYSQL=1 MYSQL_CONFIG=/opt/homebrew/opt/mariadb-connector-c/bin/mariadb_config
+```
+
+See [Cloning a Table from MySQL](docs/USAGE.md#cloning-a-table-from-mysql-v470) for usage, type mapping and limitations.
+
 ### Troubleshooting: `make install` fails with `llvm-lto: No such file or directory`
 
 If PostgreSQL was itself built `--with-llvm` (check `pg_config --configure | grep llvm`), PGXS also builds a JIT bitcode file for every extension and links it with `llvm-lto`. Some LLVM packages (seen on RHEL/CentOS with a separately-installed `llvm-toolset`, e.g. `llvm20`) don't ship that specific tool, so the build fails like:
@@ -169,11 +192,11 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 
 | Document | Description |
 |----------|-------------|
-| [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, Oracle and SQL Server cloning, and examples |
+| [Usage Guide](docs/USAGE.md) | All functions, parameters, data masking, Oracle, SQL Server and MySQL cloning, and examples |
 | [Async Operations](docs/ASYNC.md) | Background workers, progress tracking, parallel cloning |
-| [Testing](docs/TESTING.md) | Test infrastructure, pgTAP and integration suites (incl. Oracle Free and SQL Server), Docker, CI/CD |
+| [Testing](docs/TESTING.md) | Test infrastructure, pgTAP and integration suites (incl. Oracle Free, SQL Server and MySQL), Docker, CI/CD |
 | [Manual Testing](docs/TESTING_MANUAL.md) | Step-by-step manual test scenarios for all functionalities |
-| [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, Oracle/OCI and SQL Server/FreeTDS isolation, PG version compatibility |
+| [Architecture](docs/ARCHITECTURE.md) | Codebase structure, design decisions, Oracle/OCI, SQL Server/FreeTDS and MySQL client isolation, PG version compatibility |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 
 ## Roadmap
@@ -210,7 +233,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v4.4.4: Auto-discovery of bank account numbers/IBAN; `pgclone.masking_report()` gains a `(conninfo, schema)` overload to audit a remote source directly — issue #23
 - [x] v4.5.0: Clone a table from Oracle into PostgreSQL — `pgclone.table_from_oracle()` with Oracle→PG type mapping, `dry_run`, CLOB/RAW support and an optional OCI build (`WITH_ORACLE=1`); verified in CI against Oracle Free
 - [x] v4.6.0: Clone a table from Microsoft SQL Server into PostgreSQL — `pgclone.table_from_sqlserver()` with SQL Server→PG type mapping, `dry_run`, `NVARCHAR(MAX)`/`VARBINARY`/`UNIQUEIDENTIFIER` support and an optional FreeTDS build (`WITH_SQLSERVER=1`); CI job against SQL Server 2022
-- [ ] v4.7.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
+- [x] v4.7.0: Clone a table from MySQL / MariaDB into PostgreSQL — `pgclone.table_from_mysql()` with MySQL→PG type mapping, `dry_run`, unsigned/`BIT`/`JSON`/`ENUM`/`SET`/`BLOB` support, zero-date handling and an optional client build (`WITH_MYSQL=1`); CI job against MySQL 8.0
+- [ ] v4.8.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License
 

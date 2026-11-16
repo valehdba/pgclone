@@ -4,7 +4,7 @@ PgClone has a comprehensive test suite that runs across PostgreSQL versions 14�
 
 ## Test Suite Overview
 
-The test suite is organized into eight test groups (the Oracle and SQL Server integration suites are described in sections 7 and 8):
+The test suite is organized into nine test groups (the Oracle, SQL Server and MySQL integration suites are described in sections 7, 8 and 9):
 
 ### 1. pgTAP Sync Tests (66 tests)
 
@@ -159,6 +159,42 @@ PGHOST=localhost PGPORT=5434 PGUSER=postgres bash test/test_sqlserver.sh
 
 ---
 
+### 9. MySQL Integration Test (70 checks)
+
+Located in `test/test_mysql.sh`, seeded by `test/fixtures/mysql_seed.sql`. It needs a pgclone built with `WITH_MYSQL=1` and a reachable MySQL (or MariaDB) server, so it is **not** part of the default `./test/run_all.sh` run. CI executes it in the dedicated `mysql` job against MySQL 8.0. It covers:
+
+- `dry_run` output (DDL, `PRIMARY KEY`, `UNIQUE`, skipped `POINT`) and that a dry run creates nothing
+- the MySQL → PostgreSQL column types (unsigned widening, `TINYINT(1)`, `BIT`, `ENUM`/`SET`, `JSON`, `YEAR`, `TIME`, `TIMESTAMP`) and the PK / UNIQUE / `NOT NULL` constraints
+- value fidelity: integer extremes (`INT UNSIGNED`, `BIGINT UNSIGNED`), `DECIMAL`, `FLOAT`/`DOUBLE`, unicode, tabs/backslashes/newlines (COPY escaping), NULLs, a 100,000-character `LONGTEXT`, negative fractional `TIME`, microsecond `DATETIME`, UTC `TIMESTAMP`, `VARBINARY`/`BLOB`, and zero dates loading as NULL
+- a 20,000-row table (several COPY flushes)
+- `include_data => false`, an existing target (never overwritten), a missing table and a wrong password (no leftover table)
+
+The type-mapping function `pgclone.mysql_type_to_pg()` and the "built without MySQL" error path are additionally covered by pgTAP group 31 in `test/pgclone_test.sql`, which runs in the normal PG 14–18 matrix.
+
+#### Running it locally with Docker Compose
+
+```bash
+./test/run_all.sh mysql          # PG 14, 17 and 18 against MySQL 8.0
+./test/run_all.sh mysql 17       # a single PostgreSQL version
+
+# or by hand
+docker compose up -d mysql-db
+docker compose run --rm test-mysql-pg17
+docker compose down -v
+```
+
+`Dockerfile.mysql` builds PostgreSQL + MariaDB Connector/C and compiles pgclone with `WITH_MYSQL=1`. `test/run_mysql_tests.sh` (the container's init script) waits for the `mysql-db` service, seeds it with the `mariadb` client, runs `test/test_mysql.sh` and prints `ALL TESTS PASSED` on success. The seed is re-runnable. Both images are multi-arch, so no emulation is needed on Apple Silicon.
+
+#### Running it against your own MySQL
+
+```bash
+export MYSQL_CONNINFO="host=localhost port=3306 user=root password=... ssl=no"
+mysql -uroot -p < test/fixtures/mysql_seed.sql
+PGHOST=localhost PGPORT=5434 PGUSER=postgres bash test/test_mysql.sh
+```
+
+---
+
 ## Running Tests Locally
 
 ### Prerequisites
@@ -242,6 +278,10 @@ A second job, `oracle`, runs on PostgreSQL 14 and 18. It starts the `gvenzl/orac
 ### SQL Server job
 
 A third job, `sqlserver`, runs on PostgreSQL 14 and 18. It starts the `mcr.microsoft.com/mssql/server:2022-latest` service container, installs FreeTDS (`freetds-dev`, `freetds-bin`), builds pgclone with `WITH_SQLSERVER=1`, seeds SQL Server with `tsql`, starts a target PostgreSQL, and runs `test/test_sqlserver.sh`.
+
+### MySQL job
+
+A fourth job, `mysql`, runs on PostgreSQL 14 and 18. It starts MySQL 8.0 with `docker run` (so it can pass `--default-authentication-plugin=mysql_native_password`), installs `libmariadb-dev` and the MariaDB client, builds pgclone with `WITH_MYSQL=1`, seeds MySQL, starts a target PostgreSQL, and runs `test/test_mysql.sh`.
 
 ### CI Steps
 
