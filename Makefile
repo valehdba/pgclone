@@ -3,7 +3,7 @@
 
 EXTENSION    = pgclone
 MODULE_big   = pgclone
-OBJS         = src/pgclone.o src/pgclone_bgw.o src/pgclone_diff.o src/pgclone_preflight.o src/pgclone_snapshot.o src/pgclone_mask.o src/pgclone_oracle.o src/pgclone_oci.o src/pgclone_sqlserver.o src/pgclone_tds.o
+OBJS         = src/pgclone.o src/pgclone_bgw.o src/pgclone_diff.o src/pgclone_preflight.o src/pgclone_snapshot.o src/pgclone_mask.o src/pgclone_oracle.o src/pgclone_oci.o src/pgclone_sqlserver.o src/pgclone_tds.o src/pgclone_mysql.o src/pgclone_myc.o
 DATA         = $(wildcard sql/pgclone--*.sql)
 
 PG_CPPFLAGS  = -I$(shell $(PG_CONFIG) --includedir) -Isrc
@@ -32,6 +32,21 @@ SHLIB_LINK   += -L$(FREETDS_LIB)
 endif
 PG_CPPFLAGS  += -DPGCLONE_WITH_SQLSERVER
 SHLIB_LINK   += -lsybdb
+endif
+
+# Optional MySQL / MariaDB support for pgclone.table_from_mysql().
+#   make WITH_MYSQL=1 [MYSQL_CONFIG=/path/to/mariadb_config]
+# Needs a MySQL C client library with headers: libmariadb-dev (Debian/Ubuntu),
+# mariadb-connector-c-devel (RHEL), `brew install mariadb-connector-c` or
+# `brew install mysql-client` (macOS). MYSQL_CONFIG is mariadb_config or
+# mysql_config, found on PATH by default.
+ifdef WITH_MYSQL
+MYSQL_CONFIG ?= $(shell command -v mariadb_config 2>/dev/null || command -v mysql_config 2>/dev/null)
+ifeq ($(MYSQL_CONFIG),)
+$(error WITH_MYSQL=1 needs mariadb_config or mysql_config on PATH (or MYSQL_CONFIG=/path/to/it))
+endif
+PG_CPPFLAGS  += -DPGCLONE_WITH_MYSQL $(shell $(MYSQL_CONFIG) --include)
+SHLIB_LINK   += $(shell $(MYSQL_CONFIG) --libs)
 endif
 
 # PostgreSQL Extension build system
