@@ -45,17 +45,26 @@ pgclone/
 │   ├── pgclone_oci.c      # v4.5.0 — OCI wrapper; includes NO PostgreSQL headers
 │   └── pgclone_oci.h      #   - Plain-C API (ora_connect / ora_open / ora_fetch ...)
 │                          #   - Real OCI only with -DPGCLONE_WITH_ORACLE; else stubs
+│   ├── pgclone_sqlserver.c # v4.6.0 — SQL Server → PostgreSQL table clone
+│   │                      #   - pgclone_table_from_sqlserver(), pgclone_sqlserver_type_to_pg()
+│   │                      #   - Metadata (sys.columns / sys.indexes),
+│   │                      #     type mapping, DDL, COPY text-format loader
+│   ├── pgclone_tds.c      # v4.6.0 — FreeTDS wrapper; includes NO PostgreSQL headers
+│   └── pgclone_tds.h      #   - Plain-C API (tds_connect / tds_open / tds_fetch ...)
+│                          #   - Real FreeTDS only with -DPGCLONE_WITH_SQLSERVER; else stubs
 ├── sql/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
 │   ├── fixtures/seed.sql  # Test data
 │   ├── fixtures/oracle_seed.sql # Oracle-side seed for test_oracle.sh
+│   ├── fixtures/sqlserver_seed.sql # SQL Server-side seed for test_sqlserver.sh
 │   ├── pgclone_test.sql   # 66 pgTAP tests (groups 1–20)
 │   ├── test_loopback.sh   # 21 loopback-DDL tests (roles, verify, report, DDM)
 │   ├── run_tests.sh       # Test orchestrator
 │   ├── run_all.sh         # Multi-version runner
 │   ├── test_async.sh      # Async test suite (21 tests incl. worker pool)
 │   ├── test_oracle.sh     # Oracle integration test (needs Oracle; run by CI job `oracle`)
+│   ├── test_sqlserver.sh  # SQL Server integration test (needs SQL Server; run by CI job `sqlserver`)
 │   └── test_database_create.sh
 ├── .github/workflows/ci.yml  # GitHub Actions CI (PG 14–18 matrix)
 ├── Dockerfile             # Multi-version build container
@@ -179,6 +188,17 @@ When masks are specified without an explicit column list, pgclone queries `pg_ca
 - **Metadata.** Columns come from `ALL_TAB_COLUMNS` (which already omits hidden columns), constraints from `ALL_CONSTRAINTS` / `ALL_CONS_COLUMNS` (enabled `P` and `U` only). `map_oracle_type()` turns each column into a PostgreSQL type; unsupported types are skipped with a WARNING and any constraint touching them is dropped with a NOTICE.
 - **Data path.** Every value is fetched as text (numbers and datetimes through explicit `TO_CHAR` formats, with `NLS_NUMERIC_CHARACTERS='.,'` and the session time zone forced to UTC so output is locale-independent), `RAW` as bytes, and `CLOB`/`NCLOB` through a LOB locator read with streaming `OCILobRead2` (a plain character define silently truncates at 64 KB because OCI reports lengths in 16 bits). Rows are escaped into COPY text format and streamed with `PQputCopyData` in ~64 KB batches.
 - **Atomicity and consistency.** The Oracle side runs under `SET TRANSACTION READ ONLY` (one consistent snapshot). The PostgreSQL side does `BEGIN`, `CREATE TABLE`, `COPY`, `COMMIT`, with a `ROLLBACK` in the error path, so a failure leaves no partial table. An existing target is never overwritten.
+
+---
+
+### SQL Server → PostgreSQL cloning (v4.6.0)
+
+`pgclone.table_from_sqlserver()` mirrors the Oracle path: SQL Server is read through FreeTDS and PostgreSQL is loaded over the loopback libpq connection.
+
+- **FreeTDS isolation.** `sybdb.h` and `postgres.h` both define `BOOL`, `TRUE` and `FALSE`, so they cannot share a translation unit. All DB-Library calls live in `pgclone_tds.c`, behind the PostgreSQL-free interface in `pgclone_tds.h`; `pgclone_sqlserver.c` only sees that interface. Without `-DPGCLONE_WITH_SQLSERVER` the file compiles to stubs that report "built without SQL Server support". DB-Library reports errors through process-global callbacks; the wrapper records the last message in a static buffer (safe: a backend is single-threaded).
+- **Metadata.** Columns come from `sys.columns` / `sys.types` (base type via `TYPE_NAME(system_type_id)`, so alias types such as `sysname` resolve), constraints from `sys.indexes` / `sys.index_columns` (enabled primary keys and unique constraints, key columns only). `map_sqlserver_type()` maps each column; unsupported types are skipped with a WARNING and constraints touching them are dropped with a NOTICE.
+- **Data path.** Every column is converted to text on the server with fixed, locale-independent `CONVERT` styles (23 / 121 / 127 for dates and times, 3 for floats, 2 for money), text columns go through `NVARCHAR(MAX)` so the server handles code-page conversion and FreeTDS delivers UTF-8, and binary columns come back as hex digits. Rows are escaped into COPY text format and streamed with `PQputCopyData` in ~64 KB batches.
+- **Atomicity and consistency.** When the source database has `ALLOW_SNAPSHOT_ISOLATION` on, the copy runs inside a `SNAPSHOT` transaction; otherwise a NOTICE is raised and it reads at READ COMMITTED. The PostgreSQL side does `BEGIN`, `CREATE TABLE`, `COPY`, `COMMIT`, with a `ROLLBACK` in the error path, so a failure leaves no partial table. An existing target is never overwritten.
 
 ---
 

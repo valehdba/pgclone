@@ -1,0 +1,32 @@
+# Test image for pgclone.table_from_sqlserver(): PostgreSQL + FreeTDS,
+# pgclone built with WITH_SQLSERVER=1. Used by the test-sqlserver-pg* compose services.
+#
+#   docker compose up -d sqlserver-db     # SQL Server 2022 (x86-64 image)
+#   docker compose run --rm test-sqlserver-pg17
+ARG PG_VERSION=18
+FROM postgres:${PG_VERSION}
+
+RUN apt-get update && apt-get install -y \
+        build-essential \
+        postgresql-server-dev-${PG_MAJOR} \
+        libpq-dev \
+        freetds-dev \
+        freetds-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /build/pgclone
+WORKDIR /build/pgclone
+
+RUN make clean && make WITH_SQLSERVER=1 \
+    && make install WITH_SQLSERVER=1 \
+    && ldd "$(pg_config --pkglibdir)/pgclone.so" | grep -i sybdb
+
+# shared_preload_libraries + restart (same approach as the main Dockerfile)
+RUN echo '#!/bin/bash' > /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'echo "shared_preload_libraries = '\''pgclone'\''" >> "$PGDATA/postgresql.conf"' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'echo "max_worker_processes = 32" >> "$PGDATA/postgresql.conf"' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'pg_ctl -D "$PGDATA" -m fast -w restart' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    chmod +x /docker-entrypoint-initdb.d/00-configure-pgclone.sh
+
+COPY test/run_sqlserver_tests.sh /docker-entrypoint-initdb.d/99-run-sqlserver-tests.sh
+RUN chmod +x /docker-entrypoint-initdb.d/99-run-sqlserver-tests.sh

@@ -23,6 +23,7 @@ Complete reference for all pgclone functions and options.
 - [Clone Verification](#clone-verification-v350)
 - [GDPR/Compliance Masking Report](#gdprcompliance-masking-report-v360)
 - [Cloning a Table from Oracle](#cloning-a-table-from-oracle-v450)
+- [Cloning a Table from SQL Server](#cloning-a-table-from-sql-server-v460)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -1161,6 +1162,101 @@ skipped column are skipped with a NOTICE.
 Defaults, check/foreign-key constraints, non-unique indexes, triggers, comments,
 partitioning, identity columns, and masking/`WHERE` filtering are not handled for
 Oracle sources.
+
+## Cloning a Table from SQL Server (v4.6.0)
+
+`pgclone.table_from_sqlserver()` copies a table (or view) from a Microsoft SQL Server
+database into PostgreSQL: structure, `NOT NULL`, `PRIMARY KEY` / `UNIQUE` constraints and,
+optionally, the data. It works exactly like [`table_from_oracle()`](#cloning-a-table-from-oracle-v450).
+
+### Build requirement
+
+SQL Server support is **optional** and compiled in only when FreeTDS (DB-Library,
+`sybdb.h` + `libsybdb`) is available. Without it the extension builds as before and
+`table_from_sqlserver()` raises a clear error.
+
+```bash
+# Debian/Ubuntu: sudo apt-get install freetds-dev    macOS: brew install freetds
+make WITH_SQLSERVER=1
+sudo make install WITH_SQLSERVER=1
+
+# FreeTDS in a non-standard prefix
+make WITH_SQLSERVER=1 FREETDS_HOME=/opt/homebrew
+```
+
+The PostgreSQL server process must be able to load `libsybdb` at runtime. Connections use
+TDS 7.4 (SQL Server 2012 or later) and UTF-8.
+
+### Usage
+
+```sql
+-- Always preview first: returns the generated DDL, creates nothing.
+SELECT pgclone.table_from_sqlserver(
+    'host=mssql.example.com port=1433 database=Sales user=reader password=secret',
+    'dbo', 'Customers',
+    dry_run => true);
+
+-- Clone structure + data into public.customers
+SELECT pgclone.table_from_sqlserver(
+    'host=mssql.example.com database=Sales user=reader password=secret',
+    'dbo', 'Customers');
+
+-- Custom target, structure only; password from the server environment
+SELECT pgclone.table_from_sqlserver(
+    'host=mssql.example.com database=Sales user=reader',   -- PGCLONE_SQLSERVER_PASSWORD
+    'dbo', 'Customers',
+    include_data => false, target_schema => 'staging', target_table => 'cust');
+```
+
+| Argument | Default | Meaning |
+|----------|---------|---------|
+| `sqlserver_conninfo` | — | `host= [port=1433] [database=] user= password= [encrypt=yes\|no]`. `server=` is accepted for `host=` and `dbname=` for `database=`. If `password` is omitted it is read from the `PGCLONE_SQLSERVER_PASSWORD` environment variable of the server process. `encrypt` overrides FreeTDS' default (`freetds.conf`). |
+| `sqlserver_schema`, `sqlserver_table` | — | Schema (e.g. `dbo`) and table/view name. Matching follows the database collation (case-insensitive by default). |
+| `include_data` | `true` | Copy rows (streamed with `COPY`). |
+| `target_schema` | `public` | Must already exist. |
+| `target_table` | lower-cased SQL Server name | The target must **not** exist — the call never drops or overwrites anything. |
+| `dry_run` | `false` | Return the DDL only. |
+
+The whole operation (DDL + data) runs in one PostgreSQL transaction, so a failure
+leaves nothing behind. If the source database has `ALLOW_SNAPSHOT_ISOLATION ON`, the
+SQL Server side is read in one `SNAPSHOT` transaction (a consistent copy); otherwise a
+NOTICE is raised and rows are read at `READ COMMITTED`. Column names are lower-cased.
+
+### Type mapping
+
+`pgclone.sqlserver_type_to_pg(data_type, max_length, "precision", scale)` returns the mapping
+without needing a SQL Server connection. `max_length` is in **bytes**, as in `sys.columns`
+(`-1` = `MAX`); for `time`, `datetime2` and `datetimeoffset` pass the fractional-seconds
+precision as `scale`.
+
+| SQL Server | PostgreSQL |
+|------------|-----------|
+| `bit` | `boolean` |
+| `tinyint`, `smallint` / `int` / `bigint` | `smallint` / `integer` / `bigint` |
+| `decimal(p,s)`, `numeric(p,s)` | `numeric(p,s)` |
+| `money` / `smallmoney` | `numeric(19,4)` / `numeric(10,4)` |
+| `real`, `float` | `real` (`float(n)` with n ≤ 24 too) / `double precision` |
+| `char(n)`, `nchar(n)` | `char(n)` |
+| `varchar(n)`, `nvarchar(n)` | `varchar(n)` (n in characters) |
+| `varchar(max)`, `nvarchar(max)`, `text`, `ntext`, `xml` | `text` |
+| `date` | `date` |
+| `time(n)` | `time(min(n,6))` — 100 ns digits are rounded to microseconds |
+| `datetime` / `smalldatetime` | `timestamp(3)` / `timestamp(0)` |
+| `datetime2(n)` | `timestamp(min(n,6))` |
+| `datetimeoffset(n)` | `timestamptz(min(n,6))` |
+| `uniqueidentifier` | `uuid` |
+| `binary`, `varbinary`, `image`, `rowversion` / `timestamp` | `bytea` |
+
+Columns of any other type (`sql_variant`, `hierarchyid`, `geography`, `geometry`,
+CLR user-defined types) are **skipped with a WARNING**; constraints that involve a
+skipped column are skipped with a NOTICE. Computed columns are copied as plain columns
+holding their current values.
+
+### Not (yet) cloned
+
+Defaults, identity properties, check/foreign-key constraints, non-unique indexes,
+triggers, comments, partitioning, and masking/`WHERE` filtering are not handled for
+SQL Server sources.
 
 ## JSON Options Reference
 

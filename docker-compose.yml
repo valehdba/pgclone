@@ -138,3 +138,58 @@ services:
     depends_on:
       oracle-db:
         condition: service_healthy
+
+  # ---- SQL Server -> PostgreSQL tests (pgclone.table_from_sqlserver) ----
+  # The SQL Server image is published for x86-64 only; on Apple Silicon it runs
+  # under emulation (enable Rosetta in Docker Desktop). Needs >= 2 GB RAM.
+  sqlserver-db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Pgclone_Test1
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/1433'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  test-sqlserver-pg14:
+    build:
+      context: .
+      dockerfile: Dockerfile.sqlserver
+      args:
+        PG_VERSION: "14"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      sqlserver-db:
+        condition: service_healthy
+
+  test-sqlserver-pg17:
+    build:
+      context: .
+      dockerfile: Dockerfile.sqlserver
+      args:
+        PG_VERSION: "17"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      sqlserver-db:
+        condition: service_healthy
+
+  test-sqlserver-pg18:
+    build:
+      context: .
+      dockerfile: Dockerfile.sqlserver
+      args:
+        PG_VERSION: "18"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      sqlserver-db:
+        condition: service_healthy
