@@ -24,6 +24,7 @@ Complete reference for all pgclone functions and options.
 - [GDPR/Compliance Masking Report](#gdprcompliance-masking-report-v360)
 - [Cloning a Table from Oracle](#cloning-a-table-from-oracle-v450)
 - [Cloning a Table from SQL Server](#cloning-a-table-from-sql-server-v460)
+- [Cloning a Table from MySQL / MariaDB](#cloning-a-table-from-mysql-v470)
 - [JSON Options Reference](#json-options-reference)
 - [Function Reference](#function-reference)
 - [Current Limitations](#current-limitations)
@@ -1257,6 +1258,105 @@ holding their current values.
 Defaults, identity properties, check/foreign-key constraints, non-unique indexes,
 triggers, comments, partitioning, and masking/`WHERE` filtering are not handled for
 SQL Server sources.
+
+## Cloning a Table from MySQL (v4.7.0)
+
+`pgclone.table_from_mysql()` copies a table (or view) from a MySQL or MariaDB database
+into PostgreSQL: structure, `NOT NULL`, `PRIMARY KEY` / `UNIQUE` constraints and,
+optionally, the data. It works like [`table_from_oracle()`](#cloning-a-table-from-oracle-v450)
+and [`table_from_sqlserver()`](#cloning-a-table-from-sql-server-v460).
+
+### Build requirement
+
+MySQL support is **optional** and compiled in only when a MySQL C client library
+(libmysqlclient or MariaDB Connector/C, with headers) is available. Without it the
+extension builds as before and `table_from_mysql()` raises a clear error.
+
+```bash
+# Debian/Ubuntu: sudo apt-get install libmariadb-dev    macOS: brew install mariadb-connector-c
+make WITH_MYSQL=1
+sudo make install WITH_MYSQL=1
+
+# pick a specific client library
+make WITH_MYSQL=1 MYSQL_CONFIG=/opt/homebrew/opt/mariadb-connector-c/bin/mariadb_config
+```
+
+`MYSQL_CONFIG` is `mariadb_config` or `mysql_config` (found on `PATH` by default). The
+PostgreSQL server process must be able to load the client library at runtime.
+
+### Usage
+
+```sql
+-- Always preview first: returns the generated DDL, creates nothing.
+SELECT pgclone.table_from_mysql(
+    'host=mysql.example.com port=3306 user=reader password=secret',
+    'shop', 'orders',
+    dry_run => true);
+
+-- Clone structure + data into public.orders
+SELECT pgclone.table_from_mysql(
+    'host=mysql.example.com user=reader password=secret',
+    'shop', 'orders');
+
+-- Custom target, structure only; password from the server environment
+SELECT pgclone.table_from_mysql(
+    'host=mysql.example.com user=reader',          -- PGCLONE_MYSQL_PASSWORD
+    'shop', 'orders',
+    include_data => false, target_schema => 'staging', target_table => 'ord');
+```
+
+| Argument | Default | Meaning |
+|----------|---------|---------|
+| `mysql_conninfo` | — | `host= [port=3306] user= password= [ssl=yes\|no]`. If `password` is omitted it is read from the `PGCLONE_MYSQL_PASSWORD` environment variable of the server process. `ssl` overrides the client library's default (use `ssl=no` for a server with a self-signed certificate on a trusted network). Connections always use TCP, so `host=localhost` never means a unix socket. |
+| `mysql_database`, `mysql_table` | — | The MySQL database (MySQL's "schema") and table/view name. Name matching follows the server's `lower_case_table_names` setting. |
+| `include_data` | `true` | Copy rows (streamed with `COPY`). |
+| `target_schema` | `public` | Must already exist. |
+| `target_table` | lower-cased MySQL name | The target must **not** exist — the call never drops or overwrites anything. |
+| `dry_run` | `false` | Return the DDL only. |
+
+The whole operation (DDL + data) runs in one PostgreSQL transaction, so a failure leaves
+nothing behind. The MySQL side is read inside `START TRANSACTION WITH CONSISTENT SNAPSHOT`
+at `REPEATABLE READ`, so an InnoDB table is copied as one consistent snapshot (MyISAM
+tables are not transactional). The session time zone is forced to UTC and `sql_mode`
+is cleared for the read. Column names are lower-cased.
+
+### Type mapping
+
+`pgclone.mysql_type_to_pg(data_type, column_type, char_length, numeric_precision, numeric_scale, datetime_precision)`
+returns the mapping without needing a MySQL connection; the arguments are the columns of
+`information_schema.columns` of the same names (`column_type` is only used to detect
+`unsigned`; for `BIT` pass the width as `numeric_precision`).
+
+| MySQL | PostgreSQL |
+|-------|-----------|
+| `TINYINT` (incl. `TINYINT(1)`), `SMALLINT` | `smallint` |
+| `SMALLINT UNSIGNED`, `MEDIUMINT`, `INT` | `integer` |
+| `INT UNSIGNED`, `BIGINT` | `bigint` |
+| `BIGINT UNSIGNED` | `numeric(20)` |
+| `DECIMAL(p,s)` | `numeric(p,s)` |
+| `FLOAT` / `DOUBLE` | `real` / `double precision` |
+| `BIT(n)` | `bit(n)` |
+| `CHAR(n)`, `VARCHAR(n)` | `char(n)`, `varchar(n)` (n in characters) |
+| `TINYTEXT`, `TEXT`, `MEDIUMTEXT`, `LONGTEXT`, `ENUM`, `SET` | `text` (`SET` as comma-separated text) |
+| `JSON` | `jsonb` |
+| `YEAR` | `smallint` |
+| `DATE` | `date` (zero / partial-zero dates become NULL) |
+| `TIME(n)` | `interval(n)` — MySQL `TIME` spans ±838 hours, which `time` cannot hold |
+| `DATETIME(n)` | `timestamp(n)` |
+| `TIMESTAMP(n)` | `timestamptz(n)` (read in UTC) |
+| `BINARY`, `VARBINARY`, `*BLOB` | `bytea` |
+
+`TINYINT(1)` is deliberately **not** mapped to `boolean`, because MySQL allows any value in
+it; convert it afterwards if you know it is a flag. Columns of any other type (`GEOMETRY`,
+`POINT`, `LINESTRING`, `POLYGON`, `MULTI*`, `GEOMETRYCOLLECTION`, `VECTOR`) are **skipped
+with a WARNING**; indexes that involve a skipped column, a column prefix or an expression
+are skipped with a NOTICE. MariaDB's `JSON` is an alias of `LONGTEXT`, so there it clones as
+`text`.
+
+### Not (yet) cloned
+
+Defaults, `AUTO_INCREMENT`, check/foreign-key constraints, non-unique indexes, triggers,
+comments, partitioning, and masking/`WHERE` filtering are not handled for MySQL sources.
 
 ## JSON Options Reference
 

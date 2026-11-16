@@ -1,0 +1,32 @@
+# Test image for pgclone.table_from_mysql(): PostgreSQL + MariaDB Connector/C,
+# pgclone built with WITH_MYSQL=1. Used by the test-mysql-pg* compose services.
+#
+#   docker compose up -d mysql-db         # MySQL 8.0
+#   docker compose run --rm test-mysql-pg17
+ARG PG_VERSION=18
+FROM postgres:${PG_VERSION}
+
+RUN apt-get update && apt-get install -y \
+        build-essential \
+        postgresql-server-dev-${PG_MAJOR} \
+        libpq-dev \
+        libmariadb-dev \
+        mariadb-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /build/pgclone
+WORKDIR /build/pgclone
+
+RUN make clean && make WITH_MYSQL=1 \
+    && make install WITH_MYSQL=1 \
+    && ldd "$(pg_config --pkglibdir)/pgclone.so" | grep -i mariadb
+
+# shared_preload_libraries + restart (same approach as the main Dockerfile)
+RUN echo '#!/bin/bash' > /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'echo "shared_preload_libraries = '\''pgclone'\''" >> "$PGDATA/postgresql.conf"' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'echo "max_worker_processes = 32" >> "$PGDATA/postgresql.conf"' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    echo 'pg_ctl -D "$PGDATA" -m fast -w restart' >> /docker-entrypoint-initdb.d/00-configure-pgclone.sh && \
+    chmod +x /docker-entrypoint-initdb.d/00-configure-pgclone.sh
+
+COPY test/run_mysql_tests.sh /docker-entrypoint-initdb.d/99-run-mysql-tests.sh
+RUN chmod +x /docker-entrypoint-initdb.d/99-run-mysql-tests.sh

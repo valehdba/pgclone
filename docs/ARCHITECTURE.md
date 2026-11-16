@@ -52,12 +52,20 @@ pgclone/
 │   ├── pgclone_tds.c      # v4.6.0 — FreeTDS wrapper; includes NO PostgreSQL headers
 │   └── pgclone_tds.h      #   - Plain-C API (tds_connect / tds_open / tds_fetch ...)
 │                          #   - Real FreeTDS only with -DPGCLONE_WITH_SQLSERVER; else stubs
+│   ├── pgclone_mysql.c    # v4.7.0 — MySQL / MariaDB → PostgreSQL table clone
+│   │                      #   - pgclone_table_from_mysql(), pgclone_mysql_type_to_pg()
+│   │                      #   - Metadata (information_schema), type mapping, DDL,
+│   │                      #     COPY text-format loader
+│   ├── pgclone_myc.c      # v4.7.0 — MySQL client wrapper; includes NO PostgreSQL headers
+│   └── pgclone_myc.h      #   - Plain-C API (myc_connect / myc_open / myc_fetch ...)
+│                          #   - Real client only with -DPGCLONE_WITH_MYSQL; else stubs
 ├── sql/
 │   └── pgclone--X.Y.Z.sql # SQL function definitions per version
 ├── test/
 │   ├── fixtures/seed.sql  # Test data
 │   ├── fixtures/oracle_seed.sql # Oracle-side seed for test_oracle.sh
 │   ├── fixtures/sqlserver_seed.sql # SQL Server-side seed for test_sqlserver.sh
+│   ├── fixtures/mysql_seed.sql # MySQL-side seed for test_mysql.sh
 │   ├── pgclone_test.sql   # 66 pgTAP tests (groups 1–20)
 │   ├── test_loopback.sh   # 21 loopback-DDL tests (roles, verify, report, DDM)
 │   ├── run_tests.sh       # Test orchestrator
@@ -65,6 +73,7 @@ pgclone/
 │   ├── test_async.sh      # Async test suite (21 tests incl. worker pool)
 │   ├── test_oracle.sh     # Oracle integration test (needs Oracle; run by CI job `oracle`)
 │   ├── test_sqlserver.sh  # SQL Server integration test (needs SQL Server; run by CI job `sqlserver`)
+│   ├── test_mysql.sh      # MySQL integration test (needs MySQL; run by CI job `mysql`)
 │   └── test_database_create.sh
 ├── .github/workflows/ci.yml  # GitHub Actions CI (PG 14–18 matrix)
 ├── Dockerfile             # Multi-version build container
@@ -199,6 +208,18 @@ When masks are specified without an explicit column list, pgclone queries `pg_ca
 - **Metadata.** Columns come from `sys.columns` / `sys.types` (base type via `TYPE_NAME(system_type_id)`, so alias types such as `sysname` resolve), constraints from `sys.indexes` / `sys.index_columns` (enabled primary keys and unique constraints, key columns only). `map_sqlserver_type()` maps each column; unsupported types are skipped with a WARNING and constraints touching them are dropped with a NOTICE.
 - **Data path.** Every column is converted to text on the server with fixed, locale-independent `CONVERT` styles (23 / 121 / 127 for dates and times, 3 for floats, 2 for money), text columns go through `NVARCHAR(MAX)` so the server handles code-page conversion and FreeTDS delivers UTF-8, and binary columns come back as hex digits. Rows are escaped into COPY text format and streamed with `PQputCopyData` in ~64 KB batches.
 - **Atomicity and consistency.** When the source database has `ALLOW_SNAPSHOT_ISOLATION` on, the copy runs inside a `SNAPSHOT` transaction; otherwise a NOTICE is raised and it reads at READ COMMITTED. The PostgreSQL side does `BEGIN`, `CREATE TABLE`, `COPY`, `COMMIT`, with a `ROLLBACK` in the error path, so a failure leaves no partial table. An existing target is never overwritten.
+
+---
+
+### MySQL / MariaDB → PostgreSQL cloning (v4.7.0)
+
+`pgclone.table_from_mysql()` follows the same shape as the Oracle and SQL Server paths: the source is read through its C client API and PostgreSQL is loaded over the loopback libpq connection.
+
+- **Client isolation.** `mysql.h` is kept out of the PostgreSQL translation units (conflicting typedefs, and its `mysql_*` names are easy to confuse with ours). All client calls live in `pgclone_myc.c` behind the `myc_*` interface in `pgclone_myc.h`. Without `-DPGCLONE_WITH_MYSQL` the file compiles to stubs that report "built without MySQL support". The same code builds against libmysqlclient and MariaDB Connector/C; the one divergence (TLS option names) is selected with `MARIADB_PACKAGE_VERSION`.
+- **Streaming.** Rows are read with `mysql_use_result()` (unbuffered), so memory stays flat for large tables. The wrapper embeds the `MYSQL` handle so that, on an error path, `myc_disconnect()` can drop the connection first and free the half-read result afterwards, instead of reading the rest of the table just to discard it.
+- **Metadata.** Columns come from `information_schema.columns` (type, `column_type` for `unsigned`, precisions, nullability), unique keys from `information_schema.statistics` (`PRIMARY` becomes the primary key). Indexes over a skipped column, a column prefix or an expression are dropped with a NOTICE.
+- **Data path.** The session is pinned to `time_zone = '+00:00'` and `sql_mode = ''`, so `TIMESTAMP` values are UTC (loaded as `timestamptz`) and backslash escapes behave predictably. Binary columns are selected as `HEX()`, `BIT(n)` as a zero-padded bit string; zero and partial-zero dates, which PostgreSQL rejects, are loaded as NULL and counted in a NOTICE. Rows are escaped into COPY text format and streamed with `PQputCopyData` in ~64 KB batches.
+- **Atomicity and consistency.** The MySQL side runs under `START TRANSACTION WITH CONSISTENT SNAPSHOT` at `REPEATABLE READ` (a consistent InnoDB snapshot). The PostgreSQL side does `BEGIN`, `CREATE TABLE`, `COPY`, `COMMIT`, with a `ROLLBACK` in the error path, so a failure leaves no partial table. An existing target is never overwritten.
 
 ---
 

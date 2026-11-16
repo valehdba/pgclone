@@ -193,3 +193,58 @@ services:
     depends_on:
       sqlserver-db:
         condition: service_healthy
+
+  # ---- MySQL -> PostgreSQL tests (pgclone.table_from_mysql) ----
+  # mysql_native_password keeps the test client simple (no RSA key exchange
+  # needed on a non-TLS connection); the extension itself speaks whatever the
+  # client library supports.
+  mysql-db:
+    image: mysql:8.0
+    command: ["--default-authentication-plugin=mysql_native_password"]
+    environment:
+      MYSQL_ROOT_PASSWORD: Pgclone_Test1
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pPgclone_Test1 --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 15s
+
+  test-mysql-pg14:
+    build:
+      context: .
+      dockerfile: Dockerfile.mysql
+      args:
+        PG_VERSION: "14"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+
+  test-mysql-pg17:
+    build:
+      context: .
+      dockerfile: Dockerfile.mysql
+      args:
+        PG_VERSION: "17"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+
+  test-mysql-pg18:
+    build:
+      context: .
+      dockerfile: Dockerfile.mysql
+      args:
+        PG_VERSION: "18"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+    depends_on:
+      mysql-db:
+        condition: service_healthy
