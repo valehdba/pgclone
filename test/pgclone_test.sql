@@ -957,9 +957,9 @@ SELECT results_eq(
     'c24_ignore: data was loaded into the existing table (1 seeded + 4 new)');
 
 SELECT results_eq(
-    $$SELECT count(*)::integer FROM pg_constraint WHERE conrelid = 'public.c24_ignore'::regclass$$,
+    $$SELECT count(*)::integer FROM pg_constraint WHERE conrelid = 'public.c24_ignore'::regclass AND contype <> 'n'$$,
     ARRAY[0],
-    'c24_ignore: existing definition untouched — no constraints were added');
+    'c24_ignore: existing definition untouched — no constraints were added (PG18 stores NOT NULL as contype n, ignored)');
 
 -- ============================================================
 -- TEST GROUP 29: issue #23 — auto-discover bank account numbers,
