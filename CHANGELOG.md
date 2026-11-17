@@ -2,10 +2,9 @@
 
 All notable changes to pgclone are documented in this file.
 
-## [Unreleased]
+## [4.8.0]
 
-### Docs
-- README: add an "Upgrading" section — restart PostgreSQL after `make install` and before `ALTER EXTENSION pgclone UPDATE` (a stale preloaded library causes `could not find function ... in file pgclone.so`, issue #35).
+This release has no SQL-level changes; after `make install`, **restart PostgreSQL**, then `ALTER EXTENSION pgclone UPDATE`.
 
 ### Added
 - `"conflict": "ignore"` (discussion #24): if the target table already exists, keep its definition (skip table DDL, constraints, indexes, triggers) and still load the data. Works in the sync and async paths.
@@ -13,6 +12,15 @@ All notable changes to pgclone are documented in this file.
 ### Fixed
 - **Partitioned tables clone correctly (issue #38).** `pgclone.schema()`, `schema_async()` (including the parallel pool) and `table_async()` used to create a partitioned parent as a plain table and then abort with `cannot copy from partitioned table`. A partitioned parent is now created with `PARTITION BY`, each partition with `PARTITION OF <parent> FOR VALUES ...` (sub-partitioning included), and rows are copied once, from leaf partitions only. Partitions inherit the parent's primary key / indexes / triggers instead of having them cloned twice, and the table list is ordered so parents exist before their partitions (a pool worker waits for the parent). `pgclone.table()` on a partitioned parent creates just the parent; clone the schema (or each partition) to get the partitions.
 - **Generated columns stay generated, and COPY skips them.** `CREATE TABLE` reconstruction treated every `pg_attrdef` entry as a `DEFAULT`, so `GENERATED ALWAYS AS (...) STORED` columns (and PostgreSQL 18 `VIRTUAL` columns) were cloned as ordinary defaults. Once a column stays generated, a bare `COPY table` fails on the way in (`column "..." is a generated column`). Table DDL now emits `GENERATED ALWAYS AS (...) STORED` or `VIRTUAL`, and both the synchronous COPY path and the background worker omit generated columns so the target recomputes them. Ordinary defaults are unchanged. A generated column named in an explicit `"columns"` list is still rejected by the server; leave those columns out of the list. Virtual generated columns need PostgreSQL 18 on the target.
+- **`table_async()` on tables with `serial` / `bigserial` columns (issue #33).** The single-table background path created the table without its sequence (`relation "..._id_seq" does not exist`). It now pre-creates the dependent sequences before `CREATE TABLE` and replays their current values after the copy, like `pgclone.table()`.
+- **Background workers ignored SIGTERM on PostgreSQL 17+.** The worker's SIGTERM handler only sets `ShutdownRequestPending`, which `CHECK_FOR_INTERRUPTS()` does not service, so `pg_terminate_backend()` and server shutdown waited for the whole copy. Interrupt checks now also test that flag (`PGCLONE_CHECK_SHUTDOWN()`), and the COPY loop checks for interrupts, so a killed worker marks its job `failed` ("worker exited unexpectedly").
+
+### Changed
+- `test/test_chaos.sh` now actually exercises worker/coordinator termination: PIDs come from `pg_stat_activity`, workers are sent SIGTERM (SIGKILL crash-restarts the server), and the fixture is large enough to outlast the signal. Previously the tests passed without killing anything.
+- New `test/test_partitions.sh` and async test 9 (`bigserial`); pgTAP plan 164 -> 168 (`conflict=ignore`) and group 32 (generated columns).
+
+### Docs
+- README: add an "Upgrading" section — restart PostgreSQL after `make install` and before `ALTER EXTENSION pgclone UPDATE` (a stale preloaded library causes `could not find function ... in file pgclone.so`, issue #35).
 
 ## [4.7.0]
 
