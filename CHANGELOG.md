@@ -4,6 +4,9 @@ All notable changes to pgclone are documented in this file.
 
 ## [Unreleased]
 
+### Docs
+- README: add an "Upgrading" section — restart PostgreSQL after `make install` and before `ALTER EXTENSION pgclone UPDATE` (a stale preloaded library causes `could not find function ... in file pgclone.so`, issue #35).
+
 ### Added
 - `"conflict": "ignore"` (discussion #24): if the target table already exists, keep its definition (skip table DDL, constraints, indexes, triggers) and still load the data. Works in the sync and async paths.
 
