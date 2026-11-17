@@ -279,6 +279,46 @@ POOL_WORKERS=$(psql -U postgres -d target_db -tAc "
 POOL_WORKERS=$(echo "$POOL_WORKERS" | tr -d '[:space:]')
 run_test "Pool workers visible in jobs_view" "[ '$POOL_WORKERS' -ge 1 ]"
 
+# ============================================================
+# TEST 9: table_async on a table with a bigserial column (issue #33)
+# The worker must pre-create the sequence before CREATE TABLE and
+# replay its current value after the copy.
+# ============================================================
+echo ""
+echo "---- TEST 9: table_async with a bigserial column ----"
+
+PGPASSWORD=testpass psql -h source-db -U postgres -d source_db >/dev/null <<SQL
+    DROP TABLE IF EXISTS public.async_seq_test CASCADE;
+    CREATE TABLE public.async_seq_test (id bigserial PRIMARY KEY, label text);
+    INSERT INTO public.async_seq_test (label) VALUES ('a'), ('b'), ('c');
+SQL
+psql -U postgres -d target_db -c "DROP TABLE IF EXISTS public.async_seq_test CASCADE" >/dev/null 2>&1 || true
+
+JOB_ID9=$(psql -U postgres -d target_db -tAc "
+    SELECT pgclone.table_async('${SOURCE_CONNINFO}', 'public', 'async_seq_test', true);
+" | tr -d '[:space:]')
+
+for i in $(seq 1 30); do
+    STATUS9=$(psql -U postgres -d target_db -tAc "
+        SELECT status FROM pgclone.jobs_view WHERE job_id = $JOB_ID9;
+    " 2>/dev/null | tr -d '[:space:]' || echo "unknown")
+    if [ "$STATUS9" = "completed" ] || [ "$STATUS9" = "failed" ]; then
+        break
+    fi
+    sleep 1
+done
+
+run_test "bigserial table_async job completed" "[ '$STATUS9' = 'completed' ]"
+
+ROWS9=$(psql -U postgres -d target_db -tAc "SELECT count(*) FROM public.async_seq_test;" 2>/dev/null | tr -d '[:space:]' || echo 0)
+run_test "bigserial table_async copied 3 rows" "[ '$ROWS9' = '3' ]"
+
+NEXT9=$(psql -U postgres -d target_db -tAc "INSERT INTO public.async_seq_test (label) VALUES ('d') RETURNING id;" 2>/dev/null | head -1 | tr -d '[:space:]' || echo 0)
+run_test "sequence continues after copied ids (next id = 4)" "[ '$NEXT9' = '4' ]"
+
+PGPASSWORD=testpass psql -h source-db -U postgres -d source_db -c "DROP TABLE IF EXISTS public.async_seq_test CASCADE" >/dev/null 2>&1 || true
+psql -U postgres -d target_db -c "DROP TABLE IF EXISTS public.async_seq_test CASCADE" >/dev/null 2>&1 || true
+
 # Clean up for final test
 psql -U postgres -d target_db -c "SELECT pgclone.clear_jobs();" 2>/dev/null || true
 
