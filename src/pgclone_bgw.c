@@ -431,6 +431,83 @@ bgw_handle_conflict(PGconn *local_conn, const char *schema_name,
 }
 
 /* ---------------------------------------------------------------
+ * Mirror of pgclone_nongenerated_copy_list() for the background
+ * worker, which reports failure with WARNING + -1 instead of
+ * ereport(ERROR).
+ *
+ * Returns 1 and fills `cols` when the table has generated columns,
+ * 0 when plain COPY table is safe, -1 when the catalog query fails
+ * or every column is generated.
+ * --------------------------------------------------------------- */
+static int
+bgw_nongenerated_copy_list(PGconn *source_conn,
+                           const char *schema_name,
+                           const char *table_name,
+                           StringInfo cols)
+{
+    StringInfoData  query;
+    PGresult       *res;
+    int             nrows, i, ncopy = 0, ngenerated = 0;
+
+    initStringInfo(&query);
+    appendStringInfo(&query,
+        "SELECT a.attname, a.attgenerated "
+        "FROM pg_catalog.pg_attribute a "
+        "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s "
+        "AND a.attnum > 0 AND NOT a.attisdropped "
+        "ORDER BY a.attnum",
+        quote_literal_cstr(schema_name),
+        quote_literal_cstr(table_name));
+
+    res = PQexec(source_conn, query.data);
+    pfree(query.data);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK)
+    {
+        elog(WARNING, "pgclone bgw: could not read column list: %s",
+             PQerrorMessage(source_conn));
+        PQclear(res);
+        return -1;
+    }
+
+    nrows = PQntuples(res);
+    for (i = 0; i < nrows; i++)
+    {
+        const char *attgen = PQgetvalue(res, i, 1);
+
+        if (attgen[0] != '\0')
+        {
+            ngenerated++;
+            continue;
+        }
+
+        if (ncopy > 0)
+            appendStringInfoString(cols, ", ");
+        appendStringInfoString(cols, quote_identifier(PQgetvalue(res, i, 0)));
+        ncopy++;
+    }
+    PQclear(res);
+
+    if (ngenerated == 0)
+    {
+        resetStringInfo(cols);
+        return 0;
+    }
+
+    if (ncopy == 0)
+    {
+        elog(WARNING,
+             "pgclone bgw: table %s.%s has no copyable columns (every column is generated)",
+             schema_name, table_name);
+        return -1;
+    }
+
+    return 1;
+}
+
+/* ---------------------------------------------------------------
  * Helper: stream COPY data from source to local
  * --------------------------------------------------------------- */
 static int64
@@ -440,14 +517,32 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
 {
     PGresult       *res;
     StringInfoData  cmd;
+    StringInfoData  copy_cols;
     char           *buf;
     int             ret;
+    int             gen_status;
     int64           chunk_count = 0;
     int64           row_count = 0;
 
+    initStringInfo(&copy_cols);
+    gen_status = bgw_nongenerated_copy_list(source_conn, schema_name,
+                                            source_table, &copy_cols);
+    if (gen_status < 0)
+    {
+        pfree(copy_cols.data);
+        return -1;
+    }
+
     initStringInfo(&cmd);
-    appendStringInfo(&cmd, "COPY %s.%s TO STDOUT WITH (FORMAT text)",
-                     schema_name, source_table);
+    if (gen_status > 0)
+        appendStringInfo(&cmd,
+            "COPY (SELECT %s FROM %s.%s) TO STDOUT WITH (FORMAT text)",
+            copy_cols.data,
+            quote_identifier(schema_name),
+            quote_identifier(source_table));
+    else
+        appendStringInfo(&cmd, "COPY %s.%s TO STDOUT WITH (FORMAT text)",
+                         schema_name, source_table);
 
     res = PQexec(source_conn, cmd.data);
     if (PQresultStatus(res) != PGRES_COPY_OUT)
@@ -456,13 +551,22 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
              PQerrorMessage(source_conn));
         PQclear(res);
         pfree(cmd.data);
+        pfree(copy_cols.data);
         return -1;
     }
     PQclear(res);
 
     resetStringInfo(&cmd);
-    appendStringInfo(&cmd, "COPY %s.%s FROM STDIN WITH (FORMAT text)",
-                     schema_name, target_table);
+    if (gen_status > 0)
+        appendStringInfo(&cmd,
+            "COPY %s.%s (%s) FROM STDIN WITH (FORMAT text)",
+            quote_identifier(schema_name),
+            quote_identifier(target_table),
+            copy_cols.data);
+    else
+        appendStringInfo(&cmd, "COPY %s.%s FROM STDIN WITH (FORMAT text)",
+                         schema_name, target_table);
+    pfree(copy_cols.data);
 
     res = PQexec(local_conn, cmd.data);
     pfree(cmd.data);
@@ -573,7 +677,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
         "string_agg(quote_ident(a.attname) || ' ' || "
         "pg_catalog.format_type(a.atttypid, a.atttypmod) || "
         "CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END || "
-        "CASE WHEN d.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) ELSE '' END, "
+        PGCLONE_COLUMN_ATTRDEF_SQL ", "
         "', ' ORDER BY a.attnum) || ')' AS ddl "
         "FROM pg_catalog.pg_class c "
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "

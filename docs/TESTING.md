@@ -33,6 +33,8 @@ Located in `test/pgclone_test.sql`, these cover core synchronous functionality:
 | 19. Auto-discovery | 6 | Detect email, name, phone, salary, ssn columns |
 | 20. Mask in-place | 7 | Clone-then-mask workflow, verify UPDATE masking |
 
+Group 32 (9 tests) covers generated columns: a `GENERATED ALWAYS AS (...) STORED` column stays generated through `pgclone.table()` and `pgclone.schema()`, including a `WHERE` filter and a mask copy. Groups 21–31 are in the same file; the table above is the original core set.
+
 ### 2. Loopback-DDL Tests (21 tests)
 
 Located in `test/test_loopback.sh`. These tests call functions that use loopback libpq connections for DDL (CREATE VIEW, CREATE ROLE, GRANT, etc.) which cannot run inside pgTAP's transaction without deadlocking:
