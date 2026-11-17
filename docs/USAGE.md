@@ -169,6 +169,10 @@ SELECT pgclone.table(
 );
 ```
 
+### Partitioned tables
+
+A partitioned table is cloned with its structure: the parent gets `PARTITION BY`, each partition is created with `PARTITION OF <parent> FOR VALUES ...` (sub-partitions included), and the parent's primary key, indexes and triggers are inherited by the partitions rather than cloned separately. Rows are copied once, from the leaf partitions. Use `pgclone.schema()` / `schema_async()` to clone a partitioned table together with its partitions. `pgclone.table()` on a partitioned parent creates only the parent; clone each partition (or the schema) to bring the partitions and data. With `"conflict": "skip"`, existing parents and partitions are skipped by name.
+
 ### Generated columns
 
 `GENERATED ALWAYS AS (...) STORED` columns, and `VIRTUAL` generated columns on PostgreSQL 18, are cloned as generated columns rather than as defaults. COPY does not write them; the target computes each value from the generation expression. Omit generated columns from an explicit `"columns"` list — PostgreSQL rejects `COPY` into a generated column. A virtual generated column needs PostgreSQL 18 on the target. Generation expressions that call a function in the same schema still require that function to exist first, the same as a `DEFAULT` expression does.
