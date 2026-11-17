@@ -636,6 +636,133 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
 }
 
 /* ---------------------------------------------------------------
+ * Helper: pre-create the sequences a table depends on (serial /
+ * bigserial / identity-style nextval defaults). Without this the
+ * CREATE TABLE ... DEFAULT nextval('schema.tbl_id_seq') fails with
+ * "relation ... does not exist" (issue #33). Mirrors Step 1c of the
+ * synchronous pgclone_table(). Idempotent (IF NOT EXISTS), so it is
+ * harmless when the schema path already cloned the sequences.
+ * --------------------------------------------------------------- */
+static void
+bgw_precreate_table_sequences(PGconn *source_conn, PGconn *local_conn,
+                              const char *schema_name, const char *table_name)
+{
+    PGresult       *seq_res;
+    StringInfoData  q;
+    int             si;
+
+    initStringInfo(&q);
+    appendStringInfo(&q,
+        "SELECT s.relname, "
+        "       pg_sequence.seqstart, "
+        "       pg_sequence.seqincrement, "
+        "       pg_sequence.seqmax, "
+        "       pg_sequence.seqmin, "
+        "       pg_sequence.seqcache, "
+        "       pg_sequence.seqcycle, "
+        "       pg_sequence.seqtypid::regtype::text "
+        "FROM pg_catalog.pg_class t "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
+        "JOIN pg_catalog.pg_depend dep ON dep.refobjid = t.oid "
+        "                              AND dep.deptype = 'a' "
+        "                              AND dep.classid = 'pg_catalog.pg_class'::regclass "
+        "JOIN pg_catalog.pg_class s ON s.oid = dep.objid AND s.relkind = 'S' "
+        "JOIN pg_catalog.pg_sequence ON pg_sequence.seqrelid = s.oid "
+        "WHERE n.nspname = %s AND t.relname = %s",
+        quote_literal_cstr(schema_name), quote_literal_cstr(table_name));
+
+    seq_res = PQexec(source_conn, q.data);
+    if (PQresultStatus(seq_res) != PGRES_TUPLES_OK)
+    {
+        elog(WARNING, "pgclone bgw: could not read sequences of %s.%s: %s",
+             schema_name, table_name, PQerrorMessage(source_conn));
+        PQclear(seq_res);
+        pfree(q.data);
+        return;
+    }
+
+    for (si = 0; si < PQntuples(seq_res); si++)
+    {
+        resetStringInfo(&q);
+        appendStringInfo(&q,
+            "CREATE SEQUENCE IF NOT EXISTS %s.%s "
+            "AS %s START WITH %s INCREMENT BY %s "
+            "MINVALUE %s MAXVALUE %s CACHE %s %s",
+            quote_identifier(schema_name),
+            quote_identifier(PQgetvalue(seq_res, si, 0)),
+            PQgetvalue(seq_res, si, 7),
+            PQgetvalue(seq_res, si, 1),
+            PQgetvalue(seq_res, si, 2),
+            PQgetvalue(seq_res, si, 4),
+            PQgetvalue(seq_res, si, 3),
+            PQgetvalue(seq_res, si, 5),
+            strcmp(PQgetvalue(seq_res, si, 6), "t") == 0 ? "CYCLE" : "NO CYCLE");
+        bgw_exec(local_conn, q.data);
+    }
+    PQclear(seq_res);
+    pfree(q.data);
+}
+
+/* ---------------------------------------------------------------
+ * Helper: after the data copy, replay the current value of each
+ * sequence owned by the table via setval(), so new inserts on the
+ * target do not reuse copied ids. Mirrors Step 3b of pgclone_table().
+ * --------------------------------------------------------------- */
+static void
+bgw_sync_table_sequences(PGconn *source_conn, PGconn *local_conn,
+                         const char *schema_name, const char *table_name)
+{
+    PGresult       *sv_res;
+    StringInfoData  q;
+    int             si;
+
+    initStringInfo(&q);
+    appendStringInfo(&q,
+        "SELECT s.relname "
+        "FROM pg_catalog.pg_class t "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
+        "JOIN pg_catalog.pg_depend dep ON dep.refobjid = t.oid "
+        "                             AND dep.deptype = 'a' "
+        "                             AND dep.classid = 'pg_catalog.pg_class'::regclass "
+        "JOIN pg_catalog.pg_class s ON s.oid = dep.objid AND s.relkind = 'S' "
+        "JOIN pg_catalog.pg_sequences ps ON ps.sequencename = s.relname "
+        "                               AND ps.schemaname = n.nspname "
+        "WHERE n.nspname = %s AND t.relname = %s "
+        "AND ps.last_value IS NOT NULL",
+        quote_literal_cstr(schema_name), quote_literal_cstr(table_name));
+
+    sv_res = PQexec(source_conn, q.data);
+    if (PQresultStatus(sv_res) == PGRES_TUPLES_OK)
+    {
+        for (si = 0; si < PQntuples(sv_res); si++)
+        {
+            char     *qualified = psprintf("%s.%s",
+                                           quote_identifier(schema_name),
+                                           quote_identifier(PQgetvalue(sv_res, si, 0)));
+            PGresult *val_res;
+
+            resetStringInfo(&q);
+            appendStringInfo(&q, "SELECT last_value, is_called FROM %s", qualified);
+            val_res = PQexec(source_conn, q.data);
+            if (PQresultStatus(val_res) == PGRES_TUPLES_OK &&
+                PQntuples(val_res) == 1)
+            {
+                resetStringInfo(&q);
+                appendStringInfo(&q, "SELECT setval(%s, %s, %s)",
+                    quote_literal_cstr(qualified),
+                    PQgetvalue(val_res, 0, 0),
+                    strcmp(PQgetvalue(val_res, 0, 1), "t") == 0 ? "true" : "false");
+                bgw_exec(local_conn, q.data);
+            }
+            PQclear(val_res);
+            pfree(qualified);
+        }
+    }
+    PQclear(sv_res);
+    pfree(q.data);
+}
+
+/* ---------------------------------------------------------------
  * Helper: clone a single table (used by bgworker)
  * --------------------------------------------------------------- */
 static bool
@@ -694,6 +821,9 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
 
     if (!ddl_exists)
     {
+        bgw_precreate_table_sequences(source_conn, local_conn,
+                                      job->schema_name, table_name);
+
         res = PQexec(source_conn, buf.data);
         if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0)
         {
@@ -721,6 +851,10 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
             pfree(buf.data);
             return false;
         }
+
+        /* Keep serial/bigserial counters ahead of the copied ids */
+        bgw_sync_table_sequences(source_conn, local_conn,
+                                 job->schema_name, table_name);
     }
 
     /* Clone constraints */
