@@ -60,11 +60,11 @@ psql -U postgres -d target_db -c "SELECT pgclone.clear_jobs()" >/dev/null 2>&1 |
 
 # ------------------------------------------------------------
 # Fixture: a table large enough that a clone runs long enough
-# to send SIGTERM mid-flight. 200k rows keeps the COPY in the
+# to send SIGTERM mid-flight. 2M rows keeps the COPY in the
 # multi-second range without ballooning test runtime.
 # ------------------------------------------------------------
 echo ""
-echo "Preparing chaos fixture (200k rows on source)..."
+echo "Preparing chaos fixture (2M rows on source)..."
 PGPASSWORD=testpass psql -h source-db -U postgres -d source_db <<'SQL' >/dev/null
     DROP TABLE IF EXISTS public.chaos_big CASCADE;
     CREATE TABLE public.chaos_big (
@@ -73,7 +73,7 @@ PGPASSWORD=testpass psql -h source-db -U postgres -d source_db <<'SQL' >/dev/nul
     );
     INSERT INTO public.chaos_big (id, payload)
     SELECT g, repeat(md5(g::text), 8)
-    FROM generate_series(1, 200000) g;
+    FROM generate_series(1, 2000000) g;
 SQL
 psql -U postgres -d target_db -c "DROP TABLE IF EXISTS public.chaos_big" >/dev/null 2>&1 || true
 

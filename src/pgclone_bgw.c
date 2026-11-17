@@ -594,7 +594,7 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
 
         /* Honor SIGTERM (pg_terminate_backend, server shutdown) mid-copy;
          * pgclone_bgw_exit_cleanup() then marks the job slot FAILED. */
-        CHECK_FOR_INTERRUPTS();
+        PGCLONE_CHECK_SHUTDOWN();
 
         /* Update progress in shared memory every 10000 rows */
         if (job && chunk_count % 10000 == 0)
@@ -1206,7 +1206,7 @@ pgclone_bgw_main(Datum main_arg)
                      tname);
             }
 
-            CHECK_FOR_INTERRUPTS();
+            PGCLONE_CHECK_SHUTDOWN();
         }
 
         PQclear(table_res);
@@ -1403,7 +1403,7 @@ pgclone_pool_worker_main(Datum main_arg)
         snap_buf[0] = '\0';
         for (attempts = 0; attempts < 600; attempts++)  /* up to ~60s */
         {
-            CHECK_FOR_INTERRUPTS();
+            PGCLONE_CHECK_SHUTDOWN();
             LWLockAcquire(pgclone_state->lock, LW_SHARED);
             if (pgclone_state->pool.snapshot_failed)
                 failed = true;
@@ -1468,7 +1468,7 @@ pgclone_pool_worker_main(Datum main_arg)
         int             task_idx;
         char            table_name[NAMEDATALEN];
 
-        CHECK_FOR_INTERRUPTS();
+        PGCLONE_CHECK_SHUTDOWN();
 
         /* Check for cancellation */
         LWLockAcquire(pgclone_state->lock, LW_SHARED);
@@ -1866,7 +1866,7 @@ pgclone_pool_coordinator_main(Datum main_arg)
             bool cancelled;
             bool launch_done;
 
-            CHECK_FOR_INTERRUPTS();
+            PGCLONE_CHECK_SHUTDOWN();
 
             LWLockAcquire(pgclone_state->lock, LW_SHARED);
             imported    = pgclone_state->pool.snapshot_imported_count;
