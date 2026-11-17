@@ -45,6 +45,27 @@
 #endif
 
 /*
+ * PGCLONE_CHECK_SHUTDOWN: interrupt check for long loops in a bgworker.
+ * Before PG 17 the SIGTERM handler is die(), which sets ProcDiePending
+ * and is serviced by CHECK_FOR_INTERRUPTS(). From PG 17 it is
+ * SignalHandlerForShutdownRequest(), which only sets
+ * ShutdownRequestPending, so that flag must be tested explicitly or
+ * SIGTERM / server shutdown is ignored until the loop ends.
+ */
+#if PG_VERSION_NUM >= 170000
+#define PGCLONE_CHECK_SHUTDOWN() \
+    do { \
+        CHECK_FOR_INTERRUPTS(); \
+        if (ShutdownRequestPending) \
+            ereport(FATAL, \
+                    (errcode(ERRCODE_ADMIN_SHUTDOWN), \
+                     errmsg("terminating pgclone worker due to administrator command"))); \
+    } while (0)
+#else
+#define PGCLONE_CHECK_SHUTDOWN() CHECK_FOR_INTERRUPTS()
+#endif
+
+/*
  * Column suffix for CREATE TABLE reconstruction.
  *
  * pg_attrdef holds both ordinary defaults and the generation
