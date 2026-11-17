@@ -3,7 +3,7 @@
 # pgclone chaos / failure-injection tests
 #
 # Covers the error paths that regular tests never exercise:
-#   1. Worker SIGKILL mid-clone (regression test for the P0-2
+#   1. Worker SIGTERM mid-clone (regression test for the P0-2
 #      orphan-slot fix — v4.4.2+ registers before_shmem_exit so
 #      the slot flips RUNNING -> FAILED instead of hanging).
 #   2. Async slot saturation (all PGCLONE_MAX_JOBS busy).
@@ -60,7 +60,7 @@ psql -U postgres -d target_db -c "SELECT pgclone.clear_jobs()" >/dev/null 2>&1 |
 
 # ------------------------------------------------------------
 # Fixture: a table large enough that a clone runs long enough
-# to send SIGKILL mid-flight. 200k rows keeps the COPY in the
+# to send SIGTERM mid-flight. 200k rows keeps the COPY in the
 # multi-second range without ballooning test runtime.
 # ------------------------------------------------------------
 echo ""
@@ -68,21 +68,22 @@ echo "Preparing chaos fixture (200k rows on source)..."
 PGPASSWORD=testpass psql -h source-db -U postgres -d source_db <<'SQL' >/dev/null
     DROP TABLE IF EXISTS public.chaos_big CASCADE;
     CREATE TABLE public.chaos_big (
-        id       bigserial PRIMARY KEY,
+        id       bigint PRIMARY KEY,   -- no bigserial: bgw table clone does not pre-create sequences
         payload  text NOT NULL
     );
-    INSERT INTO public.chaos_big (payload)
-    SELECT repeat(md5(g::text), 8)
+    INSERT INTO public.chaos_big (id, payload)
+    SELECT g, repeat(md5(g::text), 8)
     FROM generate_series(1, 200000) g;
 SQL
 psql -U postgres -d target_db -c "DROP TABLE IF EXISTS public.chaos_big" >/dev/null 2>&1 || true
 
 # ============================================================
-# TEST 1: SIGKILL a running worker; the slot must flip to
+# TEST 1: SIGTERM a running worker (SIGKILL would crash-restart the whole
+# server and wipe shared memory, so the callback could never be observed); the slot must flip to
 # FAILED via the before_shmem_exit callback (P0-2).
 # ============================================================
 echo ""
-echo "---- TEST 1: worker SIGKILL -> slot marked FAILED ----"
+echo "---- TEST 1: worker SIGTERM -> slot marked FAILED ----"
 
 JOB_ID=$(psql -U postgres -d target_db -tAc "
     SELECT pgclone.table_async('${SOURCE_CONNINFO}',
@@ -94,21 +95,24 @@ echo "  Job ID: $JOB_ID"
 WORKER_PID=""
 for i in $(seq 1 40); do
     WORKER_PID=$(psql -U postgres -d target_db -tAc "
-        SELECT worker_pid FROM pgclone.jobs_view
-        WHERE job_id = ${JOB_ID} AND status = 'running'
+        SELECT a.pid FROM pg_stat_activity a
+        WHERE a.backend_type = 'pgclone worker'
+          AND EXISTS (SELECT 1 FROM pgclone.jobs_view j
+                      WHERE j.job_id = ${JOB_ID} AND j.status = 'running')
+        ORDER BY a.backend_start DESC LIMIT 1
     " 2>/dev/null | tr -d '[:space:]' || true)
     if [ -n "${WORKER_PID:-}" ] && [ "$WORKER_PID" != "0" ]; then
         break
     fi
     sleep 0.25
 done
-run_test "worker pid observed in jobs_view" \
+run_test "worker pid observed in pg_stat_activity" \
          "true" \
          "$([ -n "${WORKER_PID:-}" ] && [ "${WORKER_PID:-0}" != "0" ] && echo true || echo false)"
 
 if [ -n "${WORKER_PID:-}" ] && [ "$WORKER_PID" != "0" ]; then
-    kill -9 "$WORKER_PID" 2>/dev/null || true
-    echo "  Sent SIGKILL to worker pid $WORKER_PID"
+    kill -TERM "$WORKER_PID" 2>/dev/null || true
+    echo "  Sent SIGTERM to worker pid $WORKER_PID"
 fi
 
 # Wait for the slot to leave the RUNNING state (up to 15 s). The
@@ -221,10 +225,9 @@ echo "  Parent job: $PARENT_JOB"
 COORD_PID=""
 for i in $(seq 1 40); do
     COORD_PID=$(psql -U postgres -d target_db -tAc "
-        SELECT worker_pid FROM pgclone.jobs_view
-        WHERE job_id > ${PARENT_JOB}
-          AND worker_pid IS NOT NULL AND worker_pid <> 0
-        ORDER BY job_id LIMIT 1
+        SELECT pid FROM pg_stat_activity
+        WHERE backend_type = 'pgclone snapshot coordinator'
+        ORDER BY backend_start DESC LIMIT 1
     " 2>/dev/null | tr -d '[:space:]' || true)
     if [ -n "${COORD_PID:-}" ] && [ "${COORD_PID:-0}" != "0" ]; then
         break
@@ -233,8 +236,8 @@ for i in $(seq 1 40); do
 done
 
 if [ -n "${COORD_PID:-}" ] && [ "${COORD_PID:-0}" != "0" ]; then
-    kill -9 "$COORD_PID" 2>/dev/null || true
-    echo "  Sent SIGKILL to coordinator pid $COORD_PID"
+    kill -TERM "$COORD_PID" 2>/dev/null || true
+    echo "  Sent SIGTERM to coordinator pid $COORD_PID"
 else
     echo "  (coordinator pid not observed in time; parent will still be checked)"
 fi

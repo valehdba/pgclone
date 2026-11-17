@@ -592,6 +592,10 @@ bgw_copy_data(PGconn *source_conn, PGconn *local_conn,
         PQfreemem(buf);
         chunk_count++;
 
+        /* Honor SIGTERM (pg_terminate_backend, server shutdown) mid-copy;
+         * pgclone_bgw_exit_cleanup() then marks the job slot FAILED. */
+        CHECK_FOR_INTERRUPTS();
+
         /* Update progress in shared memory every 10000 rows */
         if (job && chunk_count % 10000 == 0)
         {
