@@ -1936,6 +1936,12 @@ pgclone_indexes(PGconn *source_conn, PGconn *target_conn,
         "AND NOT EXISTS ("
         "    SELECT 1 FROM pg_catalog.pg_constraint con "
         "    WHERE con.conindid = i.indexrelid"
+        ") "
+        /* partition indexes inherited from the parent's index are created
+         * automatically when the partition is created / attached */
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM pg_catalog.pg_inherits ih "
+        "    WHERE ih.inhrelid = i.indexrelid"
         ")",
         quote_literal_cstr(schema_name),
         quote_literal_cstr(source_table));
@@ -1948,6 +1954,15 @@ pgclone_indexes(PGconn *source_conn, PGconn *target_conn,
         char           *indexdef  = pstrdup(PQgetvalue(res, i, 0));
         char           *idx_cols  = PQgetvalue(res, i, 1);
         StringInfoData  final_def;
+
+        /* An index on a partitioned parent is dumped as "ON ONLY"; drop
+         * ONLY so it is created as a normal partitioned index and is
+         * inherited by every partition. */
+        {
+            char *only = strstr(indexdef, " ON ONLY ");
+            if (only != NULL)
+                memmove(only + 4, only + 9, strlen(only + 9) + 1);
+        }
 
         /* If selective column clone, skip indexes on columns not in target */
         if (opts != NULL && opts->num_columns > 0)
@@ -2080,6 +2095,7 @@ pgclone_constraints(PGconn *source_conn, PGconn *target_conn,
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = %s AND c.relname = %s "
         "AND con.contype != 'n' "  /* NOT NULL is handled by table DDL already */
+        "AND con.conparentid = 0 "  /* partition-inherited: created via the parent */
         "AND con.contype != 'f' "  /* FK constraints handled separately after all tables created */
         "ORDER BY "
         "  CASE contype "
@@ -2236,6 +2252,7 @@ pgclone_triggers(PGconn *source_conn, PGconn *target_conn,
         "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = %s AND c.relname = %s "
         "AND NOT t.tgisinternal "
+        "AND t.tgparentid = 0 "   /* partition-cloned triggers come from the parent */
         "ORDER BY t.tgname",
         quote_literal_cstr(schema_name),
         quote_literal_cstr(source_table));
@@ -2469,6 +2486,9 @@ pgclone_table(PG_FUNCTION_ARGS)
     StringInfoData buf;
     PgcloneSyncConflictResult table_conflict;
     bool        ddl_exists = false;
+    bool        is_partitioned = false;   /* source is a partitioned parent */
+    char       *partition_ddl = NULL;     /* CREATE TABLE ... PARTITION OF ... */
+    char       *partkey_def = NULL;       /* PARTITION BY clause body */
 
     /* Arg 4: target table name (optional) */
     if (PG_NARGS() >= 5 && !PG_ARGISNULL(4))
@@ -2582,6 +2602,41 @@ pgclone_table(PG_FUNCTION_ARGS)
                         schema_name, table_name)));
     }
 
+    /* ---- Step 1a2: partitioning info (issue #38) ----
+     * A partitioned parent must be created with PARTITION BY and must
+     * not be COPYed from (COPY of a partitioned table is rejected);
+     * a partition must be created as PARTITION OF its parent so rows
+     * are routed correctly and are not loaded twice. */
+    {
+        PGresult *pres;
+
+        resetStringInfo(&buf);
+        appendStringInfo(&buf,
+            "SELECT c.relkind::text, "
+            "       pg_catalog.pg_get_partkeydef(c.oid), "
+            "       CASE WHEN c.relispartition THEN "
+            "         'PARTITION OF ' || pg_catalog.quote_ident(pn.nspname) || '.' || "
+            "         pg_catalog.quote_ident(pc.relname) || ' ' || "
+            "         pg_catalog.pg_get_expr(c.relpartbound, c.oid) END "
+            "FROM pg_catalog.pg_class c "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid AND c.relispartition "
+            "LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent "
+            "LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace "
+            "WHERE n.nspname = %s AND c.relname = %s",
+            quote_literal_cstr(schema_name), quote_literal_cstr(table_name));
+        pres = pgclone_exec(source_conn, buf.data);
+        if (PQntuples(pres) == 1)
+        {
+            is_partitioned = (strcmp(PQgetvalue(pres, 0, 0), "p") == 0);
+            if (!PQgetisnull(pres, 0, 1))
+                partkey_def = pstrdup(PQgetvalue(pres, 0, 1));
+            if (!PQgetisnull(pres, 0, 2))
+                partition_ddl = pstrdup(PQgetvalue(pres, 0, 2));
+        }
+        PQclear(pres);
+    }
+
     /* Use loopback libpq connection for ALL local operations */
     local_conn = pgclone_connect_local();
 
@@ -2674,7 +2729,22 @@ pgclone_table(PG_FUNCTION_ARGS)
         PGresult *local_res;
         char     *ddl;
 
-        ddl = pstrdup(PQgetvalue(res, 0, 0));
+        if (partition_ddl != NULL)
+        {
+            /* Partition: columns come from the parent. A sub-partitioned
+             * partition also carries its own PARTITION BY. */
+            ddl = psprintf("CREATE TABLE IF NOT EXISTS %s.%s %s%s%s",
+                           quote_identifier(schema_name),
+                           quote_identifier(target_name),
+                           partition_ddl,
+                           partkey_def ? " PARTITION BY " : "",
+                           partkey_def ? partkey_def : "");
+        }
+        else if (partkey_def != NULL)
+            ddl = psprintf("%s PARTITION BY %s",
+                           PQgetvalue(res, 0, 0), partkey_def);
+        else
+            ddl = pstrdup(PQgetvalue(res, 0, 0));
         PQclear(res);
 
         local_res = PQexec(local_conn, ddl);
@@ -2694,6 +2764,11 @@ pgclone_table(PG_FUNCTION_ARGS)
         PQclear(local_res);
         pfree(ddl);
     }
+
+    /* A partitioned parent holds no rows of its own; its partitions are
+     * cloned (and copied) individually. COPY of the parent is rejected. */
+    if (is_partitioned)
+        include_data = false;
 
     /* ---- Step 3: Copy data if requested ---- */
     if (include_data)
@@ -3166,7 +3241,10 @@ pgclone_schema(PG_FUNCTION_ARGS)
                          quote_literal_cstr(anchored));
         pfree(anchored);
     }
-    appendStringInfoString(&buf, " ORDER BY tablename");
+    /* Partitioned parents must exist before their partitions
+     * (CREATE TABLE ... PARTITION OF), so order by inheritance depth
+     * first, then name (issue #38). */
+    appendStringInfoString(&buf, " ORDER BY " PGCLONE_TABLE_DEPTH_SQL ", tablename");
 
     res = pgclone_exec(source_conn, buf.data);
 
@@ -5909,7 +5987,7 @@ pgclone_schema_async(PG_FUNCTION_ARGS)
         initStringInfo(&qbuf);
         appendStringInfo(&qbuf,
             "SELECT tablename FROM pg_catalog.pg_tables "
-            "WHERE schemaname = %s ORDER BY tablename",
+            "WHERE schemaname = %s ORDER BY " PGCLONE_TABLE_DEPTH_SQL ", tablename",
             quote_literal_cstr(schema_name));
 
         table_res = pgclone_exec(source_conn, qbuf.data);

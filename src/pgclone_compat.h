@@ -89,4 +89,18 @@
     "' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) " \
     "ELSE '' END"
 
+/*
+ * ORDER BY expression for a pg_tables row (schemaname / tablename in
+ * scope): how many inheritance / partition ancestors the table has.
+ * Sorting by it creates partitioned parents before their partitions
+ * (and sub-partitioned partitions before their own partitions).
+ */
+#define PGCLONE_TABLE_DEPTH_SQL \
+    "(WITH RECURSIVE anc(oid, d) AS (" \
+    "SELECT (pg_catalog.quote_ident(schemaname) || '.' || pg_catalog.quote_ident(tablename))::regclass::oid, 0 " \
+    "UNION ALL " \
+    "SELECT i.inhparent, anc.d + 1 FROM pg_catalog.pg_inherits i " \
+    "JOIN anc ON i.inhrelid = anc.oid) " \
+    "SELECT max(d) FROM anc)"
+
 #endif /* PGCLONE_COMPAT_H */

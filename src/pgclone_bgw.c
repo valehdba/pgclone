@@ -763,6 +763,93 @@ bgw_sync_table_sequences(PGconn *source_conn, PGconn *local_conn,
 }
 
 /* ---------------------------------------------------------------
+ * Helper: partitioning info for a source table (issue #38).
+ *   *is_partitioned  true for a partitioned parent (no rows of its own)
+ *   *partkey_def     palloc'd "RANGE (d)" etc. for a partitioned table
+ *   *partition_of    palloc'd "PARTITION OF s.parent FOR VALUES ..." when
+ *                    the table is itself a partition
+ *   *parent_qual     palloc'd quoted "s.parent" when a partition
+ * --------------------------------------------------------------- */
+static void
+bgw_partition_info(PGconn *source_conn, const char *schema_name,
+                   const char *table_name, bool *is_partitioned,
+                   char **partkey_def, char **partition_of, char **parent_qual)
+{
+    PGresult       *pres;
+    StringInfoData  q;
+
+    *is_partitioned = false;
+    *partkey_def = NULL;
+    *partition_of = NULL;
+    *parent_qual = NULL;
+
+    initStringInfo(&q);
+    appendStringInfo(&q,
+        "SELECT c.relkind::text, "
+        "       pg_catalog.pg_get_partkeydef(c.oid), "
+        "       CASE WHEN c.relispartition THEN "
+        "         'PARTITION OF ' || pg_catalog.quote_ident(pn.nspname) || '.' || "
+        "         pg_catalog.quote_ident(pc.relname) || ' ' || "
+        "         pg_catalog.pg_get_expr(c.relpartbound, c.oid) END, "
+        "       CASE WHEN c.relispartition THEN "
+        "         pg_catalog.quote_ident(pn.nspname) || '.' || "
+        "         pg_catalog.quote_ident(pc.relname) END "
+        "FROM pg_catalog.pg_class c "
+        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+        "LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid AND c.relispartition "
+        "LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent "
+        "LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s",
+        quote_literal_cstr(schema_name), quote_literal_cstr(table_name));
+
+    pres = PQexec(source_conn, q.data);
+    if (PQresultStatus(pres) == PGRES_TUPLES_OK && PQntuples(pres) == 1)
+    {
+        *is_partitioned = (strcmp(PQgetvalue(pres, 0, 0), "p") == 0);
+        if (!PQgetisnull(pres, 0, 1))
+            *partkey_def = pstrdup(PQgetvalue(pres, 0, 1));
+        if (!PQgetisnull(pres, 0, 2))
+            *partition_of = pstrdup(PQgetvalue(pres, 0, 2));
+        if (!PQgetisnull(pres, 0, 3))
+            *parent_qual = pstrdup(PQgetvalue(pres, 0, 3));
+    }
+    PQclear(pres);
+    pfree(q.data);
+}
+
+/* ---------------------------------------------------------------
+ * Helper: wait (up to ~60 s) for a partition's parent to exist on the
+ * target. In a parallel pool the parent is created by another worker.
+ * --------------------------------------------------------------- */
+static bool
+bgw_wait_for_parent(PGconn *local_conn, const char *parent_qual)
+{
+    StringInfoData  q;
+    int             attempt;
+    bool            found = false;
+
+    initStringInfo(&q);
+    appendStringInfo(&q, "SELECT to_regclass(%s) IS NOT NULL",
+                     quote_literal_cstr(parent_qual));
+    for (attempt = 0; attempt < 300 && !found; attempt++)
+    {
+        PGresult *r = PQexec(local_conn, q.data);
+
+        found = (PQresultStatus(r) == PGRES_TUPLES_OK &&
+                 PQntuples(r) == 1 &&
+                 strcmp(PQgetvalue(r, 0, 0), "t") == 0);
+        PQclear(r);
+        if (!found)
+        {
+            PGCLONE_CHECK_SHUTDOWN();
+            pg_usleep(200000L);
+        }
+    }
+    pfree(q.data);
+    return found;
+}
+
+/* ---------------------------------------------------------------
  * Helper: clone a single table (used by bgworker)
  * --------------------------------------------------------------- */
 static bool
@@ -774,6 +861,10 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
     const char     *target;
     int64           rows;
     bool            ddl_exists = false;
+    bool            is_partitioned = false;
+    char           *partkey_def = NULL;
+    char           *partition_of = NULL;
+    char           *parent_qual = NULL;
 
     /* Use target_name if set and different from source table */
     if (job->target_name[0] != '\0' && strcmp(job->target_name, table_name) != 0)
@@ -819,6 +910,9 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
         "GROUP BY c.relname",
         job->schema_name, target, job->schema_name, table_name);
 
+    bgw_partition_info(source_conn, job->schema_name, table_name,
+                       &is_partitioned, &partkey_def, &partition_of, &parent_qual);
+
     if (!ddl_exists)
     {
         bgw_precreate_table_sequences(source_conn, local_conn,
@@ -832,13 +926,42 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
             return false;
         }
 
-        bgw_exec(local_conn, PQgetvalue(res, 0, 0));
+        if (partition_of != NULL)
+        {
+            /* Partition: columns come from the parent, which another
+             * worker may still be creating. */
+            if (parent_qual != NULL && !bgw_wait_for_parent(local_conn, parent_qual))
+            {
+                elog(WARNING, "pgclone bgw: parent %s of partition %s.%s was not created in time",
+                     parent_qual, job->schema_name, table_name);
+                PQclear(res);
+                pfree(buf.data);
+                return false;
+            }
+            resetStringInfo(&buf);
+            appendStringInfo(&buf, "CREATE TABLE IF NOT EXISTS %s.%s %s%s%s",
+                             quote_identifier(job->schema_name),
+                             quote_identifier(target),
+                             partition_of,
+                             partkey_def ? " PARTITION BY " : "",
+                             partkey_def ? partkey_def : "");
+            bgw_exec(local_conn, buf.data);
+        }
+        else if (partkey_def != NULL)
+        {
+            resetStringInfo(&buf);
+            appendStringInfo(&buf, "%s PARTITION BY %s",
+                             PQgetvalue(res, 0, 0), partkey_def);
+            bgw_exec(local_conn, buf.data);
+        }
+        else
+            bgw_exec(local_conn, PQgetvalue(res, 0, 0));
         PQclear(res);
     }
 
 
-    /* Copy data */
-    if (job->include_data)
+    /* Copy data (a partitioned parent has no rows of its own) */
+    if (job->include_data && !is_partitioned)
     {
         LWLockAcquire(pgclone_state->lock, LW_EXCLUSIVE);
         strlcpy(job->current_phase, "copying data", 64);
@@ -872,6 +995,7 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
             "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = '%s' AND c.relname = '%s' "
             "AND con.contype != 'n' "
+            "AND con.conparentid = 0 "
             "ORDER BY CASE contype WHEN 'p' THEN 1 WHEN 'u' THEN 2 "
             "WHEN 'c' THEN 3 WHEN 'f' THEN 4 ELSE 5 END",
             job->schema_name, table_name);
@@ -909,7 +1033,9 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
             "WHERE n.nspname = '%s' AND c.relname = '%s' "
             "AND NOT i.indisprimary "
             "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con "
-            "WHERE con.conindid = i.indexrelid)",
+            "WHERE con.conindid = i.indexrelid) "
+            "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits ih "
+            "WHERE ih.inhrelid = i.indexrelid)",
             job->schema_name, table_name);
 
         res = PQexec(source_conn, buf.data);
@@ -917,7 +1043,17 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
         {
             int ii;
             for (ii = 0; ii < PQntuples(res); ii++)
-                bgw_exec(local_conn, PQgetvalue(res, ii, 0));
+            {
+                char *idxdef = pstrdup(PQgetvalue(res, ii, 0));
+                char *only = strstr(idxdef, " ON ONLY ");
+
+                /* index on a partitioned parent: drop ONLY so it is
+                 * inherited by every partition */
+                if (only != NULL)
+                    memmove(only + 4, only + 9, strlen(only + 9) + 1);
+                bgw_exec(local_conn, idxdef);
+                pfree(idxdef);
+            }
         }
         PQclear(res);
     }
@@ -936,7 +1072,8 @@ bgw_clone_one_table(PGconn *source_conn, PGconn *local_conn,
             "JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid "
             "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = '%s' AND c.relname = '%s' "
-            "AND NOT t.tgisinternal",
+            "AND NOT t.tgisinternal "
+            "AND t.tgparentid = 0",
             job->schema_name, table_name);
 
         res = PQexec(source_conn, buf.data);
@@ -1286,7 +1423,7 @@ pgclone_bgw_main(Datum main_arg)
         resetStringInfo(&buf);
         appendStringInfo(&buf,
             "SELECT tablename FROM pg_catalog.pg_tables "
-            "WHERE schemaname = '%s' ORDER BY tablename",
+            "WHERE schemaname = '%s' ORDER BY " PGCLONE_TABLE_DEPTH_SQL ", tablename",
             job->schema_name);
 
         table_res = PQexec(source_conn, buf.data);

@@ -116,6 +116,16 @@ if echo "$SPL" | grep -q "pgclone"; then
 
     echo ""
     echo "============================================"
+    echo "Running pgclone partitioned-table tests (issue #38)..."
+    echo "============================================"
+    bash /build/pgclone/test/test_partitions.sh 2>&1
+    PARTITION_EXIT=$?
+    if [ $PARTITION_EXIT -ne 0 ]; then
+        TEST_EXIT=1
+    fi
+
+    echo ""
+    echo "============================================"
     echo "Running pgclone chaos tests (worker kill, slot saturation)..."
     echo "============================================"
     bash /build/pgclone/test/test_chaos.sh 2>&1
