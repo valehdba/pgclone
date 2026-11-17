@@ -404,3 +404,16 @@ CREATE TABLE test_schema.customer_accounts (
 INSERT INTO test_schema.customer_accounts (customer_name, bank_account_number, iban) VALUES
     ('Alice Adams', '123456789', 'DE89370400440532013000'),
     ('Bob Brown',   '987654321', 'GB29NWBK60161331926819');
+
+-- ============================================================
+-- Generated columns (pgTAP test group 32). STORED is valid on
+-- every supported server. VIRTUAL is PostgreSQL 18 only and is
+-- not seeded here, because CI loads this file on PG 14–18.
+-- ============================================================
+CREATE TABLE test_schema.gen_test (
+    id    int PRIMARY KEY,
+    label text DEFAULT 'row',
+    code  text GENERATED ALWAYS AS ('x_' || id::text) STORED
+);
+
+INSERT INTO test_schema.gen_test (id) VALUES (1), (2);

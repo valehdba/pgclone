@@ -7,6 +7,9 @@ All notable changes to pgclone are documented in this file.
 ### Added
 - `"conflict": "ignore"` (discussion #24): if the target table already exists, keep its definition (skip table DDL, constraints, indexes, triggers) and still load the data. Works in the sync and async paths.
 
+### Fixed
+- **Generated columns stay generated, and COPY skips them.** `CREATE TABLE` reconstruction treated every `pg_attrdef` entry as a `DEFAULT`, so `GENERATED ALWAYS AS (...) STORED` columns (and PostgreSQL 18 `VIRTUAL` columns) were cloned as ordinary defaults. Once a column stays generated, a bare `COPY table` fails on the way in (`column "..." is a generated column`). Table DDL now emits `GENERATED ALWAYS AS (...) STORED` or `VIRTUAL`, and both the synchronous COPY path and the background worker omit generated columns so the target recomputes them. Ordinary defaults are unchanged. A generated column named in an explicit `"columns"` list is still rejected by the server; leave those columns out of the list. Virtual generated columns need PostgreSQL 18 on the target.
+
 ## [4.7.0]
 
 ### Added

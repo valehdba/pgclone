@@ -44,4 +44,28 @@
 #define pgclone_shutdown_handler die
 #endif
 
+/*
+ * Column suffix for CREATE TABLE reconstruction.
+ *
+ * pg_attrdef holds both ordinary defaults and the generation
+ * expression of a GENERATED ALWAYS column. Treating every adbin as
+ * DEFAULT turns generated columns into plain defaults. 's' is STORED
+ * (PG 12+). 'v' is VIRTUAL (PG 18+); on older servers that comparison
+ * never matches, and the SQL is valid there because it is only a
+ * string compare. Identity columns (attidentity <> '') still fall
+ * through to DEFAULT, as before.
+ *
+ * The leading space is significant: this fragment is concatenated
+ * after the type (and an optional NOT NULL).
+ */
+#define PGCLONE_COLUMN_ATTRDEF_SQL \
+    "CASE " \
+    "WHEN a.attgenerated = 's' THEN " \
+    "' GENERATED ALWAYS AS (' || pg_get_expr(d.adbin, d.adrelid) || ') STORED' " \
+    "WHEN a.attgenerated = 'v' THEN " \
+    "' GENERATED ALWAYS AS (' || pg_get_expr(d.adbin, d.adrelid) || ') VIRTUAL' " \
+    "WHEN d.adbin IS NOT NULL THEN " \
+    "' DEFAULT ' || pg_get_expr(d.adbin, d.adrelid) " \
+    "ELSE '' END"
+
 #endif /* PGCLONE_COMPAT_H */

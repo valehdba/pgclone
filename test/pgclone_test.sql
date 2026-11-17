@@ -5,7 +5,7 @@
 
 BEGIN;
 
-SELECT plan(168);
+SELECT plan(177);
 
 -- ============================================================
 -- TEST GROUP 1: Extension loads correctly
@@ -1115,6 +1115,73 @@ SELECT throws_ok(
     $$SELECT pgclone.table_from_mysql('host=h user=u password=p', 'db', 't')$$,
     NULL, NULL,
     'table_from_mysql fails cleanly (no MySQL build, or unreachable server)');
+
+-- ============================================================
+-- TEST GROUP 32: Generated columns
+--
+-- pg_attrdef stores the generation expression, so reconstructing
+-- CREATE TABLE as "DEFAULT pg_get_expr(...)" turned
+-- GENERATED ALWAYS columns into ordinary defaults. COPY FROM also
+-- rejects a generated column, so a bare COPY of the table fails
+-- once the column stays generated. 9 tests below — keep in sync
+-- with plan() above.
+-- ============================================================
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'gen_test', 'gen_test_copy'),
+    'can clone a table with a GENERATED ALWAYS AS STORED column');
+
+SELECT is(
+    (SELECT attgenerated::text FROM pg_catalog.pg_attribute
+      WHERE attrelid = 'test_schema.gen_test_copy'::regclass
+        AND attname = 'code'),
+    's',
+    'cloned generated column stays generated, not a default');
+
+SELECT results_eq(
+    $$SELECT id, code FROM test_schema.gen_test_copy ORDER BY id$$,
+    $$VALUES (1, 'x_1'), (2, 'x_2')$$,
+    'COPY skips the generated column and the target recomputes it');
+
+SELECT is(
+    (SELECT attgenerated::text FROM pg_catalog.pg_attribute
+      WHERE attrelid = 'test_schema.gen_test_copy'::regclass
+        AND attname = 'label'),
+    '',
+    'ordinary DEFAULT column is not marked generated');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'gen_test', 'gen_test_where',
+        '{"where": "id = 1"}'),
+    'WHERE filter on a generated-column table');
+
+SELECT results_eq(
+    $$SELECT id, code FROM test_schema.gen_test_where$$,
+    $$VALUES (1, 'x_1')$$,
+    'WHERE copy omits the generated column and keeps the computed value');
+
+SELECT lives_ok(
+    format('SELECT pgclone.table(%L, %L, %L, true, %L, %L)',
+        current_setting('app.source_conninfo'),
+        'test_schema', 'gen_test', 'gen_test_mask',
+        '{"mask": {"label": {"type": "constant", "value": "REDACTED"}}}'),
+    'masking a table that also has a generated column');
+
+SELECT results_eq(
+    $$SELECT label, code FROM test_schema.gen_test_mask ORDER BY id$$,
+    $$VALUES ('REDACTED', 'x_1'), ('REDACTED', 'x_2')$$,
+    'mask applies to the plain column; generated column is recomputed');
+
+SELECT is(
+    (SELECT attgenerated::text FROM pg_catalog.pg_attribute
+      WHERE attrelid = 'test_schema.gen_test'::regclass
+        AND attname = 'code'),
+    's',
+    'schema clone keeps the generated column generated');
 
 SELECT * FROM finish();
 ROLLBACK;
