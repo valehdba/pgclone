@@ -186,6 +186,21 @@ For async operations, add to `postgresql.conf` and restart:
 shared_preload_libraries = 'pgclone'
 ```
 
+### Upgrading
+
+```bash
+make clean && make && sudo make install
+# restart PostgreSQL so the new pgclone library is loaded
+sudo systemctl restart postgresql            # or your platform's equivalent
+```
+
+```sql
+ALTER EXTENSION pgclone UPDATE;
+SELECT pgclone.version();
+```
+
+**Restart PostgreSQL before `ALTER EXTENSION pgclone UPDATE`** when pgclone is in `shared_preload_libraries`. The running server keeps the old shared library mapped after `make install` replaces it on disk, so the update script can fail with `could not find function "..." in file ".../pgclone.so"` until the server is restarted.
+
 pgclone uses Unix domain sockets for local loopback connections, so the default `local all all peer` line in `pg_hba.conf` is sufficient — no `trust` entry needed. If Unix sockets are unavailable, pgclone falls back to TCP `127.0.0.1` and appropriate `pg_hba.conf` configuration is required.
 
 ## Documentation
