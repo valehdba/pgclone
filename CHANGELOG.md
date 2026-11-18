@@ -2,6 +2,14 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [Unreleased]
+
+No SQL-level changes; after `make install`, restart PostgreSQL.
+
+### Added
+- `"on_error": "continue"` (discussion #41) for `pgclone.schema()` / `pgclone.database()`. A table that fails (for example a COPY into a table whose definition differs) is rolled back in its own subtransaction, reported with a `WARNING` (message and SQLSTATE), skipped from the foreign-key and trigger passes, and the clone carries on with the next table. The function returns `COMPLETED WITH ERRORS: N table(s) failed: ...` instead of `OK`. Default stays `"abort"`. Cancels and shutdowns are never swallowed. `schema_async()` already continued past failed tables, so it needs no option.
+- New `test/test_continue_on_error.sh`.
+
 ## [4.8.0]
 
 This release has no SQL-level changes; after `make install`, **restart PostgreSQL**, then `ALTER EXTENSION pgclone UPDATE`.

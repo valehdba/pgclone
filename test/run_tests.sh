@@ -126,6 +126,16 @@ if echo "$SPL" | grep -q "pgclone"; then
 
     echo ""
     echo "============================================"
+    echo "Running pgclone continue-on-error tests (discussion #41)..."
+    echo "============================================"
+    bash /build/pgclone/test/test_continue_on_error.sh 2>&1
+    COE_EXIT=$?
+    if [ $COE_EXIT -ne 0 ]; then
+        TEST_EXIT=1
+    fi
+
+    echo ""
+    echo "============================================"
     echo "Running pgclone chaos tests (worker kill, slot saturation)..."
     echo "============================================"
     bash /build/pgclone/test/test_chaos.sh 2>&1
