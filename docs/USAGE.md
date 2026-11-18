@@ -461,7 +461,7 @@ SELECT pgclone.schema('host=src dbname=app user=u', 'public', true,
 - A table whose `CREATE TABLE` succeeded but whose data load failed is left in place (empty), so you can fix the cause and re-run with `"conflict": "ignore"` or a `"tables"` filter. pgclone never drops it for you.
 - The result is `OK` only when nothing failed; with failures it starts with `COMPLETED WITH ERRORS`, so scripts should check for it.
 - Query cancel and server shutdown always abort. Values: `"abort"` (default) or `"continue"`.
-- Applies to the synchronous functions; `schema_async()` / `table_async()` are not covered yet.
+- Applies to the synchronous functions. `schema_async()` already continues past a failed table and marks the job `failed` at the end; check `pgclone.progress()` / `pgclone.jobs()` for it.
 
 ## Materialized Views (v1.2.0)
 
