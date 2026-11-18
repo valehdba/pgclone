@@ -446,6 +446,23 @@ SELECT pgclone.schema_async(conn, 'sales', true,
 
 ---
 
+## Continue on Error (discussion #41)
+
+By default `pgclone.schema()` and `pgclone.database()` stop at the first failing table. Like `psql` without `ON_ERROR_STOP`, you can ask them to carry on:
+
+```sql
+SELECT pgclone.schema('host=src dbname=app user=u', 'public', true,
+                      '{"on_error": "continue"}');
+-- COMPLETED WITH ERRORS: 1 table(s) failed: orders
+```
+
+- A failing table raises a `WARNING` with the error message and SQLSTATE, then cloning continues with the next table.
+- Foreign keys and triggers are not created for a failed table; its dependents are still cloned.
+- A table whose `CREATE TABLE` succeeded but whose data load failed is left in place (empty), so you can fix the cause and re-run with `"conflict": "ignore"` or a `"tables"` filter. pgclone never drops it for you.
+- The result is `OK` only when nothing failed; with failures it starts with `COMPLETED WITH ERRORS`, so scripts should check for it.
+- Query cancel and server shutdown always abort. Values: `"abort"` (default) or `"continue"`.
+- Applies to the synchronous functions; `schema_async()` / `table_async()` are not covered yet.
+
 ## Materialized Views (v1.2.0)
 
 Materialized views are cloned automatically during schema clone, including their indexes and data. Disable with:

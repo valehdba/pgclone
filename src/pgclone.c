@@ -11,6 +11,8 @@
 #include "funcapi.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
+#include "access/xact.h"
+#include "utils/resowner.h"
 #include "executor/spi.h"
 #include "libpq-fe.h"
 #include "miscadmin.h"
@@ -124,6 +126,13 @@ typedef struct CloneOptions
      * that don't use the option keep that exact legacy behavior. */
     bool conflict_specified;
     PgcloneConflictStrategy conflict;
+
+    /* v4.9.0 (discussion #41): "on_error": "continue" makes the
+     * synchronous schema/database clone skip a table that fails
+     * (rolling back that table's work), record it, and carry on with
+     * the next object instead of aborting the whole run. Default is
+     * false ("abort"), which keeps the historical behavior. */
+    bool continue_on_error;
 } CloneOptions;
 
 /* Default: everything enabled, no column/where/mask filter */
@@ -144,6 +153,7 @@ pgclone_default_options(void)
     opts.snapshot_id[0]      = '\0';
     opts.conflict_specified  = false;
     opts.conflict            = PGCLONE_CONFLICT_ERROR;
+    opts.continue_on_error   = false;
     return opts;
 }
 
@@ -364,6 +374,19 @@ pgclone_parse_options(const char *json_str)
         opts.conflict = PGCLONE_CONFLICT_ERROR;
         opts.conflict_specified = true;
     }
+
+    /* v4.9.0 (discussion #41): "on_error": "continue" / "abort" */
+    if (strstr(json_str, "\"on_error\": \"continue\"") != NULL ||
+        strstr(json_str, "\"on_error\":\"continue\"") != NULL)
+        opts.continue_on_error = true;
+    else if (strstr(json_str, "\"on_error\": \"abort\"") != NULL ||
+             strstr(json_str, "\"on_error\":\"abort\"") != NULL)
+        opts.continue_on_error = false;
+    else if (strstr(json_str, "\"on_error\"") != NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("pgclone: invalid \"on_error\" option"),
+                 errhint("Use \"on_error\": \"abort\" (default) or \"continue\".")));
 
     /* v4.3.0: opt-out of consistent-snapshot wrapping */
     if (strstr(json_str, "\"consistent\": false") != NULL ||
@@ -2464,6 +2487,24 @@ pgclone_sync_handle_conflict(PGconn *local_conn, const char *kind,
     }
 }
 
+/* v4.9.0: connections currently open inside pgclone_table(). When a
+ * table clone fails and on_error=continue, the caller closes these so
+ * the failed table does not leak two libpq connections. Cleared
+ * whenever pgclone_table closes them itself before raising an error. */
+static PGconn *pgclone_active_src = NULL;
+static PGconn *pgclone_active_lcl = NULL;
+
+static void
+pgclone_close_active_conns(void)
+{
+    if (pgclone_active_lcl != NULL)
+        PQfinish(pgclone_active_lcl);
+    if (pgclone_active_src != NULL)
+        PQfinish(pgclone_active_src);
+    pgclone_active_lcl = NULL;
+    pgclone_active_src = NULL;
+}
+
 PG_FUNCTION_INFO_V1(pgclone_table);
 
 Datum
@@ -2522,6 +2563,7 @@ pgclone_table(PG_FUNCTION_ARGS)
      * If a parent op (pgclone_schema) already exported a snapshot via
      * opts.snapshot_id, this connection imports it instead. */
     source_conn = pgclone_connect(source_conninfo);
+    pgclone_active_src = source_conn;
     pgclone_setup_source_txn(source_conn, &opts);
 
     /* ---- Step 1: Get CREATE TABLE DDL from source ---- */
@@ -2596,6 +2638,7 @@ pgclone_table(PG_FUNCTION_ARGS)
         PQclear(res);
         pgclone_setup_source_txn_done(source_conn, &opts);
         PQfinish(source_conn);
+        pgclone_active_src = NULL;
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_TABLE),
                  errmsg("pgclone: table \"%s.%s\" not found on source",
@@ -2639,6 +2682,7 @@ pgclone_table(PG_FUNCTION_ARGS)
 
     /* Use loopback libpq connection for ALL local operations */
     local_conn = pgclone_connect_local();
+    pgclone_active_lcl = local_conn;
 
     /* ---- Step 1b: Create schema locally ---- */
     {
@@ -2658,6 +2702,8 @@ pgclone_table(PG_FUNCTION_ARGS)
         PQfinish(local_conn);
         pgclone_setup_source_txn_done(source_conn, &opts);
         PQfinish(source_conn);
+        pgclone_active_lcl = NULL;
+        pgclone_active_src = NULL;
         PG_RETURN_TEXT_P(cstring_to_text_with_len("SKIPPED", 7));
     }
 
@@ -2755,6 +2801,8 @@ pgclone_table(PG_FUNCTION_ARGS)
             PQfinish(local_conn);
             pgclone_setup_source_txn_done(source_conn, &opts);
             PQfinish(source_conn);
+            pgclone_active_lcl = NULL;
+            pgclone_active_src = NULL;
             pfree(ddl);
             ereport(ERROR,
                     (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
@@ -2935,6 +2983,8 @@ pgclone_table(PG_FUNCTION_ARGS)
     PQfinish(local_conn);
     pgclone_setup_source_txn_done(source_conn, &opts);
     PQfinish(source_conn);
+    pgclone_active_lcl = NULL;
+    pgclone_active_src = NULL;
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
@@ -2975,6 +3025,9 @@ pgclone_schema(PG_FUNCTION_ARGS)
     StringInfoData buf;
     int         i, ntables;
     char      **table_names = NULL;
+    bool       *table_failed = NULL;    /* on_error=continue bookkeeping */
+    int         nfailed = 0;
+    StringInfoData failed_list;
 
     /* Arg 3: JSON options (only for the 4-arg overload where arg 3 is TEXT).
      * MUST use == 4, NOT >= 4:  when called from pgclone_schema_ex with
@@ -3028,6 +3081,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
     /* ---- Step 1: Create schema ---- */
     initStringInfo(&buf);
+    initStringInfo(&failed_list);
     appendStringInfo(&buf, "CREATE SCHEMA IF NOT EXISTS %s",
                      quote_identifier(schema_name));
     pgclone_exec_conn(local_conn, buf.data);
@@ -3252,6 +3306,7 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
     if (ntables > 0)
     {
+        table_failed = palloc0(sizeof(bool) * ntables);
         table_names = palloc(sizeof(char *) * ntables);
         for (i = 0; i < ntables; i++)
             table_names[i] = pstrdup(PQgetvalue(res, i, 0));
@@ -3329,14 +3384,82 @@ pgclone_schema(PG_FUNCTION_ARGS)
                 pgclone_keeper_ping(source_conn);
 
             /* Call 6-arg version: conninfo, schema, table, include_data, target_name, options */
-            result = DirectFunctionCall6(pgclone_table,
-                        CStringGetTextDatum(source_conninfo),
-                        CStringGetTextDatum(schema_name),
-                        CStringGetTextDatum(table_names[i]),
-                        BoolGetDatum(include_data),
-                        CStringGetTextDatum(table_names[i]),  /* target = source name */
-                        CStringGetTextDatum(tbl_opts.data));
-            (void) result;
+            if (!opts.continue_on_error)
+            {
+                result = DirectFunctionCall6(pgclone_table,
+                            CStringGetTextDatum(source_conninfo),
+                            CStringGetTextDatum(schema_name),
+                            CStringGetTextDatum(table_names[i]),
+                            BoolGetDatum(include_data),
+                            CStringGetTextDatum(table_names[i]),  /* target = source name */
+                            CStringGetTextDatum(tbl_opts.data));
+                (void) result;
+            }
+            else
+            {
+                /* v4.9.0 (discussion #41): on_error=continue. Run the
+                 * table inside a subtransaction so a failure leaves no
+                 * backend-side residue, remember it, and move on. */
+                MemoryContext   oldcxt = CurrentMemoryContext;
+                ResourceOwner   oldowner = CurrentResourceOwner;
+
+                pgclone_active_src = NULL;
+                pgclone_active_lcl = NULL;
+                BeginInternalSubTransaction(NULL);
+                MemoryContextSwitchTo(oldcxt);
+
+                PG_TRY();
+                {
+                    result = DirectFunctionCall6(pgclone_table,
+                                CStringGetTextDatum(source_conninfo),
+                                CStringGetTextDatum(schema_name),
+                                CStringGetTextDatum(table_names[i]),
+                                BoolGetDatum(include_data),
+                                CStringGetTextDatum(table_names[i]),
+                                CStringGetTextDatum(tbl_opts.data));
+                    (void) result;
+                    ReleaseCurrentSubTransaction();
+                    MemoryContextSwitchTo(oldcxt);
+                    CurrentResourceOwner = oldowner;
+                }
+                PG_CATCH();
+                {
+                    ErrorData *edata;
+
+                    MemoryContextSwitchTo(oldcxt);
+                    edata = CopyErrorData();
+
+                    /* Never swallow cancels or shutdowns. */
+                    if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED ||
+                        edata->sqlerrcode == ERRCODE_ADMIN_SHUTDOWN ||
+                        edata->sqlerrcode == ERRCODE_CRASH_SHUTDOWN)
+                    {
+                        pgclone_close_active_conns();
+                        PG_RE_THROW();
+                    }
+
+                    FlushErrorState();
+                    RollbackAndReleaseCurrentSubTransaction();
+                    MemoryContextSwitchTo(oldcxt);
+                    CurrentResourceOwner = oldowner;
+
+                    pgclone_close_active_conns();
+
+                    table_failed[i] = true;
+                    nfailed++;
+                    appendStringInfo(&failed_list, "%s%s",
+                                     failed_list.len > 0 ? ", " : "",
+                                     table_names[i]);
+                    ereport(WARNING,
+                            (errmsg("pgclone: table %s.%s failed, continuing (on_error=continue): %s",
+                                    schema_name, table_names[i],
+                                    edata->message ? edata->message : "unknown error"),
+                             errdetail("SQLSTATE %s",
+                                       unpack_sql_state(edata->sqlerrcode))));
+                    FreeErrorData(edata);
+                }
+                PG_END_TRY();
+            }
         }
 
         pfree(tbl_opts.data);
@@ -3365,6 +3488,8 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
         for (i = 0; i < ntables; i++)
         {
+            if (table_failed[i])
+                continue;       /* on_error=continue: skip failed table */
             resetStringInfo(&buf);
             appendStringInfo(&buf,
                 "SELECT conname, pg_get_constraintdef(con.oid, true) AS condef "
@@ -3597,7 +3722,11 @@ pgclone_schema(PG_FUNCTION_ARGS)
 
         for (i = 0; i < ntables; i++)
         {
-            int n = pgclone_triggers(src_trig, lcl_trig,
+            int n;
+
+            if (table_failed[i])
+                continue;       /* on_error=continue: skip failed table */
+            n = pgclone_triggers(src_trig, lcl_trig,
                                        schema_name, table_names[i],
                                        table_names[i]);
             trig_total += n;
@@ -3622,8 +3751,19 @@ pgclone_schema(PG_FUNCTION_ARGS)
     /* v4.3.0: close the snapshot keeper. Every importer that needed
      * the snapshot has long since called SET TRANSACTION SNAPSHOT
      * (or finished its own clone), so committing here is safe. */
+    if (table_failed)
+        pfree(table_failed);
+
     pgclone_setup_source_txn_done(source_conn, &opts);
     PQfinish(source_conn);
+
+    if (nfailed > 0)
+    {
+        char *msg = psprintf("COMPLETED WITH ERRORS: %d table(s) failed: %s",
+                             nfailed, failed_list.data);
+
+        PG_RETURN_TEXT_P(cstring_to_text(msg));
+    }
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
@@ -3709,6 +3849,10 @@ pgclone_database(PG_FUNCTION_ARGS)
     PGresult   *res;
     int         i, nschemas;
     char      **schema_names;
+    int         db_errors = 0;
+    StringInfoData db_err_list;
+
+    initStringInfo(&db_err_list);
 
     /* Arg 2: JSON options (optional) */
     if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
@@ -3793,11 +3937,15 @@ pgclone_database(PG_FUNCTION_ARGS)
             appendStringInfo(&opts_json, ", \"conflict\": \"%s\"",
                              pgclone_conflict_strategy_name(opts.conflict));
 
+        if (opts.continue_on_error)
+            appendStringInfoString(&opts_json, ", \"on_error\": \"continue\"");
+
         appendStringInfoChar(&opts_json, '}');
 
         for (i = 0; i < nschemas; i++)
         {
             Datum result;
+            char *rtxt;
 
             /* v4.3.1: keeper liveness check between schemas (issue #9). */
             if (opts.consistent && opts.snapshot_id[0] != '\0')
@@ -3811,7 +3959,15 @@ pgclone_database(PG_FUNCTION_ARGS)
                         CStringGetTextDatum(schema_names[i]),
                         BoolGetDatum(include_data),
                         CStringGetTextDatum(opts_json.data));
-            (void) result;
+            rtxt = TextDatumGetCString(result);
+            if (strncmp(rtxt, "COMPLETED WITH ERRORS", 21) == 0)
+            {
+                db_errors++;
+                appendStringInfo(&db_err_list, "%s%s: %s",
+                                 db_err_list.len > 0 ? "; " : "",
+                                 schema_names[i], rtxt + 23);
+            }
+            pfree(rtxt);
         }
 
         pfree(opts_json.data);
@@ -3827,6 +3983,11 @@ pgclone_database(PG_FUNCTION_ARGS)
 
     pgclone_setup_source_txn_done(source_conn, &opts);
     PQfinish(source_conn);
+
+    if (db_errors > 0)
+        PG_RETURN_TEXT_P(cstring_to_text(
+            psprintf("COMPLETED WITH ERRORS: %d schema(s) had failures: %s",
+                     db_errors, db_err_list.data)));
 
     PG_RETURN_TEXT_P(cstring_to_text_with_len("OK", 2));
 }
