@@ -250,7 +250,8 @@ pgclone uses Unix domain sockets for local loopback connections, so the default 
 - [x] v4.6.0: Clone a table from Microsoft SQL Server into PostgreSQL — `pgclone.table_from_sqlserver()` with SQL Server→PG type mapping, `dry_run`, `NVARCHAR(MAX)`/`VARBINARY`/`UNIQUEIDENTIFIER` support and an optional FreeTDS build (`WITH_SQLSERVER=1`); CI job against SQL Server 2022
 - [x] v4.7.0: Clone a table from MySQL / MariaDB into PostgreSQL — `pgclone.table_from_mysql()` with MySQL→PG type mapping, `dry_run`, unsigned/`BIT`/`JSON`/`ENUM`/`SET`/`BLOB` support, zero-date handling and an optional client build (`WITH_MYSQL=1`); CI job against MySQL 8.0
 - [x] v4.8.0: `"conflict": "ignore"`, partitioned-table cloning (`PARTITION BY` / `PARTITION OF`), generated columns, `table_async` sequences, PG17+ worker SIGTERM fix — see [CHANGELOG](CHANGELOG.md)
-- [ ] v4.9.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
+- [x] v4.9.0: `"on_error": "continue"` for `pgclone.schema()` / `pgclone.database()` — see [CHANGELOG](CHANGELOG.md)
+- [ ] v4.10.0: FK-aware referential sampling — sample N rows and follow foreign keys to keep child rows consistent (`pgclone.table_sample`)
 
 ## License
 
