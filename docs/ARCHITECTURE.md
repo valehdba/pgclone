@@ -75,9 +75,9 @@ pgclone/
 │   ├── test_sqlserver.sh  # SQL Server integration test (needs SQL Server; run by CI job `sqlserver`)
 │   ├── test_mysql.sh      # MySQL integration test (needs MySQL; run by CI job `mysql`)
 │   └── test_database_create.sh
-├── .github/workflows/ci.yml  # GitHub Actions CI (PG 14–18 matrix)
+├── .github/workflows/ci.yml  # GitHub Actions CI (PG 14–19 matrix)
 ├── Dockerfile             # Multi-version build container
-├── docker-compose.yml     # Source + test containers (PG 14–18)
+├── docker-compose.yml     # Source + test containers (PG 14–19)
 ├── Makefile               # PGXS-based build
 ├── pgclone.control        # Extension metadata
 ├── META.json              # PGXN metadata
@@ -261,7 +261,7 @@ typedef struct PgcloneSharedState {
 
 ## PostgreSQL Version Compatibility
 
-pgclone uses C preprocessor guards to maintain compatibility across PG 14–18:
+pgclone uses C preprocessor guards to maintain compatibility across PG 14–19:
 
 ### Shared Memory Request (PG 15+)
 

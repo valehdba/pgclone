@@ -32,7 +32,7 @@ sudo make install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
 
 ### Run Tests
 
-pgclone uses Docker Compose to test across PostgreSQL 14–18:
+pgclone uses Docker Compose to test across PostgreSQL 14–19:
 
 ```bash
 # Run tests on PostgreSQL 17

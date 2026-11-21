@@ -4,13 +4,13 @@
 #
 # Usage:
 #   ./test/run_all.sh              # Test on all PG versions
-#   ./test/run_all.sh 18           # Test on PG 18 only
+#   ./test/run_all.sh 19           # Test on PG 19 only
 #   ./test/run_all.sh 16 17        # Test on PG 16 and 17
-#   ./test/run_all.sh oracle       # Oracle -> PostgreSQL tests (PG 14, 17, 18)
+#   ./test/run_all.sh oracle       # Oracle -> PostgreSQL tests (PG 14, 17, 18, 19)
 #   ./test/run_all.sh oracle 17    # Oracle tests on PG 17 only
-#   ./test/run_all.sh sqlserver    # SQL Server -> PostgreSQL tests (PG 14, 17, 18)
+#   ./test/run_all.sh sqlserver    # SQL Server -> PostgreSQL tests (PG 14, 17, 18, 19)
 #   ./test/run_all.sh sqlserver 17 # SQL Server tests on PG 17 only
-#   ./test/run_all.sh mysql        # MySQL -> PostgreSQL tests (PG 14, 17, 18)
+#   ./test/run_all.sh mysql        # MySQL -> PostgreSQL tests (PG 14, 17, 18, 19)
 #   ./test/run_all.sh mysql 17     # MySQL tests on PG 17 only
 # ============================================================
 
@@ -23,23 +23,23 @@ MODE="pg"
 if [ "${1:-}" = "oracle" ]; then
     MODE="oracle"
     shift
-    DEFAULT_VERSIONS="14 17 18"
+    DEFAULT_VERSIONS="14 17 18 19"
     DB_SERVICE="oracle-db"
     SERVICE_PREFIX="test-oracle-pg"
 elif [ "${1:-}" = "sqlserver" ]; then
     MODE="sqlserver"
     shift
-    DEFAULT_VERSIONS="14 17 18"
+    DEFAULT_VERSIONS="14 17 18 19"
     DB_SERVICE="sqlserver-db"
     SERVICE_PREFIX="test-sqlserver-pg"
 elif [ "${1:-}" = "mysql" ]; then
     MODE="mysql"
     shift
-    DEFAULT_VERSIONS="14 17 18"
+    DEFAULT_VERSIONS="14 17 18 19"
     DB_SERVICE="mysql-db"
     SERVICE_PREFIX="test-mysql-pg"
 else
-    DEFAULT_VERSIONS="14 15 16 17 18"
+    DEFAULT_VERSIONS="14 15 16 17 18 19"
     DB_SERVICE="source-db"
     SERVICE_PREFIX="test-pg"
 fi

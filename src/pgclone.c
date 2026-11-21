@@ -20,6 +20,9 @@
 #include "utils/syscache.h"
 #include "utils/guc.h"
 #include "commands/dbcommands.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/lsyscache.h"      /* get_database_name() moved here in PG 19 */
+#endif
 #include "utils/jsonb.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"

@@ -52,7 +52,7 @@ Walk through what changed and why. For C changes, briefly note:
 - [ ] `plan()` count exactly matches the actual number of assertions
 - [ ] Shell tests added/updated in `test/test_async.sh` or `test/test_database_create.sh` (if applicable)
 - [ ] `test/fixtures/seed.sql` updated if new test objects are needed
-- [ ] CI is green on **all** of PG 14, 15, 16, 17, 18
+- [ ] CI is green on **all** of PG 14, 15, 16, 17, 18, 19
 
 ```sh
 # Output of pre_deploy_checks.sh (paste the summary line)

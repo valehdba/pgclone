@@ -407,8 +407,8 @@ INSERT INTO test_schema.customer_accounts (customer_name, bank_account_number, i
 
 -- ============================================================
 -- Generated columns (pgTAP test group 32). STORED is valid on
--- every supported server. VIRTUAL is PostgreSQL 18 only and is
--- not seeded here, because CI loads this file on PG 14–18.
+-- every supported server. VIRTUAL is PostgreSQL 18+ only and is
+-- not seeded here, because CI loads this file on PG 14–19.
 -- ============================================================
 CREATE TABLE test_schema.gen_test (
     id    int PRIMARY KEY,

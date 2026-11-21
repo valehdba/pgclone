@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [14, 15, 16, 17, 18]
+        pg_version: [14, 15, 16, 17, 18, 19]
 
     services:
       source-db:
@@ -302,7 +302,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [14, 18]
+        pg_version: [14, 18, 19]
 
     env:
       IC_VERSION: "23.5.0.24.07"
@@ -405,7 +405,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [14, 18]
+        pg_version: [14, 18, 19]
 
     services:
       sqlserver:
@@ -496,7 +496,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [14, 18]
+        pg_version: [14, 18, 19]
 
     steps:
       - name: Checkout
