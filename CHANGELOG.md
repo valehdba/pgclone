@@ -2,10 +2,15 @@
 
 All notable changes to pgclone are documented in this file.
 
-## [Unreleased]
+## [4.10.0]
+
+This release has no SQL-level changes; after `make install`, **restart PostgreSQL**, then `ALTER EXTENSION pgclone UPDATE`.
 
 ### Added
-- PostgreSQL 19 support: CI matrix (main, Oracle, SQL Server and MySQL jobs), `docker-compose.yml` (`test-pg19`), `test/run_all.sh` defaults, and docs now cover PostgreSQL 14-19. No C or SQL changes were needed (`src/` uses only version guards for PG 15 and PG 17).
+- **PostgreSQL 19 support.** CI matrix (main, Oracle, SQL Server and MySQL jobs), `docker-compose.yml` (`test-pg19`), `test/run_all.sh` defaults and docs now cover PostgreSQL 14-19.
+
+### Fixed
+- **Build on PostgreSQL 19.** `get_database_name()` moved from `commands/dbcommands.h` to `utils/lsyscache.h`; `pgclone.c`, `pgclone_diff.c` and `pgclone_preflight.c` now include the new header under `#if PG_VERSION_NUM >= 190000`. PG 14-18 are unchanged.
 
 ## [4.9.0]
 
