@@ -1,6 +1,6 @@
 # PgClone Testing
 
-PgClone has a comprehensive test suite that runs across PostgreSQL versions 14–18 using pgTAP, Docker Compose, and GitHub Actions CI.
+PgClone has a comprehensive test suite that runs across PostgreSQL versions 14–19 using pgTAP, Docker Compose, and GitHub Actions CI.
 
 ## Test Suite Overview
 
@@ -93,12 +93,12 @@ Located in `test/test_oracle.sh`, seeded by `test/fixtures/oracle_seed.sql`. It 
 - a 20,000-row table (several COPY flushes)
 - `include_data => false`, an existing target (never overwritten), a missing Oracle table and a wrong password (no leftover table)
 
-The type-mapping function `pgclone.oracle_type_to_pg()` and the "built without Oracle" error path are additionally covered by pgTAP group 29 in `test/pgclone_test.sql`, which runs in the normal PG 14–18 matrix.
+The type-mapping function `pgclone.oracle_type_to_pg()` and the "built without Oracle" error path are additionally covered by pgTAP group 29 in `test/pgclone_test.sql`, which runs in the normal PG 14–19 matrix.
 
 #### Running it locally with Docker Compose
 
 ```bash
-./test/run_all.sh oracle          # PG 14, 17 and 18 against Oracle Free
+./test/run_all.sh oracle          # PG 14, 17, 18 and 19 against Oracle Free
 ./test/run_all.sh oracle 17       # a single PostgreSQL version
 
 # or by hand
@@ -133,12 +133,12 @@ Located in `test/test_sqlserver.sh`, seeded by `test/fixtures/sqlserver_seed.sql
 - a 20,000-row table (several COPY flushes)
 - `include_data => false`, an existing target (never overwritten), a missing table and a wrong password (no leftover table)
 
-The type-mapping function `pgclone.sqlserver_type_to_pg()` and the "built without SQL Server" error path are additionally covered by pgTAP group 30 in `test/pgclone_test.sql`, which runs in the normal PG 14–18 matrix.
+The type-mapping function `pgclone.sqlserver_type_to_pg()` and the "built without SQL Server" error path are additionally covered by pgTAP group 30 in `test/pgclone_test.sql`, which runs in the normal PG 14–19 matrix.
 
 #### Running it locally with Docker Compose
 
 ```bash
-./test/run_all.sh sqlserver          # PG 14, 17 and 18 against SQL Server 2022
+./test/run_all.sh sqlserver          # PG 14, 17, 18 and 19 against SQL Server 2022
 ./test/run_all.sh sqlserver 17       # a single PostgreSQL version
 
 # or by hand
@@ -171,12 +171,12 @@ Located in `test/test_mysql.sh`, seeded by `test/fixtures/mysql_seed.sql`. It ne
 - a 20,000-row table (several COPY flushes)
 - `include_data => false`, an existing target (never overwritten), a missing table and a wrong password (no leftover table)
 
-The type-mapping function `pgclone.mysql_type_to_pg()` and the "built without MySQL" error path are additionally covered by pgTAP group 31 in `test/pgclone_test.sql`, which runs in the normal PG 14–18 matrix.
+The type-mapping function `pgclone.mysql_type_to_pg()` and the "built without MySQL" error path are additionally covered by pgTAP group 31 in `test/pgclone_test.sql`, which runs in the normal PG 14–19 matrix.
 
 #### Running it locally with Docker Compose
 
 ```bash
-./test/run_all.sh mysql          # PG 14, 17 and 18 against MySQL 8.0
+./test/run_all.sh mysql          # PG 14, 17, 18 and 19 against MySQL 8.0
 ./test/run_all.sh mysql 17       # a single PostgreSQL version
 
 # or by hand
@@ -271,19 +271,19 @@ The CI pipeline (`.github/workflows/ci.yml`) runs on every push to `main`, `fix/
 
 ### Matrix Strategy
 
-Tests run in parallel across PostgreSQL 14, 15, 16, 17, and 18 with `fail-fast: false` — so a failure on one version doesn't cancel the others.
+Tests run in parallel across PostgreSQL 14, 15, 16, 17, 18, and 19 with `fail-fast: false` — so a failure on one version doesn't cancel the others.
 
 ### Oracle job
 
-A second job, `oracle`, runs on PostgreSQL 14 and 18. It starts the `gvenzl/oracle-free` service container, installs Oracle Instant Client (Basic Light + SDK + SQL*Plus), builds pgclone with `WITH_ORACLE=1`, seeds Oracle, starts a target PostgreSQL with `libclntsh` on its library path, and runs `test/test_oracle.sh`.
+A second job, `oracle`, runs on PostgreSQL 14, 18 and 19. It starts the `gvenzl/oracle-free` service container, installs Oracle Instant Client (Basic Light + SDK + SQL*Plus), builds pgclone with `WITH_ORACLE=1`, seeds Oracle, starts a target PostgreSQL with `libclntsh` on its library path, and runs `test/test_oracle.sh`.
 
 ### SQL Server job
 
-A third job, `sqlserver`, runs on PostgreSQL 14 and 18. It starts the `mcr.microsoft.com/mssql/server:2022-latest` service container, installs FreeTDS (`freetds-dev`, `freetds-bin`), builds pgclone with `WITH_SQLSERVER=1`, seeds SQL Server with `tsql`, starts a target PostgreSQL, and runs `test/test_sqlserver.sh`.
+A third job, `sqlserver`, runs on PostgreSQL 14, 18 and 19. It starts the `mcr.microsoft.com/mssql/server:2022-latest` service container, installs FreeTDS (`freetds-dev`, `freetds-bin`), builds pgclone with `WITH_SQLSERVER=1`, seeds SQL Server with `tsql`, starts a target PostgreSQL, and runs `test/test_sqlserver.sh`.
 
 ### MySQL job
 
-A fourth job, `mysql`, runs on PostgreSQL 14 and 18. It starts MySQL 8.0 with `docker run` (so it can pass `--default-authentication-plugin=mysql_native_password`), installs `libmariadb-dev` and the MariaDB client, builds pgclone with `WITH_MYSQL=1`, seeds MySQL, starts a target PostgreSQL, and runs `test/test_mysql.sh`.
+A fourth job, `mysql`, runs on PostgreSQL 14, 18 and 19. It starts MySQL 8.0 with `docker run` (so it can pass `--default-authentication-plugin=mysql_native_password`), installs `libmariadb-dev` and the MariaDB client, builds pgclone with `WITH_MYSQL=1`, seeds MySQL, starts a target PostgreSQL, and runs `test/test_mysql.sh`.
 
 ### CI Steps
 

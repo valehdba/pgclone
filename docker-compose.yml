@@ -83,6 +83,20 @@ services:
       source-db:
         condition: service_healthy
 
+  # Test on PostgreSQL 19
+  test-pg19:
+    build:
+      context: .
+      args:
+        PG_VERSION: "19"
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: target_db
+      SOURCE_CONNINFO: "host=source-db dbname=source_db user=postgres password=testpass"
+    depends_on:
+      source-db:
+        condition: service_healthy
+
   # ---- Oracle -> PostgreSQL tests (pgclone.table_from_oracle) ----
   # Oracle Free is published for x86-64 only; on Apple Silicon it runs under
   # emulation (slow first start — enable Rosetta in Docker Desktop).

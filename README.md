@@ -22,7 +22,7 @@ A PostgreSQL extension that clones databases, schemas, tables, and functions bet
 - **Selective cloning** - filter columns and rows with `columns` and `WHERE` options
 - **Full DDL support** - indexes, constraints (PK, UNIQUE, CHECK, FK, EXCLUDE), triggers, views, materialized views, sequences, generated columns
 - **Conflict resolution** - error, skip, replace, or rename strategies
-- **Cross-version** - tested on PostgreSQL 14, 15, 16, 17, and 18
+- **Cross-version** - tested on PostgreSQL 14, 15, 16, 17, 18, and 19
 
 ## Quick Start
 

@@ -2,6 +2,11 @@
 
 All notable changes to pgclone are documented in this file.
 
+## [Unreleased]
+
+### Added
+- PostgreSQL 19 support: CI matrix (main, Oracle, SQL Server and MySQL jobs), `docker-compose.yml` (`test-pg19`), `test/run_all.sh` defaults, and docs now cover PostgreSQL 14-19. No C or SQL changes were needed (`src/` uses only version guards for PG 15 and PG 17).
+
 ## [4.9.0]
 
 This release has no SQL-level changes; after `make install`, **restart PostgreSQL**, then `ALTER EXTENSION pgclone UPDATE`.
