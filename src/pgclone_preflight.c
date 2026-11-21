@@ -26,6 +26,9 @@
 #include "miscadmin.h"
 #include "utils/guc.h"
 #include "commands/dbcommands.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/lsyscache.h"      /* get_database_name() moved here in PG 19 */
+#endif
 
 /* ===============================================================
  * Connection / query helpers (self-contained — does not share
