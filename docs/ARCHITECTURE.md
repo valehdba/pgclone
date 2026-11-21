@@ -305,6 +305,19 @@ PostgreSQL 17 removed the `die` signal handler, replacing it with `SignalHandler
 #endif
 ```
 
+### `get_database_name()` Header (PG 19+)
+
+PostgreSQL 19 moved the declaration of `get_database_name()` from `commands/dbcommands.h` to `utils/lsyscache.h`. Without the new include the call is an implicit declaration returning `int`, and the build fails with `-Wint-conversion` errors. `pgclone.c`, `pgclone_diff.c` and `pgclone_preflight.c` therefore add:
+
+```c
+#include "commands/dbcommands.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/lsyscache.h"      /* get_database_name() moved here in PG 19 */
+#endif
+```
+
+Any new file that calls `get_database_name()` needs the same guard.
+
 ### Other Version-Specific Guards
 
 - `d.adsrc` was removed from `pg_attrdef` in PG 12+ — pgclone uses `pg_get_expr()` instead

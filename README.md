@@ -77,7 +77,7 @@ SELECT pgclone.table_from_mysql(
 
 ## Requirements
 
-- PostgreSQL 14 or later
+- PostgreSQL 14 or later (tested on 14–19)
 - PostgreSQL development headers (`postgresql-server-dev-XX`)
 - `libpq` development library (`libpq-dev`)
 - GCC or compatible C compiler
@@ -88,6 +88,8 @@ SELECT pgclone.table_from_mysql(
 ## Installation
 
 ### Debian / Ubuntu
+
+Replace `18` with your PostgreSQL major version (14–19) in the package and path names below.
 
 ```bash
 sudo apt-get install postgresql-server-dev-18 libpq-dev build-essential
